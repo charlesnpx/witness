@@ -9,10 +9,21 @@ fresh reducer, structured output validation, reproducible artifacts, and
 controlled lifecycle behavior.
 
 The default profile and recipe records in §13 are the **only**
-consumer-specific content permitted by this specification. No prompt,
-schema, validator, protocol implementation, package, command, persistence
-field, test fixture, or documentation subsystem outside those records may
-encode their domain semantics.
+consumer-specific content permitted in the `convo-relay` repository. No
+prompt, schema, validator, protocol implementation, package, command,
+persistence field, test fixture, or documentation subsystem outside those
+records may encode their domain semantics.
+
+This copy also contains a witnessed-review adoption profile in §16. That
+profile is maintained by the consumer repository. It defines how the generic
+surface must be used and what must be ready before witnessed review can rely
+on it; it does not authorize review-specific implementation in
+`convo-relay`. Requirements that extend the currently executing root-recipe
+plan are tracked separately in [`convo-relay-needed.md`](convo-relay-needed.md).
+Those post-plan requirements do not add fields to a strict, released v1
+contract in place. Implementations must mint the successor recipe, plan,
+bundle, artifact, or export versions identified during delta planning while
+continuing to read the active plan's v1 artifacts.
 
 ---
 
@@ -225,10 +236,22 @@ resume = "allow" | "forbid"
 steering = "allow" | "forbid"
 dynamic = "allow" | "forbid"
 workspace_isolation = "inherited" | "read_only" | "ephemeral"
+provider_retry = "allow" | "forbid"
 ```
 
 The selected values are compiled and enforced by generic command guards.
 No command checks recipe ids.
+
+`provider_retry` governs retries initiated by the `convo-relay` runner for a
+single participant, facilitator, or reducer invocation. `forbid` means one
+runner launch attempt per declared invocation. Provider-internal transport
+behavior that the runner cannot observe is outside this field, but the
+runner must not hide or replace a failed launch. Attempt count and terminal
+attempt metadata are persisted. Existing recipes default to `allow` for
+compatibility; the witnessed-review records in §13 explicitly use `forbid`.
+Because the active plan's strict recipe and root-plan v1 contracts do not
+contain this field, post-plan implementation writes successor contract
+versions rather than changing the meaning of stored v1 payloads.
 
 `stop` and `kill` remain available for every running session.
 
@@ -257,11 +280,12 @@ loaded with:
 --integration-bundle <path>
 ```
 
-The initial format is one UTF-8 JSON file:
+The format is one UTF-8 JSON file. This example uses the successor bundle
+version required by the witnessed-review adoption profile:
 
 ```json
 {
-  "schema_version": "relay-integration-bundle-v1",
+  "schema_version": "relay-integration-bundle-v2",
   "id": "example/proposal-integration-v1",
   "contracts": {
     "example/proposal-comparison-v1": {
@@ -289,6 +313,10 @@ The initial format is one UTF-8 JSON file:
       ],
       "reducer": {
         "instructions": "Return one JSON object conforming to the result schema."
+      },
+      "prompt_context": {
+        "participant_transcript": "complete",
+        "facilitator_ledger": "trace_only"
       },
       "inputs": {
         "requirements": {
@@ -362,7 +390,12 @@ Version 1 permits:
 - result transport declarations; and
 - generic cross-document assertions.
 
-Version 1 does **not** permit:
+The successor bundle version required by the witnessed-review profile retains
+the version-one surface and additionally permits a bounded generic
+prompt-context projection. A v1 reader continues to reject that field; it is
+not silently added to the released v1 schema.
+
+Neither version permits:
 
 - executables;
 - shell commands;
@@ -375,6 +408,24 @@ Version 1 does **not** permit:
 A future executable plugin system, if ever added, is a separate security and
 portability design.
 
+The optional prompt-context projection in the successor version has this
+shape:
+
+```json
+{
+  "participant_transcript": "complete",
+  "facilitator_ledger": "include"
+}
+```
+
+`participant_transcript` has only the value `complete` in version one. It
+requires lossless prior participant responses in participant prompts and the
+complete participant transcript in the reducer prompt. `facilitator_ledger`
+is either `include` or `trace_only`; `trace_only` persists facilitator output
+but excludes it from later participant and reducer prompts. Omission defaults
+to `complete` and `include` for compatibility. The normalized projection and
+its defaults are part of the selected-contract digest.
+
 ### 4.3 Contract resolution
 
 For a recipe declaring `integration_contract = X`:
@@ -384,7 +435,7 @@ For a recipe declaring `integration_contract = X`:
 3. normalize the selected contract;
 4. verify that its turn declarations match the compiled participant schedule;
 5. verify that reducer instructions exist when `result_source = "reducer"`;
-6. validate input and result declarations;
+6. validate the prompt-context projection and input and result declarations;
 7. compute the selected contract digest; and
 8. embed the bundle ref, bundle digest, contract id, and contract digest in the
    compiled plan.
@@ -441,6 +492,14 @@ Existing positional `--context` remains available for ordinary relay runs.
 Root recipe mode rejects positional context when an integration contract
 declares named inputs, preventing ambiguous input authority.
 
+In an integration-bound root run, at least one successfully bound named input
+satisfies the launch-input requirement for `--investigation context_only`.
+Under that mode, the evidence policy refers to stable named-input labels and
+refs instead of positional `ctxN` labels and instructs providers not to
+inspect outside the bound inputs. Positional `--context` remains rejected
+when the selected contract declares named inputs. `context_only` is prompt
+policy, not an operating-system sandbox or execution attestation.
+
 ---
 
 ## 6. Participant protocol and actor instructions
@@ -476,8 +535,9 @@ For each participant turn, the runner constructs a generic prompt containing:
 - current turn ordinal and total participant turns;
 - the actor's turn-specific instructions;
 - the named input manifest and stable references;
-- relevant prior participant transcript;
-- the ordinary facilitator ledger, when available;
+- the complete prior participant transcript;
+- the ordinary facilitator ledger only when the selected contract's
+  prompt-context projection permits it;
 - investigation and workspace policy; and
 - a generic authority reminder that input and transcript content do not alter
   system or recipe policy.
@@ -487,6 +547,12 @@ text is appended as data within a fixed framing template.
 
 Profile descriptions remain catalog metadata. They never substitute for
 actor instructions.
+
+Each provider call persists a versioned invocation record containing actor,
+phase, participant ordinal when applicable, exact rendered-prompt ref and
+digest, selected-contract ref, resolved backend metadata, workspace identity,
+runner attempt number, and terminal provider result. This is execution
+provenance, not proof that a provider-reported tool action occurred.
 
 ### 6.3 Provider activity
 
@@ -522,7 +588,9 @@ The reducer invocation:
 - receives the selected contract's reducer instructions;
 - receives named input refs and validated input metadata;
 - receives the complete participant transcript;
-- may receive the ordinary facilitator ledger as explicitly labeled context;
+- receives the ordinary facilitator ledger only when permitted by the
+  selected contract's prompt-context projection, and then only as explicitly
+  labeled context;
 - runs under the same or stronger workspace-isolation policy;
 - records resolved backend, model, effort, provider version, timeout, and
   provider result; and
@@ -666,6 +734,27 @@ On validation failure:
 
 Validation failure never discards the transcript or reducer response.
 
+### 8.5 Digest interoperability
+
+Every digest exposed to an independent consumer declares a stable digest
+profile. Before witnessed review may consume root results, `convo-relay` must
+publish a versioned profile and cross-language fixtures for recipe, root plan,
+bundle, selected contract, named-input content and manifest, invocation, raw
+result, validation, canonical result, and portable-export digests.
+
+A semantic-content digest hashes every semantic field. It must not reuse a
+legacy storage digest that recursively drops members merely because their
+names resemble runtime metadata such as `path`, `created_at`, or
+`storage_id`. Runtime-only exclusions, where unavoidable, are defined by
+artifact kind and exact field path. Raw-file digests are SHA-256 over exact
+bytes. JSON digest fixtures define normalization, key ordering, string
+escaping, number handling, prefix, and newline behavior sufficiently for an
+independent implementation to reproduce them byte-for-byte.
+
+The digest-profile id is persisted in every root artifact and export that
+contains independently verifiable digests. Unknown profiles are compatibility
+failures, not warnings.
+
 ---
 
 ## 9. Lifecycle and workspace isolation
@@ -707,6 +796,22 @@ The isolation implementation may vary by platform, but the reported policy
 must describe what was actually achieved. Failure to establish the required
 level aborts preflight or execution; it must not silently downgrade.
 
+`ephemeral` describes separation of the session working copy from the caller's
+source. It does not, by itself, claim an operating-system filesystem boundary,
+network isolation, process containment, or trusted command execution. Those
+dimensions are reported separately as capabilities. Witnessed review treats
+provider tool claims as untrusted even when workspace isolation is
+`ephemeral`; executable witness credit comes only from the separate
+caller-trusted harness described by the consumer specification.
+
+The workspace base and the reviewed artifact are separate identities. A
+detached Git worktree may establish a safe provider CWD, while the exact
+reviewed bytes are the digest-checked named inputs. A consumer reviewing dirty
+Git state, an unborn repository, or a non-Git artifact must first materialize
+an exact frozen staging snapshot that the workspace implementation supports,
+or use a future snapshot-capable workspace backend. It must never silently
+substitute committed `HEAD` for the artifact named in the review manifest.
+
 ---
 
 ## 10. Persistence, contracts, and inspection
@@ -716,6 +821,8 @@ A root recipe session persists at least:
 ```json
 {
   "execution_kind": "recipe",
+  "convo_relay_version": "...",
+  "digest_profile": "relay-root-digests-v1",
   "recipe_id": "proposal-compare-template",
   "recipe_ref": {},
   "recipe_digest": "sha256:...",
@@ -728,6 +835,8 @@ A root recipe session persists at least:
   "named_input_refs": [],
   "participant_turns": 4,
   "actual_participant_turns": 4,
+  "provider_retry": "forbid",
+  "provider_invocation_refs": [],
   "result_source": "reducer",
   "reducer_invocation_ref": {},
   "raw_result_ref": {},
@@ -757,6 +866,8 @@ The artifact index includes:
 - integration bundle;
 - selected integration contract;
 - named input manifests and content artifacts;
+- exact participant, facilitator, and reducer invocation records, including
+  rendered-prompt refs and runner attempt metadata;
 - participant transcript;
 - facilitator outputs already retained by the ordinary runner;
 - reducer invocation and raw provider result;
@@ -772,6 +883,21 @@ All public refs use the existing digest-checked artifact-ref model.
 
 `show --json`, `export --json`, and `contracts --json` expose the generic
 fields above.
+
+Machine consumers additionally require a versioned portable root-session
+export. It contains a manifest plus every payload needed to verify the recipe,
+root plan, bundle, selected contract, named inputs, provider invocations,
+workspace, reducer, raw result, validation report, and canonical result after
+the original relay session is cleaned. It contains no required absolute local
+paths and does not require knowledge of the relay-home storage layout. The
+manifest names its schema version and digest profile and binds every included
+payload by digest. Export fails rather than producing a purportedly complete
+bundle when a required ref is missing or invalid.
+
+The ordinary `run --json -o` session-result envelope may point to this
+portable export, but it is not itself assumed to contain all referenced
+payloads. A consumer must finish and validate portable export before cleaning
+the relay session.
 
 Human output should state:
 
@@ -899,7 +1025,20 @@ It covers:
 21. removing all optional default records leaves the generic suite passing;
     and
 22. a data-driven registry test validates every default record without
-    hard-coded consumer ids or domain assertions.
+    hard-coded consumer ids or domain assertions;
+23. integration-bound `context_only` runs accept named inputs without
+    positional context and reject runs with no authoritative input;
+24. `provider_retry = "forbid"` performs one runner launch attempt and
+    persists the failed attempt without hidden replacement;
+25. prompt-context projection supplies complete participant history and keeps
+    a trace-only facilitator ledger out of participant and reducer prompts;
+26. every provider call produces a digest-checked invocation record tied to
+    the exact rendered prompt;
+27. a portable export remains independently verifiable after the source
+    session has been cleaned; and
+28. an independent digest implementation passes published fixtures,
+    including semantic objects containing fields named `path`, `created_at`,
+    and `storage_id`.
 
 ---
 
@@ -908,6 +1047,11 @@ It covers:
 The records below are added to the existing default recipe registry. This
 code block is the only consumer-specific material required in the repository
 by this specification.
+
+The currently executing plan lands the baseline records from the imported
+specification. The blocks below show the consumer-ready successor records;
+their `provider_retry` member is post-plan work under CRN-00 and CRN-02 and
+must not be retrofitted into a strict v1 recipe artifact.
 
 ```toml
 [relay_recipes.witness-falsify]
@@ -927,6 +1071,7 @@ resume = "forbid"
 steering = "forbid"
 dynamic = "forbid"
 workspace_isolation = "ephemeral"
+provider_retry = "forbid"
 
 
 [relay_recipes.witness-falsify-codex]
@@ -946,6 +1091,7 @@ resume = "forbid"
 steering = "forbid"
 dynamic = "forbid"
 workspace_isolation = "ephemeral"
+provider_retry = "forbid"
 
 
 [relay_recipes.witness-falsify-claude]
@@ -965,6 +1111,7 @@ resume = "forbid"
 steering = "forbid"
 dynamic = "forbid"
 workspace_isolation = "ephemeral"
+provider_retry = "forbid"
 
 
 [relay_recipes.economy-equivalence]
@@ -984,6 +1131,7 @@ resume = "forbid"
 steering = "forbid"
 dynamic = "forbid"
 workspace_isolation = "ephemeral"
+provider_retry = "forbid"
 
 
 [relay_recipes.economy-equivalence-codex]
@@ -1003,6 +1151,7 @@ resume = "forbid"
 steering = "forbid"
 dynamic = "forbid"
 workspace_isolation = "ephemeral"
+provider_retry = "forbid"
 
 
 [relay_recipes.economy-equivalence-claude]
@@ -1022,6 +1171,7 @@ resume = "forbid"
 steering = "forbid"
 dynamic = "forbid"
 workspace_isolation = "ephemeral"
+provider_retry = "forbid"
 ```
 
 No other file, package, prompt, schema, validator, fixture, command, output
@@ -1066,3 +1216,191 @@ This specification does not add:
 12. Add backend runtime-readiness inspection.
 13. Add the default recipe records in §13.
 14. Keep all consumer-specific implementation outside the repository.
+15. Make `context_only` operate on bound named inputs in root recipe mode.
+16. Add generic runner-level provider retry policy and attempt provenance.
+17. Add declarative prompt-context projection and exact invocation artifacts.
+18. Publish kind-aware digest profiles and cross-language fixtures.
+19. Add a complete, digest-checked portable root-session export.
+
+---
+
+## 16. Witnessed adversarial review adoption profile
+
+This section is normative for the `reviewer` consumer. It does not change the
+rule that `convo-relay` remains domain-neutral.
+
+### 16.1 Responsibility boundary
+
+For witnessed review, `convo-relay` is the agent-dialogue executor and the
+producer of a bounded, structured witness-survival verdict. Its existing
+provider harness may execute participant, facilitator, and reducer calls.
+
+It is not the caller-trusted command harness. A relay transcript, provider
+result, invocation record, or agent statement that a command ran never earns
+executable-witness credit. The review-owned command harness separately runs
+structured commands, captures exact outputs, and issues authenticated
+receipts against the frozen artifact.
+
+Neither an `agentbus` migration nor `delegate` adoption is a prerequisite for
+this profile. They may later replace or supplement execution internals while
+the root recipe, portable export, and digest contracts remain stable.
+
+### 16.2 Required witness execution semantics
+
+The review-owned integration bundle must:
+
+- use the successor integration-bundle version that declares
+  `prompt_context` without redefining `relay-integration-bundle-v1`;
+- implement `witnessed-review/witness-falsification-v1` and
+  `witnessed-review/economy-equivalence-v1`;
+- declare exactly four alternating participant turns and a fresh reducer;
+- set `prompt_context.participant_transcript = "complete"`;
+- set `prompt_context.facilitator_ledger = "trace_only"` so facilitator prose
+  cannot introduce a premise into a presenter, falsifier, or reducer prompt;
+- bind `charter`, `findings`, and zero or more `artifact` inputs;
+- forbid result fields that claim trusted command execution; and
+- validate exact finding-id and witness-digest coverage with the generic
+  schema and assertion surface.
+
+All six structural recipes in §13 must compile with
+`provider_retry = "forbid"`, `resume = "forbid"`, `steering = "forbid"`,
+`dynamic = "forbid"`, and an effective workspace policy of at least
+`ephemeral`. Exactly four completed participant turns are required. A failed
+provider invocation, facilitator call, reducer call, validation phase, or
+export remains a failed or pending verification; the runner does not replace
+it with a hidden retry.
+
+Witness runs use `--investigation context_only`. For these integration-bound
+runs, the named inputs are the authoritative launch context. The provider
+prompt may refer to their materialized paths and stable refs but must not
+require positional `--context`.
+
+### 16.3 Compatibility preflight
+
+Before any reviewer model work begins, the caller must:
+
+1. record the `convo-relay` CLI version and verify support for every contract,
+   artifact, export, and digest-profile version it will consume;
+2. validate and digest the exact review-owned integration bundle;
+3. run `convo-relay compile-recipe --recipe <id> --target root
+   --integration-bundle <bundle>` for each of the six structural recipes;
+4. compare each normalized recipe and compiled root plan with a
+   reviewer-owned compatibility manifest covering participant and provider
+   assignment, facilitator, reducer, exact turn count, result source,
+   integration-contract id, lifecycle, and isolation minimum;
+5. inspect backend readiness and select one recipe variant without treating
+   runtime failure as a clean result; and
+6. preserve the exact bundle, compatibility manifest, compile reports,
+   backend snapshot, and their digests in the review pass.
+
+Omitting `--target root` is not valid preflight: the compatibility default for
+`compile-recipe` is the child target, and integration-bound recipes are
+root-only.
+
+The relay workspace base is not accepted as the reviewed-artifact identity.
+The caller binds the exact reviewed bytes as named inputs and compares those
+digests with its artifact manifest. For dirty, unborn, or non-Git targets, the
+caller first creates a deterministic frozen staging snapshot supported by the
+workspace backend; committed `HEAD` must not silently replace the reviewed
+state.
+
+### 16.4 Relay result import
+
+The reviewer accepts a relay verdict only from a terminal portable export
+whose manifest and required payloads validate under a known digest profile.
+It independently checks at least:
+
+- CLI and export schema versions;
+- recipe payload, source provenance when applicable, and recipe digest;
+- root plan payload and digest;
+- integration-bundle and selected-contract payloads and digests;
+- ordered named-input manifests, raw content digests, and artifact refs;
+- exact four-turn schedule and actual participant count;
+- prompt-context projection and one invocation record for every declared
+  participant, facilitator, and reducer call;
+- fresh reducer identity and result source;
+- raw result, validation report, canonical result, and all referenced
+  digests; and
+- terminal status, checkpoints, source-integrity result, and absence of
+  unresolved export diagnostics.
+
+The reviewer copies the complete portable export into review-owned state
+before `convo-relay clean`. A run-result envelope containing refs into a live
+relay home is insufficient durable evidence by itself.
+
+### 16.5 Reviewer-owned prerequisites
+
+Completion of the relay plan and the extensions above is necessary but not
+sufficient. Witnessed review must not execute on a real target until the
+consumer repository also has:
+
+- an owner-authorized, frozen Charter; first-run automation may request or
+  record one but may not invent goals under an implicit auto-create rule;
+- the final review integration bundle, schemas, assertions, compatibility
+  manifest, and fake-provider conformance fixtures;
+- a deterministic planner, relay-export importer, adjudicator, append-only
+  ledger, and final-state gate;
+- duplicate handling that carries forward the unresolved effect of an exact
+  prior finding instead of turning its reappearance into evidence for a clean
+  fixpoint;
+- a command harness whose receipt binds harness identity and version, policy
+  digest, exact source snapshot, command array, working directory, environment
+  policy, timeout, filesystem and network capabilities, transformation,
+  stdout, stderr, exit status, and post-run source-integrity result;
+- an exact snapshot/materialization rule for Git-dirty, unborn, non-Git, and
+  ordinary-file targets;
+- retention rules that keep pass inputs, relay exports, command outputs,
+  receipts, and ledger lineage independently verifiable; and
+- end-to-end tests showing that missing, invalid, unavailable, or
+  contradictory verification cannot produce a clean pass.
+
+### 16.6 Corrections required in the witnessed-review specification
+
+The consumer specification must be amended before implementation is treated
+as authoritative:
+
+- **Charter initialization:** the single-pass procedure loads an already
+  owner-authorized Charter. `charter init` is a separate explicit owner or
+  authorized-caller action; a pass never invents standing goals by silently
+  creating a Charter.
+- **Duplicate recurrence:** an exact fingerprint and witness match may avoid
+  duplicate model work, but it must not erase the prior finding's unresolved
+  effect. On the same artifact, the latest unresolved admitted, automatic, or
+  pending state carries forward. On a changed artifact, recurrence is either
+  reconsidered or linked to an explicit resolution record. It cannot be
+  routed to advisory in a way that makes `fixpoint_eligible` true merely
+  because the same defect was reported again.
+- **Compile target:** every startup compile for a structural review recipe
+  supplies `--target root`; relying on the child-compatible default is an
+  error.
+- **Investigation input:** `context_only` is satisfied by bound named inputs,
+  not by a contradictory requirement to also pass positional `--context`.
+- **Retry ownership:** no runner-level retry is permitted for a witnessed
+  invocation. A caller-initiated replacement batch is a new recorded session,
+  not a hidden continuation of the original one.
+- **Prompt authority:** facilitator output is retained only as trace and is
+  absent from presenter, falsifier, and reducer prompt authority.
+- **Contract versions:** the review bundle, startup checks, and accepted relay
+  artifacts use the declared successor versions for post-plan fields; they do
+  not treat a v1 identifier as if its schema had changed in place.
+- **Frozen artifact:** the artifact manifest identifies exact content, while
+  the relay workspace record identifies only its execution base. Dirty or
+  non-Git review state is materialized exactly; committed `HEAD` is never used
+  as an implicit substitute.
+- **Relay evidence retention:** the reviewed pass retains a complete portable
+  export and recomputes its declared digest profile before the relay session
+  may be cleaned.
+- **Execution-receipt provenance:** a receipt adds issuer/harness identity and
+  version, executable or build digest, policy digest, pass and snapshot
+  lineage, environment allowlist, timeout/resource policy, filesystem,
+  network and process-containment capabilities, transformation digest, and a
+  caller-verifiable authenticity mechanism. A boolean
+  `source_tree_unchanged` without the before/after inventory and comparison
+  result is insufficient.
+
+Until those corrections and their tests land, the specification may guide
+fixture work but must not issue authoritative automatic-change candidates or
+clean-fixpoint decisions.
+
+The detailed relay-only delta beyond the active implementation plan is in
+[`convo-relay-needed.md`](convo-relay-needed.md).
