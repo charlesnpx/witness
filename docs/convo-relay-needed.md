@@ -1,4 +1,15 @@
+> **Historical.** This document is historical: the relay requirements it
+> tracked are satisfied by `convo-relay` v1.4.0 and superseded by the corrected
+> Witness spec's final contract. Do not implement from it.
+
 # Convo-relay work still needed for witnessed review
+
+> **Historical planning context.** This assessment was pinned to an executing
+> pre-release plan. The active, release-pinned implementation plan is
+> [`convo-relay-needed-v2.md`](convo-relay-needed-v2.md), based on
+> `convo-relay` v1.1.0 at
+> `72d3bf45874a5bd74e01d393bd0c0873e8f67da2`. Do not execute this file as the
+> current plan.
 
 This is the delta between the currently executing
 `convo-relay-root-recipe-integration` plan and the generic relay capabilities
