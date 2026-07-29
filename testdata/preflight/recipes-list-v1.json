@@ -1,0 +1,2824 @@
+{
+  "scope": "recipes",
+  "status": "ok",
+  "settings_path": "/Users/Charles.Anderson/.convo-relay/settings.toml",
+  "recipes": [
+    {
+      "id": "disagreement-reducer",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "disagreement-reducer",
+        "match_keywords": [
+          "reduce",
+          "reconcile",
+          "contested",
+          "settled",
+          "decision needed"
+        ],
+        "max_depth": 1,
+        "max_rounds": 2,
+        "mode": "cooperative",
+        "participants": [
+          "codex-fast",
+          "codex-deep"
+        ],
+        "purpose": "Collapse a long review or relay transcript into settled items, still-contested items, decisions needed, evidence needed, and next actions.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "economy-equivalence",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/economy-equivalence-v1",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Adversarially test filed deletion and simplification equivalence witnesses.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude",
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/economy-equivalence-v1"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence' requires integration contract 'witnessed-review/economy-equivalence-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "economy-equivalence-claude",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "claude-code",
+        "integration_contract": "witnessed-review/economy-equivalence-v1",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "claude-code"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Adversarially test filed deletion and simplification equivalence witnesses.",
+        "reducer": "claude-code",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude"
+        ],
+        "facilitator": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.reducer",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/economy-equivalence-v1"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-claude' requires integration contract 'witnessed-review/economy-equivalence-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "economy-equivalence-codex",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/economy-equivalence-v1",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "codex-deep",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Adversarially test filed deletion and simplification equivalence witnesses.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/economy-equivalence-v1"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-codex' requires integration contract 'witnessed-review/economy-equivalence-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "economy-equivalence-v2",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/economy-equivalence-v2",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Use the consumer-owned witnessed-review/economy-equivalence-v2 contract.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude",
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/economy-equivalence-v2"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-v2' requires integration contract 'witnessed-review/economy-equivalence-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v2"
+          }
+        }
+      ]
+    },
+    {
+      "id": "economy-equivalence-v2-claude",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "claude-code",
+        "integration_contract": "witnessed-review/economy-equivalence-v2",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "claude-code"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Use the consumer-owned witnessed-review/economy-equivalence-v2 contract.",
+        "reducer": "claude-code",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude"
+        ],
+        "facilitator": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.reducer",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/economy-equivalence-v2"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-v2-claude' requires integration contract 'witnessed-review/economy-equivalence-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v2"
+          }
+        }
+      ]
+    },
+    {
+      "id": "economy-equivalence-v2-codex",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/economy-equivalence-v2",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "codex-deep",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Use the consumer-owned witnessed-review/economy-equivalence-v2 contract.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/economy-equivalence-v2"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-v2-codex' requires integration contract 'witnessed-review/economy-equivalence-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v2"
+          }
+        }
+      ]
+    },
+    {
+      "id": "host-refactor-strategy",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "host-refactor-strategy",
+        "match_keywords": [
+          "host refactor",
+          "highest leverage",
+          "totalizing refactor",
+          "prove the model",
+          "validation target",
+          "artifact fit",
+          "product value",
+          "evidence yield",
+          "refactor strategy"
+        ],
+        "max_depth": 1,
+        "max_rounds": 8,
+        "mode": "adversarial",
+        "participants": [
+          "codex-deep",
+          "codex-fast"
+        ],
+        "purpose": "Choose the highest-leverage host refactor that proves or falsifies a model, ranking candidates by product value, implementation leverage, evidence yield, artifact fit, and overreach risk.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "code",
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "implementation-review",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "implementation-review",
+        "match_keywords": [
+          "implementation",
+          "code review",
+          "pr review",
+          "tests",
+          "bug",
+          "regression"
+        ],
+        "max_depth": 1,
+        "max_rounds": 6,
+        "mode": "adversarial",
+        "participants": [
+          "codex-deep",
+          "codex-fast"
+        ],
+        "purpose": "Inspect code/spec/test artifacts and produce evidence-backed implementation findings with severity, confidence, file/test evidence, and fix direction.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "code",
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "interface-contract-review",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "interface-contract-review",
+        "match_keywords": [
+          "api",
+          "contract",
+          "schema",
+          "transport",
+          "interface",
+          "compatibility",
+          "error semantics"
+        ],
+        "max_depth": 1,
+        "max_rounds": 5,
+        "mode": "adversarial",
+        "participants": [
+          "codex-deep",
+          "codex-fast"
+        ],
+        "purpose": "Review API/schema/protocol/module boundaries for compatibility, versioning, error semantics, lifecycle behavior, and contract drift.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "code",
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "migration-review",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "migration-review",
+        "match_keywords": [
+          "migration",
+          "cutover",
+          "rollout",
+          "rollback",
+          "compatibility",
+          "feature flag"
+        ],
+        "max_depth": 1,
+        "max_rounds": 5,
+        "mode": "adversarial",
+        "participants": [
+          "codex-deep",
+          "codex-fast"
+        ],
+        "purpose": "Review rollout, cutover, refactor, compatibility, rollback, observability, and staged-gate risks for a change.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "code",
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "one-pass-review",
+      "status": "usable",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "one-pass-review",
+        "match_keywords": [],
+        "max_depth": 2,
+        "max_rounds": 1,
+        "mode": "steelman",
+        "participants": [
+          "codex-fast",
+          "codex-deep"
+        ],
+        "purpose": "Use when deliberation credit is low and a single focused pass is preferable.",
+        "reducer": "codex-deep",
+        "required_capabilities": []
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "premortem",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "premortem",
+        "match_keywords": [
+          "premortem",
+          "risk",
+          "failure",
+          "tripwire",
+          "mitigation"
+        ],
+        "max_depth": 1,
+        "max_rounds": 4,
+        "mode": "adversarial",
+        "participants": [
+          "codex-deep",
+          "codex-fast"
+        ],
+        "purpose": "Assume the change failed after release and identify plausible failure scenarios, tripwires, mitigations, and owner/action follow-ups.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "review-panel",
+      "status": "usable",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "review-panel",
+        "match_keywords": [],
+        "max_depth": 1,
+        "max_rounds": 6,
+        "mode": "adversarial",
+        "participants": [
+          "codex-deep",
+          "codex-fast"
+        ],
+        "purpose": "Use when an unresolved implementation or design risk needs a focused child relay.",
+        "reducer": "codex-deep",
+        "required_capabilities": []
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "structured-review",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "structured-review",
+        "match_keywords": [
+          "pressure-test",
+          "review",
+          "audit",
+          "critique"
+        ],
+        "max_depth": 1,
+        "max_rounds": 4,
+        "mode": "steelman",
+        "participants": [
+          "codex-fast",
+          "codex-deep"
+        ],
+        "purpose": "General fallback review: steelman the proposal, attack it, reduce to accepted changes, open risks, and evidence gaps.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "test-strategy",
+      "status": "usable",
+      "source": "settings",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "test-strategy",
+        "match_keywords": [
+          "test",
+          "coverage",
+          "fixtures",
+          "edge cases",
+          "regression"
+        ],
+        "max_depth": 1,
+        "max_rounds": 3,
+        "mode": "steelman",
+        "participants": [
+          "codex-fast",
+          "codex-deep"
+        ],
+        "purpose": "Given a design or code change, propose golden paths, regressions, edge cases, fixtures, negative cases, and explicit non-goals for testing.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "code",
+          "reasoning"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "facilitation"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "medium",
+            "model": "gpt-5.5",
+            "profile_id": "codex-fast",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "vision-review",
+      "status": "usable",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "ask",
+        "facilitator": "codex-fast",
+        "id": "vision-review",
+        "match_keywords": [
+          "image",
+          "screenshot",
+          "visual",
+          "ui",
+          "diagram",
+          "mockup"
+        ],
+        "max_depth": 1,
+        "max_rounds": 4,
+        "mode": "adversarial",
+        "participants": [
+          "gemini-vision",
+          "codex-deep"
+        ],
+        "purpose": "Use when the unresolved item depends on screenshots, images, UI, or visual inspection.",
+        "reducer": "codex-deep",
+        "required_capabilities": [
+          "vision"
+        ]
+      },
+      "resolved": {
+        "backends": [
+          "codex",
+          "gemini"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "gemini",
+            "capabilities": [
+              "vision",
+              "large-context"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "gemini-vision",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "backend_readiness": [
+        {
+          "backend": "codex",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "codex",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": true,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        },
+        {
+          "backend": "gemini",
+          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/gemini",
+          "version": "0.40.1",
+          "authentication_status": "unknown",
+          "status": "installed_auth_unknown",
+          "probe_detail": {
+            "installation": {
+              "supported": true,
+              "attempted": true,
+              "command": [],
+              "status": "passed",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            },
+            "version": {
+              "supported": true,
+              "attempted": true,
+              "command": [
+                "gemini",
+                "--version"
+              ],
+              "status": "passed",
+              "exit_code": 0,
+              "output": "0.40.1",
+              "output_truncated": false,
+              "error": ""
+            },
+            "authentication": {
+              "supported": false,
+              "attempted": false,
+              "command": [],
+              "status": "not_run",
+              "exit_code": null,
+              "output": "",
+              "output_truncated": false,
+              "error": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "witness-falsify",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/witness-falsification-v1",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Adversarially test filed defect witnesses against a frozen Charter.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude",
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/witness-falsification-v1"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify' requires integration contract 'witnessed-review/witness-falsification-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "witness-falsify-claude",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "claude-code",
+        "integration_contract": "witnessed-review/witness-falsification-v1",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "claude-code"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Adversarially test filed defect witnesses against a frozen Charter.",
+        "reducer": "claude-code",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude"
+        ],
+        "facilitator": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.reducer",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/witness-falsification-v1"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-claude' requires integration contract 'witnessed-review/witness-falsification-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "witness-falsify-codex",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/witness-falsification-v1",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "codex-deep",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Adversarially test filed defect witnesses against a frozen Charter.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/witness-falsification-v1"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-codex' requires integration contract 'witnessed-review/witness-falsification-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "witness-falsify-v2",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/witness-falsification-v2",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Use the consumer-owned witnessed-review/witness-falsification-v2 contract.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude",
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/witness-falsification-v2"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-v2' requires integration contract 'witnessed-review/witness-falsification-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v2"
+          }
+        }
+      ]
+    },
+    {
+      "id": "witness-falsify-v2-claude",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "claude-code",
+        "integration_contract": "witnessed-review/witness-falsification-v2",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "claude-code",
+          "claude-code"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Use the consumer-owned witnessed-review/witness-falsification-v2 contract.",
+        "reducer": "claude-code",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "claude"
+        ],
+        "facilitator": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "claude",
+            "capabilities": [
+              "code",
+              "synthesis"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": null,
+            "model": null,
+            "profile_id": "claude-code",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "claude",
+          "capabilities": [
+            "code",
+            "synthesis"
+          ],
+          "composition_path": "root.reducer",
+          "effort": null,
+          "model": null,
+          "profile_id": "claude-code",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/witness-falsification-v2"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-v2-claude' requires integration contract 'witnessed-review/witness-falsification-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v2"
+          }
+        }
+      ]
+    },
+    {
+      "id": "witness-falsify-v2-codex",
+      "status": "requires_integration",
+      "source": "builtin",
+      "declared": {
+        "auto_approval": "never",
+        "facilitator": "codex-fast",
+        "integration_contract": "witnessed-review/witness-falsification-v2",
+        "lifecycle": {
+          "dynamic": "forbid",
+          "resume": "forbid",
+          "steering": "forbid",
+          "workspace_isolation": "ephemeral"
+        },
+        "max_depth": 1,
+        "mode": "adversarial",
+        "participant_turns": 4,
+        "participants": [
+          "codex-deep",
+          "codex-deep"
+        ],
+        "provider_retry": "forbid",
+        "purpose": "Use the consumer-owned witnessed-review/witness-falsification-v2 contract.",
+        "reducer": "codex-deep",
+        "result_source": "reducer"
+      },
+      "resolved": {
+        "backends": [
+          "codex"
+        ],
+        "facilitator": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "facilitation"
+          ],
+          "composition_path": "root.facilitator",
+          "effort": "medium",
+          "model": "gpt-5.5",
+          "profile_id": "codex-fast",
+          "slot_id": "facilitator"
+        },
+        "participants": [
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_0",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_0"
+          },
+          {
+            "backend": "codex",
+            "capabilities": [
+              "code",
+              "reasoning",
+              "long-form-review"
+            ],
+            "composition_path": "root.slot_1",
+            "effort": "xhigh",
+            "model": "gpt-5.5",
+            "profile_id": "codex-deep",
+            "slot_id": "slot_1"
+          }
+        ],
+        "reducer": {
+          "backend": "codex",
+          "capabilities": [
+            "code",
+            "reasoning",
+            "long-form-review"
+          ],
+          "composition_path": "root.reducer",
+          "effort": "xhigh",
+          "model": "gpt-5.5",
+          "profile_id": "codex-deep",
+          "slot_id": "reducer"
+        }
+      },
+      "integration": {
+        "status": "required",
+        "contract_id": "witnessed-review/witness-falsification-v2"
+      },
+      "diagnostics": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-v2-codex' requires integration contract 'witnessed-review/witness-falsification-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v2"
+          }
+        }
+      ]
+    }
+  ],
+  "issue_groups": [
+    {
+      "code": "integration_required",
+      "count": 12,
+      "issues": [
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence' requires integration contract 'witnessed-review/economy-equivalence-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v1"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-claude' requires integration contract 'witnessed-review/economy-equivalence-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v1"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-codex' requires integration contract 'witnessed-review/economy-equivalence-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v1"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-v2' requires integration contract 'witnessed-review/economy-equivalence-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v2"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-v2-claude' requires integration contract 'witnessed-review/economy-equivalence-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v2"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'economy-equivalence-v2-codex' requires integration contract 'witnessed-review/economy-equivalence-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/economy-equivalence-v2"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify' requires integration contract 'witnessed-review/witness-falsification-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v1"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-claude' requires integration contract 'witnessed-review/witness-falsification-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v1"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-codex' requires integration contract 'witnessed-review/witness-falsification-v1'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v1"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-v2' requires integration contract 'witnessed-review/witness-falsification-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v2"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-v2-claude' requires integration contract 'witnessed-review/witness-falsification-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v2"
+          }
+        },
+        {
+          "category": "integration_binding",
+          "code": "integration_required",
+          "message": "Recipe 'witness-falsify-v2-codex' requires integration contract 'witnessed-review/witness-falsification-v2'.",
+          "path": "recipe.integration_contract",
+          "detail": {
+            "contract_id": "witnessed-review/witness-falsification-v2"
+          }
+        }
+      ],
+      "recipes": [
+        "economy-equivalence",
+        "economy-equivalence-claude",
+        "economy-equivalence-codex",
+        "economy-equivalence-v2",
+        "economy-equivalence-v2-claude",
+        "economy-equivalence-v2-codex",
+        "witness-falsify",
+        "witness-falsify-claude",
+        "witness-falsify-codex",
+        "witness-falsify-v2",
+        "witness-falsify-v2-claude",
+        "witness-falsify-v2-codex"
+      ]
+    }
+  ]
+}

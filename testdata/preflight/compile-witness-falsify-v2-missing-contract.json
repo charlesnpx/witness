@@ -1,0 +1,14 @@
+{
+  "diagnostics": [
+    {
+      "code": "integration_contract_not_found",
+      "details": {
+        "contract_id": "witnessed-review/witness-falsification-v2"
+      },
+      "message": "Integration bundle does not implement the requested contract.",
+      "path": "/contracts/witnessed-review~1witness-falsification-v2",
+      "phase": "preflight"
+    }
+  ],
+  "message": "Integration bundle does not implement the requested contract."
+}

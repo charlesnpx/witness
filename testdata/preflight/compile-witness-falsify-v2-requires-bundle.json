@@ -1,0 +1,11 @@
+{
+  "diagnostics": [
+    {
+      "code": "invalid_integration_bundle",
+      "message": "Integration bundle is required.",
+      "path": "",
+      "phase": "preflight"
+    }
+  ],
+  "message": "Integration bundle is required."
+}

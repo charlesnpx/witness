@@ -1,0 +1,171 @@
+{
+  "scope": "backends",
+  "probe_auth": false,
+  "backends": [
+    {
+      "backend": "claude",
+      "executable_path": "/Users/Charles.Anderson/.local/bin/claude",
+      "version": "2.1.220 (Claude Code)",
+      "authentication_status": "unknown",
+      "status": "installed_auth_unknown",
+      "probe_detail": {
+        "installation": {
+          "supported": true,
+          "attempted": true,
+          "command": [],
+          "status": "passed",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        },
+        "version": {
+          "supported": true,
+          "attempted": true,
+          "command": [
+            "claude",
+            "--version"
+          ],
+          "status": "passed",
+          "exit_code": 0,
+          "output": "2.1.220 (Claude Code)",
+          "output_truncated": false,
+          "error": ""
+        },
+        "authentication": {
+          "supported": true,
+          "attempted": false,
+          "command": [],
+          "status": "not_run",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        }
+      }
+    },
+    {
+      "backend": "codex",
+      "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+      "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+      "authentication_status": "unknown",
+      "status": "installed_auth_unknown",
+      "probe_detail": {
+        "installation": {
+          "supported": true,
+          "attempted": true,
+          "command": [],
+          "status": "passed",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        },
+        "version": {
+          "supported": true,
+          "attempted": true,
+          "command": [
+            "codex",
+            "--version"
+          ],
+          "status": "passed",
+          "exit_code": 0,
+          "output": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
+          "output_truncated": false,
+          "error": ""
+        },
+        "authentication": {
+          "supported": true,
+          "attempted": false,
+          "command": [],
+          "status": "not_run",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        }
+      }
+    },
+    {
+      "backend": "gemini",
+      "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/gemini",
+      "version": "0.40.1",
+      "authentication_status": "unknown",
+      "status": "installed_auth_unknown",
+      "probe_detail": {
+        "installation": {
+          "supported": true,
+          "attempted": true,
+          "command": [],
+          "status": "passed",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        },
+        "version": {
+          "supported": true,
+          "attempted": true,
+          "command": [
+            "gemini",
+            "--version"
+          ],
+          "status": "passed",
+          "exit_code": 0,
+          "output": "0.40.1",
+          "output_truncated": false,
+          "error": ""
+        },
+        "authentication": {
+          "supported": false,
+          "attempted": false,
+          "command": [],
+          "status": "not_run",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        }
+      }
+    },
+    {
+      "backend": "relay",
+      "executable_path": "built-in",
+      "version": "built-in",
+      "authentication_status": "not_applicable",
+      "status": "ready",
+      "probe_detail": {
+        "installation": {
+          "supported": true,
+          "attempted": false,
+          "command": [],
+          "status": "built_in",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        },
+        "version": {
+          "supported": true,
+          "attempted": false,
+          "command": [],
+          "status": "built_in",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        },
+        "authentication": {
+          "supported": false,
+          "attempted": false,
+          "command": [],
+          "status": "built_in",
+          "exit_code": null,
+          "output": "",
+          "output_truncated": false,
+          "error": ""
+        }
+      }
+    }
+  ]
+}

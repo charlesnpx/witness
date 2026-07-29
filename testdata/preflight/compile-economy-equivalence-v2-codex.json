@@ -1,0 +1,154 @@
+{
+  "compiled_plan": {
+    "auto_approval": "never",
+    "depth_policy": {
+      "max_graph_depth": 1
+    },
+    "digest_profile": "relay-root-digests-v1",
+    "facilitator": {
+      "backend": "codex",
+      "capabilities": [
+        "code",
+        "reasoning",
+        "facilitation"
+      ],
+      "composition_path": "root.facilitator",
+      "effort": "medium",
+      "model": "gpt-5.5",
+      "profile_id": "codex-fast",
+      "slot_id": "facilitator"
+    },
+    "integration_bundle_digest": "sha256:81b28c9db7672a38640a5bdbe07e89fee0e1ac200ef9ae521197267bf71d8f54",
+    "integration_bundle_ref": {
+      "digest": "sha256:ef355b5f9559e793f9cee04bca2893afeb0164459396258c2ee60e4fc7485a61",
+      "id": "integration_bundle:selected",
+      "kind": "artifact_ref",
+      "schema_version": 1
+    },
+    "integration_contract_digest": "sha256:682af3554ea9f8eeff2c1c025826ce8d8bfe1fc65e177e4abb84bbdd8c566975",
+    "integration_contract_id": "witnessed-review/economy-equivalence-v2",
+    "integration_contract_ref": {
+      "digest": "sha256:a3768da4903f0c560fbf86043d44e63faf45af234a381d7d3207e07a88c77e8a",
+      "id": "integration_contract:selected",
+      "kind": "artifact_ref",
+      "schema_version": 1
+    },
+    "kind": "root_recipe_plan",
+    "lifecycle": {
+      "dynamic": "forbid",
+      "resume": "forbid",
+      "steering": "forbid",
+      "workspace_isolation": "ephemeral"
+    },
+    "mode": "adversarial",
+    "participant_schedule": [
+      {
+        "participant_turn": 1,
+        "slot": "slot_0"
+      },
+      {
+        "participant_turn": 2,
+        "slot": "slot_1"
+      },
+      {
+        "participant_turn": 3,
+        "slot": "slot_0"
+      },
+      {
+        "participant_turn": 4,
+        "slot": "slot_1"
+      }
+    ],
+    "participant_turns": 4,
+    "participants": [
+      {
+        "backend": "codex",
+        "capabilities": [
+          "code",
+          "reasoning",
+          "long-form-review"
+        ],
+        "composition_path": "root.slot_0",
+        "effort": "xhigh",
+        "model": "gpt-5.5",
+        "profile_id": "codex-deep",
+        "slot_id": "slot_0"
+      },
+      {
+        "backend": "codex",
+        "capabilities": [
+          "code",
+          "reasoning",
+          "long-form-review"
+        ],
+        "composition_path": "root.slot_1",
+        "effort": "xhigh",
+        "model": "gpt-5.5",
+        "profile_id": "codex-deep",
+        "slot_id": "slot_1"
+      }
+    ],
+    "prompt_context": {
+      "facilitator_ledger": "trace_only",
+      "participant_transcript": "complete"
+    },
+    "provider_retry": "forbid",
+    "recipe_id": "economy-equivalence-v2-codex",
+    "recipe_ref": {
+      "digest": "sha256:f1225a2a8796d3832fa518a46cf5ba62d70e161da40ac1eca3fd6eb35891d615",
+      "id": "recipe:economy-equivalence-v2-codex",
+      "kind": "artifact_ref",
+      "schema_version": 1
+    },
+    "reducer": {
+      "backend": "codex",
+      "capabilities": [
+        "code",
+        "reasoning",
+        "long-form-review"
+      ],
+      "composition_path": "root.reducer",
+      "effort": "xhigh",
+      "model": "gpt-5.5",
+      "profile_id": "codex-deep",
+      "slot_id": "reducer"
+    },
+    "required_capabilities": [],
+    "result_source": "reducer",
+    "schema_version": 2,
+    "workspace_isolation_minimum": "ephemeral"
+  },
+  "compiled_plan_digest": "sha256:b1476aa8ed94daa12979583a765a4dcb16c28dd0aad7770ba08bf69bf56f9c44",
+  "recipe": {
+    "auto_approval": "never",
+    "facilitator": "codex-fast",
+    "id": "economy-equivalence-v2-codex",
+    "integration_contract": "witnessed-review/economy-equivalence-v2",
+    "kind": "recipe",
+    "lifecycle": {
+      "dynamic": "forbid",
+      "resume": "forbid",
+      "steering": "forbid",
+      "workspace_isolation": "ephemeral"
+    },
+    "match_keywords": [],
+    "max_depth": 1,
+    "max_rounds": 1,
+    "mode": "adversarial",
+    "participant_turns": 4,
+    "participants": [
+      "codex-deep",
+      "codex-deep"
+    ],
+    "provider_retry": "forbid",
+    "purpose": "Use the consumer-owned witnessed-review/economy-equivalence-v2 contract.",
+    "reducer": "codex-deep",
+    "required_capabilities": [],
+    "result_source": "reducer",
+    "schema_version": 2
+  },
+  "recipe_digest": "sha256:f1225a2a8796d3832fa518a46cf5ba62d70e161da40ac1eca3fd6eb35891d615",
+  "recipe_id": "economy-equivalence-v2-codex",
+  "settings_path": "/Users/Charles.Anderson/.convo-relay/settings.toml",
+  "target": "root"
+}

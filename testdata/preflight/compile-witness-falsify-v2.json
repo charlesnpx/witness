@@ -1,0 +1,153 @@
+{
+  "compiled_plan": {
+    "auto_approval": "never",
+    "depth_policy": {
+      "max_graph_depth": 1
+    },
+    "digest_profile": "relay-root-digests-v1",
+    "facilitator": {
+      "backend": "codex",
+      "capabilities": [
+        "code",
+        "reasoning",
+        "facilitation"
+      ],
+      "composition_path": "root.facilitator",
+      "effort": "medium",
+      "model": "gpt-5.5",
+      "profile_id": "codex-fast",
+      "slot_id": "facilitator"
+    },
+    "integration_bundle_digest": "sha256:81b28c9db7672a38640a5bdbe07e89fee0e1ac200ef9ae521197267bf71d8f54",
+    "integration_bundle_ref": {
+      "digest": "sha256:ef355b5f9559e793f9cee04bca2893afeb0164459396258c2ee60e4fc7485a61",
+      "id": "integration_bundle:selected",
+      "kind": "artifact_ref",
+      "schema_version": 1
+    },
+    "integration_contract_digest": "sha256:ea29a2cfaa65d6525ba5a911fb6e7a7c40de6a1c1b2f8ad53287817d3de510cb",
+    "integration_contract_id": "witnessed-review/witness-falsification-v2",
+    "integration_contract_ref": {
+      "digest": "sha256:b59aca3fcc4835ebd089b489bd833cc4f8929e4135f092458c9fa2f38feab0f4",
+      "id": "integration_contract:selected",
+      "kind": "artifact_ref",
+      "schema_version": 1
+    },
+    "kind": "root_recipe_plan",
+    "lifecycle": {
+      "dynamic": "forbid",
+      "resume": "forbid",
+      "steering": "forbid",
+      "workspace_isolation": "ephemeral"
+    },
+    "mode": "adversarial",
+    "participant_schedule": [
+      {
+        "participant_turn": 1,
+        "slot": "slot_0"
+      },
+      {
+        "participant_turn": 2,
+        "slot": "slot_1"
+      },
+      {
+        "participant_turn": 3,
+        "slot": "slot_0"
+      },
+      {
+        "participant_turn": 4,
+        "slot": "slot_1"
+      }
+    ],
+    "participant_turns": 4,
+    "participants": [
+      {
+        "backend": "claude",
+        "capabilities": [
+          "code",
+          "synthesis"
+        ],
+        "composition_path": "root.slot_0",
+        "effort": null,
+        "model": null,
+        "profile_id": "claude-code",
+        "slot_id": "slot_0"
+      },
+      {
+        "backend": "codex",
+        "capabilities": [
+          "code",
+          "reasoning",
+          "long-form-review"
+        ],
+        "composition_path": "root.slot_1",
+        "effort": "xhigh",
+        "model": "gpt-5.5",
+        "profile_id": "codex-deep",
+        "slot_id": "slot_1"
+      }
+    ],
+    "prompt_context": {
+      "facilitator_ledger": "trace_only",
+      "participant_transcript": "complete"
+    },
+    "provider_retry": "forbid",
+    "recipe_id": "witness-falsify-v2",
+    "recipe_ref": {
+      "digest": "sha256:f5293b5b01118e15481a9afcd69996575b1e7115a7757fb55f318cc8a50b29e8",
+      "id": "recipe:witness-falsify-v2",
+      "kind": "artifact_ref",
+      "schema_version": 1
+    },
+    "reducer": {
+      "backend": "codex",
+      "capabilities": [
+        "code",
+        "reasoning",
+        "long-form-review"
+      ],
+      "composition_path": "root.reducer",
+      "effort": "xhigh",
+      "model": "gpt-5.5",
+      "profile_id": "codex-deep",
+      "slot_id": "reducer"
+    },
+    "required_capabilities": [],
+    "result_source": "reducer",
+    "schema_version": 2,
+    "workspace_isolation_minimum": "ephemeral"
+  },
+  "compiled_plan_digest": "sha256:d1cac7fddde6257c1166bf56b7e9e9841b84d4777e7a79b1b201fe02dd268d0c",
+  "recipe": {
+    "auto_approval": "never",
+    "facilitator": "codex-fast",
+    "id": "witness-falsify-v2",
+    "integration_contract": "witnessed-review/witness-falsification-v2",
+    "kind": "recipe",
+    "lifecycle": {
+      "dynamic": "forbid",
+      "resume": "forbid",
+      "steering": "forbid",
+      "workspace_isolation": "ephemeral"
+    },
+    "match_keywords": [],
+    "max_depth": 1,
+    "max_rounds": 1,
+    "mode": "adversarial",
+    "participant_turns": 4,
+    "participants": [
+      "claude-code",
+      "codex-deep"
+    ],
+    "provider_retry": "forbid",
+    "purpose": "Use the consumer-owned witnessed-review/witness-falsification-v2 contract.",
+    "reducer": "codex-deep",
+    "required_capabilities": [],
+    "result_source": "reducer",
+    "schema_version": 2
+  },
+  "recipe_digest": "sha256:f5293b5b01118e15481a9afcd69996575b1e7115a7757fb55f318cc8a50b29e8",
+  "recipe_id": "witness-falsify-v2",
+  "settings_path": "/Users/Charles.Anderson/.convo-relay/settings.toml",
+  "target": "root"
+}

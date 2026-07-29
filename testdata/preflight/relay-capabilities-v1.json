@@ -1,0 +1,67 @@
+{
+  "build_platform": {
+    "goarch": "arm64",
+    "goos": "darwin"
+  },
+  "contracts": {
+    "execution_workspace": [
+      1,
+      2
+    ],
+    "integration_bundle": [
+      "relay-integration-bundle-v1",
+      "relay-integration-bundle-v2"
+    ],
+    "recipe": [
+      1,
+      2
+    ],
+    "root_artifact": [
+      1,
+      2
+    ],
+    "root_recipe_plan": [
+      1,
+      2
+    ],
+    "root_session_result": [
+      1,
+      2
+    ],
+    "selected_integration_contract": [
+      1,
+      2
+    ]
+  },
+  "convo_relay_version": "v1.4.0",
+  "digest_profile": [
+    "relay-root-digests-v1"
+  ],
+  "isolation_report": [
+    "relay-workspace-isolation-v1"
+  ],
+  "portable_export": [
+    "relay-root-portable-export-v2"
+  ],
+  "prompt_context_projection": [
+    "relay-prompt-context-v1"
+  ],
+  "prompt_policy": [
+    "prompt-policy/v1",
+    "prompt-policy/v2"
+  ],
+  "provider_invocation": [
+    "relay-provider-invocation-v2"
+  ],
+  "provider_retry_policy": [
+    "relay-provider-retry-policy-v1"
+  ],
+  "rendered_prompt": [
+    "relay-rendered-prompt-v1"
+  ],
+  "schema_version": "relay-capabilities-v1",
+  "workspace_mechanisms": [
+    "inherited",
+    "detached_writable_git_worktree"
+  ]
+}

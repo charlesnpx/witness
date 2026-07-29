@@ -1,0 +1,132 @@
+{
+  "schema_version": "relay-integration-bundle-v2",
+  "id": "witness/preflight-fixture-v1",
+  "contracts": {
+    "witnessed-review/economy-equivalence-v2": {
+      "turns": [
+        {
+          "participant_turn": 1,
+          "slot": "slot_0",
+          "instructions": "Present the filed equivalence witness using only the bound Charter, findings, and artifact inputs."
+        },
+        {
+          "participant_turn": 2,
+          "slot": "slot_1",
+          "instructions": "Challenge whether the proposed deletion or simplification preserves the Charter goals."
+        },
+        {
+          "participant_turn": 3,
+          "slot": "slot_0",
+          "instructions": "Answer the challenge without introducing unbound evidence or new goals."
+        },
+        {
+          "participant_turn": 4,
+          "slot": "slot_1",
+          "instructions": "State the strongest remaining objections to the equivalence witness."
+        }
+      ],
+      "reducer": {
+        "instructions": "Return one JSON object that conforms to the result schema and covers every filed finding id and witness digest."
+      },
+      "prompt_context": {
+        "participant_transcript": "complete",
+        "facilitator_ledger": "trace_only"
+      },
+      "inputs": {
+        "artifact": {
+          "required": false,
+          "cardinality": "many",
+          "max_bytes": 1048576
+        },
+        "charter": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        },
+        "findings": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        }
+      },
+      "result": {
+        "transport": "json",
+        "schema": {
+          "type": "object"
+        },
+        "assertions": []
+      }
+    },
+    "witnessed-review/witness-falsification-v2": {
+      "turns": [
+        {
+          "participant_turn": 1,
+          "slot": "slot_0",
+          "instructions": "Present the filed defect witness using only the bound Charter, findings, and artifact inputs."
+        },
+        {
+          "participant_turn": 2,
+          "slot": "slot_1",
+          "instructions": "Challenge whether the witness demonstrates a real Charter violation."
+        },
+        {
+          "participant_turn": 3,
+          "slot": "slot_0",
+          "instructions": "Answer the challenge without introducing unbound evidence or new goals."
+        },
+        {
+          "participant_turn": 4,
+          "slot": "slot_1",
+          "instructions": "State the strongest remaining objections to the defect witness."
+        }
+      ],
+      "reducer": {
+        "instructions": "Return one JSON object that conforms to the result schema and covers every filed finding id and witness digest."
+      },
+      "prompt_context": {
+        "participant_transcript": "complete",
+        "facilitator_ledger": "trace_only"
+      },
+      "inputs": {
+        "artifact": {
+          "required": false,
+          "cardinality": "many",
+          "max_bytes": 1048576
+        },
+        "charter": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        },
+        "findings": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        }
+      },
+      "result": {
+        "transport": "json",
+        "schema": {
+          "type": "object"
+        },
+        "assertions": []
+      }
+    }
+  }
+}
