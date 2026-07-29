@@ -1,0 +1,74 @@
+{
+  "schema_version": "review-charter-v2",
+  "goals": [
+    {
+      "id": "goal-api",
+      "statement": "The API reports accepted input deterministically."
+    }
+  ],
+  "non_goals": [],
+  "owner_events": [
+    {
+      "id": "event-1",
+      "type": "charter_initialized",
+      "actor": "owner",
+      "summary": "Initial charter."
+    }
+  ],
+  "operational_envelope": {
+    "entry_points": {
+      "state": "bounded",
+      "statement": "Declared entry points.",
+      "entries": [
+        {
+          "id": "cli",
+          "statement": "Command line interface."
+        },
+        {
+          "id": "http",
+          "statement": "HTTP API."
+        }
+      ]
+    },
+    "input_surface": {
+      "state": "unbounded",
+      "statement": "Caller supplied request payloads.",
+      "entries": []
+    },
+    "valid_states": {
+      "state": "bounded",
+      "statement": "Declared valid runtime states.",
+      "entries": [
+        {
+          "id": "normal",
+          "statement": "Normal configured operation."
+        }
+      ]
+    },
+    "environments": {
+      "state": "not_applicable",
+      "statement": "No environment distinction is declared.",
+      "entries": []
+    },
+    "scale_bounds": {
+      "state": "unspecified",
+      "statement": "Scale is intentionally unspecified.",
+      "entries": []
+    },
+    "compatibility_promises": {
+      "state": "bounded",
+      "statement": "Declared compatibility promises.",
+      "entries": [
+        {
+          "id": "json-v1",
+          "statement": "JSON response shape v1."
+        }
+      ]
+    },
+    "threat_model": {
+      "state": "unbounded",
+      "statement": "Threat scenarios must name concrete exercised behavior.",
+      "entries": []
+    }
+  }
+}
