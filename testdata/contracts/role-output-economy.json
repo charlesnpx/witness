@@ -1,0 +1,58 @@
+{
+  "schema_version": "review-role-output-v3",
+  "role": "economy",
+  "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_identity": {
+    "kind": "git",
+    "id": "source",
+    "commit": "e08c60893955c99cf455f78ff68eaeb053962e8b"
+  },
+  "consumer_identity": {
+    "kind": "test",
+    "id": "consumer"
+  },
+  "findings": [
+    {
+      "id": "economy-1",
+      "kind": "economy",
+      "title": "Remove duplicate normalization branch",
+      "charter_goal_ids": ["goal-cli"],
+      "claimed_severity": "medium",
+      "witness": {
+        "kind": "equivalence",
+        "strength": "argued",
+        "content": "The later branch performs the same normalization for every declared CLI input partition."
+      },
+      "estimated_delta": {
+        "production": {
+          "status": "known",
+          "lines": -12,
+          "files": -1
+        },
+        "test": {
+          "status": "known",
+          "lines": 0,
+          "files": 0
+        }
+      },
+      "smallest_sufficient_remedy": {
+        "direction": "remove",
+        "summary": "Delete the duplicate branch and keep the shared normalization path.",
+        "minimality_argument": "Only the duplicate branch is removed; the retained branch preserves the goal."
+      },
+      "proposed_tests": [
+        {
+          "id": "test-economy-1",
+          "name": "normalization remains stable",
+          "reachable_partition": "cli declared input",
+          "charter_refs": [
+            {
+              "goal_id": "goal-cli"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

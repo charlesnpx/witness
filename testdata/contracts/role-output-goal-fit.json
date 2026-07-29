@@ -1,0 +1,28 @@
+{
+  "schema_version": "review-role-output-v3",
+  "role": "goal_fit",
+  "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_identity": {
+    "kind": "git",
+    "id": "source",
+    "commit": "e08c60893955c99cf455f78ff68eaeb053962e8b"
+  },
+  "consumer_identity": {
+    "kind": "test",
+    "id": "consumer"
+  },
+  "findings": [],
+  "missing_goal_questions": [
+    {
+      "id": "question-1",
+      "finding_id": "",
+      "dimension": "scale_bounds",
+      "anchor_index": 0,
+      "property": "request_rate",
+      "value": "large batch",
+      "affected_decision": "whether to require high-volume behavior",
+      "statement": "Should large batch request rate become a Charter goal?"
+    }
+  ]
+}

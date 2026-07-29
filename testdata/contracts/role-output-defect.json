@@ -1,0 +1,88 @@
+{
+  "schema_version": "review-role-output-v3",
+  "role": "defect",
+  "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_identity": {
+    "kind": "git",
+    "id": "source",
+    "commit": "e08c60893955c99cf455f78ff68eaeb053962e8b"
+  },
+  "consumer_identity": {
+    "kind": "test",
+    "id": "consumer"
+  },
+  "findings": [
+    {
+      "id": "defect-1",
+      "kind": "defect",
+      "title": "CLI rejects a declared valid input",
+      "charter_goal_ids": ["goal-cli"],
+      "claimed_severity": "high",
+      "scope_anchors": [
+        {
+          "dimension": "entry_points",
+          "entry_id": "cli"
+        }
+      ],
+      "witness": {
+        "kind": "defect",
+        "strength": "constructed",
+        "content": "A request through the CLI entry point with the declared normal state reaches the rejecting branch.",
+        "entry_point": {
+          "dimension": "entry_points",
+          "entry_id": "cli"
+        },
+        "reachability_chain": [
+          {
+            "dimension": "entry_points",
+            "entry_id": "cli"
+          },
+          {
+            "dimension": "input_surface",
+            "value": "config file path"
+          },
+          {
+            "dimension": "valid_states",
+            "entry_id": "normal"
+          }
+        ]
+      },
+      "estimated_delta": {
+        "production": {
+          "status": "known",
+          "lines": 4,
+          "files": 1
+        },
+        "test": {
+          "status": "known",
+          "lines": 8,
+          "files": 1
+        }
+      },
+      "smallest_sufficient_remedy": {
+        "direction": "change",
+        "summary": "Accept the declared input before the rejecting branch.",
+        "minimality_argument": "The change is limited to the branch that rejects the declared input."
+      },
+      "proposed_tests": [
+        {
+          "id": "test-defect-1",
+          "name": "accepts declared CLI input",
+          "reachable_partition": "cli declared input",
+          "charter_refs": [
+            {
+              "goal_id": "goal-cli"
+            },
+            {
+              "anchor": {
+                "dimension": "entry_points",
+                "entry_id": "cli"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
