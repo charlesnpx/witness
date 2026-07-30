@@ -19,6 +19,7 @@ import (
 	"witness/internal/diag"
 	"witness/internal/digest"
 	"witness/internal/ledger"
+	"witness/internal/metrics"
 	"witness/internal/planning"
 	"witness/internal/policy"
 	"witness/internal/preflight"
@@ -83,6 +84,9 @@ func route(args []string) error {
 	if singleCommands[args[0]] {
 		if args[0] == "adjudicate" {
 			return runAdjudicate(args[1:])
+		}
+		if args[0] == "metrics" {
+			return runMetrics(args[1:])
 		}
 		return notImplemented(args[0])
 	}
@@ -414,6 +418,30 @@ func runAdjudicate(args []string) error {
 	return nil
 }
 
+func runMetrics(args []string) error {
+	flags := newFlagSet("witness metrics")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	preflightPath := flags.String("preflight", "", "verification preflight result path")
+	out := flags.String("out", "", "metrics output path")
+	var runResultPaths repeatedStrings
+	flags.Var(&runResultPaths, "run-result", "adjudication run-result JSON path; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	document, err := metrics.Run(metrics.Options{
+		LedgerPath:     *ledgerPath,
+		PreflightPath:  *preflightPath,
+		RunResultPaths: append([]string(nil), runResultPaths...),
+	})
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, document)
+}
+
 func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) ([]ledger.Record, error) {
 	if result == nil || result.ResultDigest == "" {
 		return nil, diag.New(diag.CodeInvalidCommand, "adjudication result is missing a run digest.")
@@ -478,11 +506,16 @@ func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 		events = append(events, ledger.EventToAppend{
 			Kind: ledger.EventKindQuestion,
 			Payload: ledger.QuestionEvent{
-				RunDigest:   result.ResultDigest,
-				QuestionID:  question.ID,
-				FindingID:   question.FindingID,
-				CharterHash: result.CharterHash,
-				Statement:   question.Statement,
+				RunDigest:        result.ResultDigest,
+				QuestionID:       question.ID,
+				FindingID:        question.FindingID,
+				Dimension:        question.Dimension,
+				AnchorIndex:      ledger.IntPtr(question.AnchorIndex),
+				Property:         question.Property,
+				Value:            question.Value,
+				AffectedDecision: question.AffectedDecision,
+				CharterHash:      result.CharterHash,
+				Statement:        question.Statement,
 			},
 		})
 	}
@@ -526,11 +559,16 @@ func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 }
 
 type adjudicationQuestion struct {
-	ID        string
-	FindingID string
-	Statement string
-	source    int
-	index     int
+	ID               string
+	FindingID        string
+	Dimension        string
+	AnchorIndex      int
+	Property         string
+	Value            string
+	AffectedDecision string
+	Statement        string
+	source           int
+	index            int
 }
 
 func adjudicationMissingGoalQuestions(inputs []adjudicate.RoleOutputInput) []adjudicationQuestion {
@@ -538,11 +576,16 @@ func adjudicationMissingGoalQuestions(inputs []adjudicate.RoleOutputInput) []adj
 	for sourceIndex, input := range inputs {
 		for questionIndex, question := range input.Document.MissingGoalQuestions {
 			questions = append(questions, adjudicationQuestion{
-				ID:        question.ID,
-				FindingID: question.FindingID,
-				Statement: question.Statement,
-				source:    sourceIndex,
-				index:     questionIndex,
+				ID:               question.ID,
+				FindingID:        question.FindingID,
+				Dimension:        question.Dimension,
+				AnchorIndex:      question.AnchorIndex,
+				Property:         question.Property,
+				Value:            question.Value,
+				AffectedDecision: question.AffectedDecision,
+				Statement:        question.Statement,
+				source:           sourceIndex,
+				index:            questionIndex,
 			})
 		}
 	}
@@ -1201,11 +1244,10 @@ func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidenc
 	}
 	evidence := make([]planning.RelayEvidence, 0, len(result.Runs))
 	for _, run := range result.Runs {
-		if run.PortableExportDir == "" {
-			continue
-		}
 		record := planning.RelayEvidence{
 			BatchID:           run.BatchID,
+			RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
+			Backend:           relayBackendFromRecipeID(run.RecipeID),
 			PortableExportDir: run.PortableExportDir,
 		}
 		if run.PortableExportDigest != "" {
@@ -1220,6 +1262,24 @@ func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidenc
 		evidence = append(evidence, record)
 	}
 	return evidence
+}
+
+func relayRecipeFamilyFromRecipeID(recipeID string) string {
+	recipeID = strings.TrimSpace(recipeID)
+	recipeID = strings.TrimSuffix(recipeID, "-codex")
+	recipeID = strings.TrimSuffix(recipeID, "-claude")
+	return recipeID
+}
+
+func relayBackendFromRecipeID(recipeID string) string {
+	switch {
+	case strings.HasSuffix(strings.TrimSpace(recipeID), "-codex"):
+		return "codex"
+	case strings.HasSuffix(strings.TrimSpace(recipeID), "-claude"):
+		return "claude"
+	default:
+		return ""
+	}
 }
 
 func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]planning.RelayEvidence, error) {
@@ -1857,6 +1917,10 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var policyValidation *policy.ValidationError
 	if errors.As(err, &policyValidation) {
 		return policyValidation.Diagnostics
+	}
+	var metricsValidation *metrics.ValidationError
+	if errors.As(err, &metricsValidation) {
+		return metricsValidation.Diagnostics
 	}
 	var preflightError *preflight.Error
 	if errors.As(err, &preflightError) {

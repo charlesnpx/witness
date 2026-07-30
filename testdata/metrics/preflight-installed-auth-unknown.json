@@ -1,0 +1,13 @@
+{
+  "schema_version": "witness-verification-preflight-v1",
+  "ok": false,
+  "state_dir": "state",
+  "artifact_digests": {},
+  "compile_report_digests": {},
+  "recipe_plan_digests": {},
+  "contract_digests": {},
+  "backend_strata": {
+    "claude": "ready",
+    "codex": "installed_auth_unknown"
+  }
+}

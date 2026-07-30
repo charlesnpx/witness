@@ -1,0 +1,39 @@
+[
+  {
+    "kind": "adjudication_run",
+    "event": {
+      "run_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "result_schema_version": "witness-adjudication-run-result-v1",
+      "policy_id": "policy-1",
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "rules_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "charter_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "artifact_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "manifest_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "cap_release_charter_mismatch": true,
+      "finding_count": 1,
+      "pending_verification_count": 0,
+      "automatic_candidate_count": 0,
+      "caller_decision_count": 1,
+      "policy_decision_record_count": 1,
+      "missing_goal_question_count": 0
+    }
+  },
+  {
+    "kind": "policy_decision",
+    "event": {
+      "run_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "allow": false,
+      "reasons": ["caller_decision"],
+      "policy_id": "policy-1",
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "rules_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "charter_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "cap_release_charter_mismatch": true,
+      "positive_cap_allowance_used": false,
+      "finding_id": "finding-1",
+      "application_class": "caller_decision",
+      "operational_envelope_present": true
+    }
+  }
+]

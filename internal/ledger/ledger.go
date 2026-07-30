@@ -106,9 +106,14 @@ type QuestionEvent struct {
 	RunDigest  string `json:"run_digest,omitempty"`
 	QuestionID string `json:"question_id"`
 	// FindingID is optional for questions that originate from envelope anchors rather than a filed finding.
-	FindingID   string `json:"finding_id,omitempty"`
-	CharterHash string `json:"charter_hash"`
-	Statement   string `json:"statement"`
+	FindingID        string `json:"finding_id,omitempty"`
+	Dimension        string `json:"dimension,omitempty"`
+	AnchorIndex      *int   `json:"anchor_index,omitempty"`
+	Property         string `json:"property,omitempty"`
+	Value            string `json:"value,omitempty"`
+	AffectedDecision string `json:"affected_decision,omitempty"`
+	CharterHash      string `json:"charter_hash"`
+	Statement        string `json:"statement"`
 }
 
 type PendingVerificationEvent struct {
@@ -538,6 +543,9 @@ func validateEvent(kind string, raw json.RawMessage, path string) []diag.Diagnos
 			requireDigest(&diagnostics, path+"/run_digest", "run_digest", event.RunDigest)
 		}
 		requireString(&diagnostics, path+"/question_id", "question_id", event.QuestionID)
+		if event.AnchorIndex != nil && *event.AnchorIndex < 0 {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedgerEvent, "question anchor_index must identify the originating anchor.", path+"/anchor_index", map[string]any{"anchor_index": *event.AnchorIndex}))
+		}
 		requireDigest(&diagnostics, path+"/charter_hash", "charter_hash", event.CharterHash)
 		requireString(&diagnostics, path+"/statement", "statement", event.Statement)
 		return diagnostics

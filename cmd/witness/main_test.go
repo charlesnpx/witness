@@ -17,6 +17,7 @@ import (
 	"witness/internal/diag"
 	"witness/internal/digest"
 	"witness/internal/ledger"
+	"witness/internal/metrics"
 	"witness/internal/planning"
 	"witness/internal/policy"
 	"witness/internal/relayclient"
@@ -404,6 +405,27 @@ func TestPolicyAndLedgerCLI(t *testing.T) {
 	}
 }
 
+func TestMetricsCLIWritesDocument(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "metrics.json")
+	if err := route([]string{"metrics", "-out", outPath}); err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := strictjson.DecodeBytes[metrics.Document](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.SchemaVersion != metrics.SchemaVersion {
+		t.Fatalf("metrics schema_version = %s, want %s", document.SchemaVersion, metrics.SchemaVersion)
+	}
+	if len(document.PendingVerification.Strata) != 3 || document.PendingVerification.Strata[0].Reason != metrics.ReasonRunResultsMissing {
+		t.Fatalf("pending verification strata = %#v", document.PendingVerification.Strata)
+	}
+}
+
 func TestPolicyCheckApplicationDefaultsOmittedEstimatesUnknown(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
@@ -651,13 +673,28 @@ func TestAdjudicateCLILedgerQuestionAllowsEmptyFindingID(t *testing.T) {
 		t.Fatal(err)
 	}
 	questionRecords := 0
+	var questionEvent ledger.QuestionEvent
 	for _, record := range records {
 		if record.EventKind == ledger.EventKindQuestion {
 			questionRecords++
+			event, err := strictjson.DecodeBytes[ledger.QuestionEvent](record.Event, strictjson.DefaultMaxBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			questionEvent = event
 		}
 	}
 	if questionRecords != 1 {
 		t.Fatalf("question records = %d, want 1; records=%#v", questionRecords, records)
+	}
+	if questionEvent.FindingID != "" ||
+		questionEvent.Dimension != charter.DimensionScaleBounds ||
+		questionEvent.AnchorIndex == nil ||
+		*questionEvent.AnchorIndex != 0 ||
+		questionEvent.Property != "maximum reviewed size" ||
+		questionEvent.Value != "100 files" ||
+		questionEvent.AffectedDecision != "automatic application" {
+		t.Fatalf("question event = %#v, want persisted envelope linkage without finding_id", questionEvent)
 	}
 }
 
@@ -926,6 +963,17 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 	}
 	if len(manifest.Batches) != 1 || manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
 		t.Fatalf("manifest batches = %#v, want unavailable launch failure", manifest.Batches)
+	}
+	relayBatches, ok := manifest.ConsumerIdentity["witness_relay_batches"].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", manifest.ConsumerIdentity)
+	}
+	batchMetadata, ok := relayBatches[manifest.Batches[0].BatchID].(map[string]any)
+	if !ok {
+		t.Fatalf("relay batch metadata = %#v, missing batch %s", relayBatches, manifest.Batches[0].BatchID)
+	}
+	if batchMetadata["backend"] != "codex" || batchMetadata["recipe_family"] != "witness-falsify-v2" {
+		t.Fatalf("relay batch metadata = %#v, want codex witness-falsify-v2", batchMetadata)
 	}
 }
 

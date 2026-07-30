@@ -1,0 +1,44 @@
+[
+  {
+    "kind": "question",
+    "event": {
+      "run_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "question_id": "question-1",
+      "finding_id": "finding-1",
+      "dimension": "scale_bounds",
+      "anchor_index": 0,
+      "property": "maximum reviewed size",
+      "value": "100 files",
+      "affected_decision": "automatic application",
+      "charter_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "statement": "Should this Operational Envelope value become a goal?"
+    }
+  },
+  {
+    "kind": "promotion",
+    "event": {
+      "question_id": "question-1",
+      "goal_ref": "goal-1",
+      "actor": "owner",
+      "rationale": "Owner promoted the question."
+    }
+  },
+  {
+    "kind": "question",
+    "event": {
+      "run_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "question_id": "question-generic-1",
+      "charter_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "statement": "Should this generic missing goal become a goal?"
+    }
+  },
+  {
+    "kind": "promotion",
+    "event": {
+      "question_id": "question-generic-1",
+      "goal_ref": "goal-generic-1",
+      "actor": "owner",
+      "rationale": "Owner promoted the generic question."
+    }
+  }
+]

@@ -1,0 +1,38 @@
+{
+  "schema_version": "witness-adjudication-run-result-v1",
+  "summary": {
+    "admitted": 0,
+    "advisory": 0,
+    "pending_verification": 3,
+    "automatic_candidate": 0,
+    "caller_decision": 3,
+    "none": 0
+  },
+  "findings": [
+    {
+      "finding_id": "pending-1",
+      "disposition": "pending_verification",
+      "application_class": "caller_decision",
+      "relay": {
+        "required": true,
+        "backend": "codex",
+        "status": "unavailable"
+      }
+    },
+    {
+      "finding_id": "pending-2",
+      "disposition": "pending_verification",
+      "application_class": "caller_decision",
+      "relay": {
+        "required": true,
+        "backend": "claude",
+        "status": "unavailable"
+      }
+    },
+    {
+      "finding_id": "pending-3",
+      "disposition": "pending_verification",
+      "application_class": "caller_decision"
+    }
+  ]
+}

@@ -2,6 +2,7 @@ package planning
 
 import (
 	"fmt"
+	"strings"
 
 	"witness/internal/contracts"
 	"witness/internal/diag"
@@ -41,6 +42,8 @@ type BatchEvidence struct {
 
 type RelayEvidence struct {
 	BatchID           string
+	RecipeFamily      string
+	Backend           string
 	PortableExportDir string
 	PortableExportRef *contracts.ArtifactRef
 	Verdicts          *contracts.RelayWitnessVerdictsDocument
@@ -118,6 +121,8 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			BatchRef:    planned.BatchRef,
 			BatchDigest: planned.BatchDigest,
 		}
+		relay, hasRelay := relayByID[planned.BatchID]
+		attachRelayBatchMetadata(&manifest, planned, relay)
 		batchEvidence, hasBatch := batchesByID[planned.BatchID]
 		if !hasBatch {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
@@ -138,7 +143,6 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
-		relay, hasRelay := relayByID[planned.BatchID]
 		if !hasRelay || relay.PortableExportDir == "" {
 			record.FailureReason = "relay_verification_unavailable"
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
@@ -348,6 +352,29 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 		return result, &ValidationError{Diagnostics: diagnostics}
 	}
 	return result, nil
+}
+
+func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned BatchPlan, relay RelayEvidence) {
+	if manifest.ConsumerIdentity == nil {
+		manifest.ConsumerIdentity = map[string]any{}
+	}
+	raw, _ := manifest.ConsumerIdentity["witness_relay_batches"].(map[string]any)
+	if raw == nil {
+		raw = map[string]any{}
+		manifest.ConsumerIdentity["witness_relay_batches"] = raw
+	}
+	recipeFamily := strings.TrimSpace(relay.RecipeFamily)
+	if recipeFamily == "" {
+		recipeFamily = planned.RecipeFamily
+	}
+	entry := map[string]any{
+		"recipe_family": recipeFamily,
+		"finding_ids":   append([]string(nil), planned.FindingIDs...),
+	}
+	if backend := strings.TrimSpace(relay.Backend); backend != "" {
+		entry["backend"] = backend
+	}
+	raw[planned.BatchID] = entry
 }
 
 func validateBatchEvidenceMatchesPlan(planned BatchPlan, evidence BatchEvidence) []diag.Diagnostic {

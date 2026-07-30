@@ -1,0 +1,68 @@
+{
+  "schema_version": "witness-adjudication-run-result-v1",
+  "findings": [
+    {
+      "finding_id": "survived-1",
+      "relay": {
+        "required": true,
+        "status": "valid",
+        "verdict": "survived",
+        "verdict_class": null
+      },
+      "verdict_class": null
+    },
+    {
+      "finding_id": "weakened-1",
+      "relay": {
+        "required": true,
+        "status": "valid",
+        "verdict": "weakened",
+        "verdict_class": "logic"
+      },
+      "verdict_class": "logic"
+    },
+    {
+      "finding_id": "broken-1",
+      "relay": {
+        "required": true,
+        "status": "valid",
+        "verdict": "broken",
+        "verdict_class": "unreachable"
+      },
+      "verdict_class": "unreachable"
+    },
+    {
+      "finding_id": "invalid-1",
+      "reasons": ["relay_verification_invalid"],
+      "relay": {
+        "required": true,
+        "status": "failed",
+        "failure_reason": "relay_verdict_missing",
+        "verdict_class": null
+      },
+      "verdict_class": null
+    },
+    {
+      "finding_id": "receipt-contradiction-1",
+      "reasons": ["execution_receipt_contradicted"],
+      "execution": {
+        "required": true,
+        "receipt_id": "receipt-1",
+        "receipt_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "verification_classification": "contradictory",
+        "reason": "execution_receipt_contradicted"
+      },
+      "verdict_class": null
+    },
+    {
+      "finding_id": "receipt-contradiction-unattributed-1",
+      "reasons": ["execution_receipt_contradicted"],
+      "execution": {
+        "required": true,
+        "verification_classification": "contradictory",
+        "reason": "execution_receipt_contradicted"
+      },
+      "verdict_class": null
+    }
+  ]
+}

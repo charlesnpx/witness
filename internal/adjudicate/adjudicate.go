@@ -28,6 +28,7 @@ const (
 	CodeInvalidRecurrenceLineage  = "adjudicate_invalid_recurrence_lineage"
 	CodeReceiptLoadFailed         = "adjudicate_receipt_load_failed"
 	CodeReceiptRelationshipFailed = "adjudicate_receipt_relationship_failed"
+	CodeDuplicateRelayBatch       = "adjudicate_duplicate_relay_batch"
 
 	ReasonValidationFailed             = "validation_failed"
 	ReasonInvalidRecurrenceLineage     = "invalid_recurrence_lineage"
@@ -154,6 +155,8 @@ type ExecutionMetadata struct {
 type RelayMetadata struct {
 	Required      bool    `json:"required"`
 	BatchID       string  `json:"batch_id,omitempty"`
+	RecipeFamily  string  `json:"recipe_family,omitempty"`
+	Backend       string  `json:"backend,omitempty"`
 	Status        string  `json:"status"`
 	FailureReason string  `json:"failure_reason,omitempty"`
 	Verdict       string  `json:"verdict,omitempty"`
@@ -539,23 +542,52 @@ func indexExecutionReceipts(records []contracts.ExecutionReceiptManifestRecord) 
 }
 
 type relayIndex struct {
-	byFinding       map[string][]relayFindingRecord
-	hasUnavailable  bool
-	hasInvalid      bool
-	hasValidBatches bool
-	hasNotRequired  bool
-	fallbackReason  string
+	byFinding         map[string][]relayFindingRecord
+	metadataByBatch   map[string]relayLaunchMetadata
+	metadataByFinding map[string]relayLaunchMetadata
+	duplicateBatches  map[string][]string
+	hasUnavailable    bool
+	hasInvalid        bool
+	hasValidBatches   bool
+	hasNotRequired    bool
+	fallbackReason    string
 }
 
 type relayFindingRecord struct {
-	batchID string
-	status  string
-	verdict contracts.WitnessVerdict
+	batchID      string
+	status       string
+	recipeFamily string
+	backend      string
+	verdict      contracts.WitnessVerdict
+}
+
+type relayLaunchMetadata struct {
+	recipeFamily string
+	backend      string
 }
 
 func indexRelay(manifest contracts.VerificationManifest) relayIndex {
-	index := relayIndex{byFinding: map[string][]relayFindingRecord{}}
+	index := relayIndex{
+		byFinding:         map[string][]relayFindingRecord{},
+		metadataByBatch:   relayBatchMetadataFromManifest(manifest.ConsumerIdentity),
+		metadataByFinding: map[string]relayLaunchMetadata{},
+		duplicateBatches:  map[string][]string{},
+	}
+	metadataBatchIDs := make([]string, 0, len(index.metadataByBatch))
+	for batchID := range index.metadataByBatch {
+		metadataBatchIDs = append(metadataBatchIDs, batchID)
+	}
+	sort.Strings(metadataBatchIDs)
+	for _, batchID := range metadataBatchIDs {
+		metadata := index.metadataByBatch[batchID]
+		for _, findingID := range relayMetadataFindingIDs(manifest.ConsumerIdentity, batchID) {
+			if _, exists := index.metadataByFinding[findingID]; !exists {
+				index.metadataByFinding[findingID] = metadata
+			}
+		}
+	}
 	for _, batch := range manifest.Batches {
+		batchMetadata := index.metadataByBatch[batch.BatchID]
 		switch batch.Status {
 		case contracts.RecordStatusValid:
 			index.hasValidBatches = true
@@ -566,9 +598,11 @@ func indexRelay(manifest contracts.VerificationManifest) relayIndex {
 			}
 			for _, verdict := range batch.RelayVerdicts.Verdicts {
 				index.byFinding[verdict.FindingID] = append(index.byFinding[verdict.FindingID], relayFindingRecord{
-					batchID: batch.BatchID,
-					status:  batch.Status,
-					verdict: verdict,
+					batchID:      batch.BatchID,
+					status:       batch.Status,
+					recipeFamily: batchMetadata.recipeFamily,
+					backend:      batchMetadata.backend,
+					verdict:      verdict,
 				})
 			}
 		case contracts.RecordStatusFailed:
@@ -581,7 +615,77 @@ func indexRelay(manifest contracts.VerificationManifest) relayIndex {
 			index.hasNotRequired = true
 		}
 	}
+	for findingID, records := range index.byFinding {
+		sort.SliceStable(records, func(i, j int) bool {
+			return records[i].batchID < records[j].batchID
+		})
+		index.byFinding[findingID] = records
+		batchIDs := uniqueRelayBatchIDs(records)
+		if len(batchIDs) > 1 {
+			index.duplicateBatches[findingID] = batchIDs
+		}
+	}
 	return index
+}
+
+func uniqueRelayBatchIDs(records []relayFindingRecord) []string {
+	seen := map[string]struct{}{}
+	var batchIDs []string
+	for _, record := range records {
+		if _, exists := seen[record.batchID]; exists {
+			continue
+		}
+		seen[record.batchID] = struct{}{}
+		batchIDs = append(batchIDs, record.batchID)
+	}
+	sort.Strings(batchIDs)
+	return batchIDs
+}
+
+func relayBatchMetadataFromManifest(identity map[string]any) map[string]relayLaunchMetadata {
+	raw, _ := identity["witness_relay_batches"].(map[string]any)
+	result := map[string]relayLaunchMetadata{}
+	for batchID, value := range raw {
+		object, _ := value.(map[string]any)
+		if object == nil {
+			continue
+		}
+		result[batchID] = relayLaunchMetadata{
+			recipeFamily: stringMapValue(object, "recipe_family"),
+			backend:      stringMapValue(object, "backend"),
+		}
+	}
+	return result
+}
+
+func relayMetadataFindingIDs(identity map[string]any, batchID string) []string {
+	raw, _ := identity["witness_relay_batches"].(map[string]any)
+	object, _ := raw[batchID].(map[string]any)
+	switch values := object["finding_ids"].(type) {
+	case []string:
+		ids := make([]string, 0, len(values))
+		for _, id := range values {
+			if strings.TrimSpace(id) != "" {
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	case []any:
+		ids := make([]string, 0, len(values))
+		for _, value := range values {
+			if id, ok := value.(string); ok && strings.TrimSpace(id) != "" {
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	default:
+		return nil
+	}
+}
+
+func stringMapValue(object map[string]any, key string) string {
+	value, _ := object[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, rules contracts.ReviewRules, policy contracts.ReviewPolicy) FindingVerdict {
@@ -643,6 +747,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 
 	relayResult := evaluateRelay(finding.ID, item.witnessDigest, relay)
 	verdict.Relay = &relayResult.metadata
+	verdict.Diagnostics = append(verdict.Diagnostics, relayResult.diagnostics...)
 	if relayResult.pending {
 		verdict.Disposition = contracts.DispositionPendingVerification
 		verdict.ApplicationClass = classifyApplication(item.role, finding, verdict.Disposition, verdict.EffectiveSeverity, options.FrozenCharter, policy)
@@ -815,19 +920,24 @@ func loadReceipt(record contracts.ExecutionReceiptManifestRecord, outputDir stri
 }
 
 type relayEvaluation struct {
-	pending  bool
-	reason   string
-	verdict  contracts.WitnessVerdict
-	metadata RelayMetadata
+	pending     bool
+	reason      string
+	verdict     contracts.WitnessVerdict
+	metadata    RelayMetadata
+	diagnostics []diag.Diagnostic
 }
 
 func evaluateRelay(findingID string, witnessDigest string, index relayIndex) relayEvaluation {
 	records := index.byFinding[findingID]
-	if len(records) == 1 {
+	launchMetadata := index.metadataByFinding[findingID]
+	if len(records) > 0 {
 		record := records[0]
+		diagnostics := duplicateRelayBatchDiagnostics(findingID, record.batchID, index.duplicateBatches[findingID])
 		metadata := RelayMetadata{
 			Required:     true,
 			BatchID:      record.batchID,
+			RecipeFamily: record.recipeFamily,
+			Backend:      record.backend,
 			Status:       contracts.RecordStatusValid,
 			Verdict:      record.verdict.Verdict,
 			VerdictClass: record.verdict.VerdictClass,
@@ -835,20 +945,9 @@ func evaluateRelay(findingID string, witnessDigest string, index relayIndex) rel
 		if record.verdict.WitnessDigest != witnessDigest {
 			metadata.Status = contracts.RecordStatusFailed
 			metadata.FailureReason = "relay_verdict_witness_digest_mismatch"
-			return relayEvaluation{pending: true, reason: ReasonRelayVerificationInvalid, metadata: metadata}
+			return relayEvaluation{pending: true, reason: ReasonRelayVerificationInvalid, metadata: metadata, diagnostics: diagnostics}
 		}
-		return relayEvaluation{verdict: record.verdict, metadata: metadata}
-	}
-	if len(records) > 1 {
-		return relayEvaluation{
-			pending: true,
-			reason:  ReasonRelayVerificationInvalid,
-			metadata: RelayMetadata{
-				Required:      true,
-				Status:        contracts.RecordStatusFailed,
-				FailureReason: "duplicate_relay_verdicts",
-			},
-		}
+		return relayEvaluation{verdict: record.verdict, metadata: metadata, diagnostics: diagnostics}
 	}
 	if index.hasInvalid || index.hasValidBatches {
 		return relayEvaluation{
@@ -856,6 +955,8 @@ func evaluateRelay(findingID string, witnessDigest string, index relayIndex) rel
 			reason:  ReasonRelayVerificationInvalid,
 			metadata: RelayMetadata{
 				Required:      true,
+				RecipeFamily:  launchMetadata.recipeFamily,
+				Backend:       launchMetadata.backend,
 				Status:        contracts.RecordStatusFailed,
 				FailureReason: nonEmpty(index.fallbackReason, "relay_verdict_missing"),
 			},
@@ -867,6 +968,8 @@ func evaluateRelay(findingID string, witnessDigest string, index relayIndex) rel
 			reason:  ReasonRelayVerificationUnavailable,
 			metadata: RelayMetadata{
 				Required:      true,
+				RecipeFamily:  launchMetadata.recipeFamily,
+				Backend:       launchMetadata.backend,
 				Status:        contracts.RecordStatusUnavailable,
 				FailureReason: nonEmpty(index.fallbackReason, "relay_verification_unavailable"),
 			},
@@ -880,10 +983,28 @@ func evaluateRelay(findingID string, witnessDigest string, index relayIndex) rel
 		reason:  ReasonRelayVerificationUnavailable,
 		metadata: RelayMetadata{
 			Required:      true,
+			RecipeFamily:  launchMetadata.recipeFamily,
+			Backend:       launchMetadata.backend,
 			Status:        contracts.RecordStatusUnavailable,
 			FailureReason: "relay_verification_missing",
 		},
 	}
+}
+
+func duplicateRelayBatchDiagnostics(findingID string, selectedBatchID string, batchIDs []string) []diag.Diagnostic {
+	if len(batchIDs) < 2 {
+		return nil
+	}
+	return []diag.Diagnostic{diagnostic(
+		CodeDuplicateRelayBatch,
+		"relay verdict finding appears in multiple batches; selected the lexicographically smallest batch.",
+		"/manifest/batches",
+		map[string]any{
+			"finding_id":        findingID,
+			"selected_batch_id": selectedBatchID,
+			"batch_ids":         append([]string(nil), batchIDs...),
+		},
+	)}
 }
 
 func applySeverityCap(claimed string, strength string, rules contracts.ReviewRules) (string, string, bool) {

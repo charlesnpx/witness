@@ -281,6 +281,25 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonRelayBroken)
 	})
 
+	t.Run("duplicate relay batches select smallest batch and diagnose", func(t *testing.T) {
+		frozen := testFrozenCharter(t)
+		artifactDigest := testDigest("artifact")
+		finding := defectFinding("finding-duplicate-batches", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+		roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
+		result := runAdjudication(t, runInput{
+			frozen:      frozen,
+			roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+			manifest:    manifestWithDuplicateRelayBatches(t, frozen, artifactDigest, finding),
+		})
+		got := onlyFinding(t, result)
+		assertDisposition(t, got, contracts.DispositionAdvisory)
+		assertHasReason(t, got, ReasonRelayBroken)
+		if got.Relay == nil || got.Relay.BatchID != "batch-a" || got.Relay.Backend != "codex" {
+			t.Fatalf("relay metadata = %#v, want selected batch-a/codex", got.Relay)
+		}
+		assertResultHasDiagnostic(t, result, CodeDuplicateRelayBatch, "/manifest/batches")
+	})
+
 	t.Run("executable missing receipt weakened chain ends argued medium caller decision", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
@@ -945,6 +964,65 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 		}},
 		ExecutionReceipts: receipts,
 		ConsumerIdentity:  map[string]any{"kind": "test", "id": "consumer"},
+	}
+}
+
+func manifestWithDuplicateRelayBatches(t *testing.T, frozen charter.FrozenCharter, artifactDigest string, finding contracts.Finding) contracts.VerificationManifest {
+	t.Helper()
+	return contracts.VerificationManifest{
+		SchemaVersion:         contracts.VerificationManifestV3,
+		PlanDigest:            testDigest("plan"),
+		CharterHash:           frozen.CharterHash,
+		ArtifactDigest:        artifactDigest,
+		CompatibilityManifest: testArtifactRef("compatibility-manifest", "compatibility", "compatibility"),
+		RelayCapabilities:     testArtifactRef("relay-capabilities", "capabilities", "capabilities"),
+		IntegrationBundle:     testArtifactRef("integration-bundle", "bundle", "bundle"),
+		SelectedContracts:     []contracts.ArtifactRef{testArtifactRef("selected-contract", "contract", "contract")},
+		Batches: []contracts.VerificationManifestBatch{
+			manifestBatchWithVerdicts(t, "batch-b", []contracts.WitnessVerdict{survivedVerdict(t, finding)}),
+			manifestBatchWithVerdicts(t, "batch-a", []contracts.WitnessVerdict{counterVerdict(t, finding, contracts.VerdictBroken)}),
+		},
+		ConsumerIdentity: map[string]any{
+			"kind": "test",
+			"id":   "consumer",
+			"witness_relay_batches": map[string]any{
+				"batch-a": map[string]any{
+					"recipe_family": "witness-falsify-v2",
+					"backend":       "codex",
+					"finding_ids":   []string{finding.ID},
+				},
+				"batch-b": map[string]any{
+					"recipe_family": "witness-falsify-v2",
+					"backend":       "claude",
+					"finding_ids":   []string{finding.ID},
+				},
+			},
+		},
+	}
+}
+
+func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contracts.WitnessVerdict) contracts.VerificationManifestBatch {
+	t.Helper()
+	relayVerdicts := contracts.RelayWitnessVerdictsDocument{
+		SchemaVersion: contracts.RelayWitnessVerdictsV2,
+		BatchID:       batchID,
+		Verdicts:      verdicts,
+	}
+	resultDigest, err := contracts.RelayWitnessVerdictsDigest(relayVerdicts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchRef := testArtifactRef("verification-batch", batchID, "batch-"+batchID)
+	exportRef := testArtifactRef("relay-root-portable-export", batchID, "export-"+batchID)
+	return contracts.VerificationManifestBatch{
+		BatchID:               batchID,
+		Status:                contracts.RecordStatusValid,
+		BatchRef:              batchRef,
+		BatchDigest:           batchRef.Digest,
+		PortableExportRef:     &exportRef,
+		PortableExportDigest:  exportRef.Digest,
+		CanonicalResultDigest: resultDigest,
+		RelayVerdicts:         &relayVerdicts,
 	}
 }
 
