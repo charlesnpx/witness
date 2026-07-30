@@ -1,13 +1,26 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
+	"io"
 	"os"
 
 	"witness/internal/diag"
+	"witness/internal/harness"
 )
 
 func main() {
 	if err := route(os.Args[1:]); err != nil {
+		var harnessErr *harness.Error
+		if errors.As(err, &harnessErr) {
+			_ = diag.WriteCanonical(os.Stderr, map[string]any{
+				"ok":          false,
+				"diagnostics": harnessErr.Diagnostics,
+			})
+			os.Exit(2)
+		}
 		diagnostic := diag.FromError(err)
 		_ = diag.WriteCanonical(os.Stderr, map[string]any{
 			"ok":          false,
@@ -28,9 +41,28 @@ func route(args []string) error {
 			diag.WithDetail("args", args),
 		)
 	}
-	return diag.New(
-		diag.CodeNotImplemented,
-		"witness-harness command routing is present; implementation is assigned to a later unit.",
-		diag.WithDetail("command", "run"),
-	)
+	return runHarness(args[1:])
+}
+
+func runHarness(args []string) error {
+	flags := newFlagSet("witness-harness run")
+	requestPath := flags.String("request", "", "strict JSON harness request path")
+	outputDir := flags.String("out-dir", "", "receipt output directory")
+	if err := flags.Parse(args); err != nil {
+		return diag.Wrap(err, diag.CodeInvalidCommand, "invalid witness-harness run flags.", diag.WithDetail("error", err.Error()))
+	}
+	if flags.NArg() != 0 {
+		return diag.New(diag.CodeInvalidCommand, "unexpected witness-harness run arguments.", diag.WithDetail("args", flags.Args()))
+	}
+	result, err := harness.RunFile(context.Background(), *requestPath, *outputDir)
+	if err != nil {
+		return err
+	}
+	return diag.WriteCanonical(os.Stdout, result)
+}
+
+func newFlagSet(name string) *flag.FlagSet {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	return flags
 }
