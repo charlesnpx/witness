@@ -115,6 +115,33 @@ type CompileReport struct {
 	Payload                   map[string]any
 }
 
+type RunRecipeOptions struct {
+	Task                  string
+	RecipeID              string
+	IntegrationBundlePath string
+	InputBindings         []string
+	WorkspaceIsolation    string
+	SessionDir            string
+	SessionID             string
+	RelayHome             string
+	LaunchCWD             string
+	SettingsPath          string
+	AllowDirtySource      bool
+}
+
+type ExportOptions struct {
+	SessionDir string
+	SessionID  string
+	RelayHome  string
+	OutputDir  string
+}
+
+type ShowOptions struct {
+	SessionDir string
+	SessionID  string
+	RelayHome  string
+}
+
 func NewCompileReport(raw map[string]any) (CompileReport, error) {
 	if raw == nil {
 		return CompileReport{}, diag.New(ErrorSchemaInvalid, "compile-recipe output must be a JSON object.")

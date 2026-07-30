@@ -121,6 +121,73 @@ func (client Client) CompileRecipe(ctx context.Context, recipeID string, integra
 	return runCompile(ctx, client, args)
 }
 
+func (client Client) RunRecipe(ctx context.Context, options RunRecipeOptions) (map[string]any, error) {
+	args := []string{"run", "--task", options.Task, "--recipe", options.RecipeID}
+	if options.IntegrationBundlePath != "" {
+		args = append(args, "--integration-bundle", options.IntegrationBundlePath)
+	}
+	if options.WorkspaceIsolation != "" {
+		args = append(args, "--workspace-isolation", options.WorkspaceIsolation)
+	}
+	if options.SessionDir != "" {
+		args = append(args, "--session-dir", options.SessionDir)
+	}
+	if options.SessionID != "" {
+		args = append(args, "--session-id", options.SessionID)
+	}
+	if options.RelayHome != "" {
+		args = append(args, "--home", options.RelayHome)
+	}
+	if options.LaunchCWD != "" {
+		args = append(args, "--launch-cwd", options.LaunchCWD)
+	}
+	if options.SettingsPath != "" {
+		args = append(args, "--settings", options.SettingsPath)
+	}
+	if options.AllowDirtySource {
+		args = append(args, "--allow-dirty-source")
+	}
+	for _, binding := range options.InputBindings {
+		args = append(args, "--input", binding)
+	}
+	args = append(args, "--json")
+	return runObject(ctx, client, args)
+}
+
+func (client Client) ExportPortable(ctx context.Context, options ExportOptions) (map[string]any, error) {
+	args := []string{"export"}
+	if options.SessionDir != "" {
+		args = append(args, "--session-dir", options.SessionDir)
+	}
+	if options.SessionID != "" {
+		args = append(args, "--session-id", options.SessionID)
+	}
+	if options.RelayHome != "" {
+		args = append(args, "--home", options.RelayHome)
+	}
+	args = append(args, "--portable", "--output", options.OutputDir, "--json")
+	return runObject(ctx, client, args)
+}
+
+func (client Client) VerifyExport(ctx context.Context, exportDir string) (map[string]any, error) {
+	return runObject(ctx, client, []string{"verify-export", exportDir, "--json"})
+}
+
+func (client Client) Show(ctx context.Context, options ShowOptions) (map[string]any, error) {
+	args := []string{"show"}
+	if options.SessionDir != "" {
+		args = append(args, "--session-dir", options.SessionDir)
+	}
+	if options.SessionID != "" {
+		args = append(args, "--session-id", options.SessionID)
+	}
+	if options.RelayHome != "" {
+		args = append(args, "--home", options.RelayHome)
+	}
+	args = append(args, "--json")
+	return runObject(ctx, client, args)
+}
+
 func runStrict[T any](ctx context.Context, client Client, args []string, validate func(T) error) (T, error) {
 	var zero T
 	result := runCommand(ctx, client, args)
@@ -168,6 +235,28 @@ func runCompile(ctx context.Context, client Client, args []string) (CompileRepor
 		}
 	}
 	return report, nil
+}
+
+func runObject(ctx context.Context, client Client, args []string) (map[string]any, error) {
+	result := runCommand(ctx, client, args)
+	if err := commandFailure(client.command(), args, result); err != nil {
+		return nil, err
+	}
+	value, err := strictjson.DecodeBytes[map[string]any](result.Stdout, client.limit())
+	if err != nil {
+		return nil, decodeError(client.command(), args, result, err)
+	}
+	if value == nil {
+		return nil, &CommandError{
+			Kind:       ErrorSchemaInvalid,
+			Command:    client.command(),
+			Args:       append([]string(nil), args...),
+			Diagnostic: diag.FromError(diag.New(ErrorSchemaInvalid, "relay command emitted null instead of a JSON object.")),
+			Stdout:     string(result.Stdout),
+			Stderr:     string(result.Stderr),
+		}
+	}
+	return value, nil
 }
 
 func compileFailure(command string, args []string, result CommandResult) error {

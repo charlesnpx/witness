@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,8 +10,16 @@ import (
 	"path/filepath"
 	"strings"
 
+	"witness/internal/canonjson"
 	"witness/internal/charter"
+	"witness/internal/contracts"
 	"witness/internal/diag"
+	"witness/internal/digest"
+	"witness/internal/planning"
+	"witness/internal/preflight"
+	"witness/internal/relayclient"
+	"witness/internal/relayrun"
+	"witness/internal/strictjson"
 )
 
 var witnessCommands = map[string]map[string]bool{
@@ -41,6 +50,8 @@ var singleCommands = map[string]bool{
 	"adjudicate": true,
 	"metrics":    true,
 }
+
+var verificationAssembleRelayRunner relayclient.Runner
 
 func main() {
 	if err := route(os.Args[1:]); err != nil {
@@ -79,6 +90,9 @@ func route(args []string) error {
 			if args[0] == "charter" {
 				return runCharter(args[1], args[2:])
 			}
+			if args[0] == "verification" {
+				return runVerification(args[1], args[2:])
+			}
 			return notImplemented(strings.Join(args[:2], " "))
 		}
 	}
@@ -86,6 +100,591 @@ func route(args []string) error {
 		diag.CodeInvalidCommand,
 		"unknown witness command.",
 		diag.WithDetail("args", args),
+	)
+}
+
+func runVerification(command string, args []string) error {
+	switch command {
+	case "preflight":
+		return runVerificationPreflight(args)
+	case "plan":
+		return runVerificationPlan(args)
+	case "assemble":
+		return runVerificationAssemble(args)
+	default:
+		return notImplemented("verification " + command)
+	}
+}
+
+func runVerificationPreflight(args []string) error {
+	flags := newFlagSet("witness verification preflight")
+	relayPath := flags.String("relay", "", "convo-relay executable path")
+	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
+	stateDir := flags.String("state-dir", "", "preflight state directory")
+	sourceDir := flags.String("source-dir", "", "reviewed source directory")
+	snapshotDir := flags.String("snapshot-dir", "", "frozen source snapshot directory")
+	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
+	out := flags.String("out", "", "preflight result output path")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	result, err := preflight.Run(context.Background(), preflight.Options{
+		RelayPath:             *relayPath,
+		IntegrationBundlePath: *integrationBundlePath,
+		StateDir:              *stateDir,
+		SourceDir:             *sourceDir,
+		SnapshotDir:           *snapshotDir,
+		AllowNonGitSource:     *allowNonGitSource,
+	})
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, result)
+}
+
+func runVerificationPlan(args []string) error {
+	flags := newFlagSet("witness verification plan")
+	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
+	stateDir := flags.String("state-dir", "", "verification state directory")
+	out := flags.String("out", "", "verification plan output path")
+	var roleOutputPaths repeatedStrings
+	flags.Var(&roleOutputPaths, "role-output", "role-output JSON path; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *frozenPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness verification plan requires -charter-freeze.")
+	}
+	if *stateDir == "" {
+		return diag.New("verification_plan_missing_state_dir", "witness verification plan requires -state-dir.")
+	}
+	if len(roleOutputPaths) == 0 {
+		return diag.New(diag.CodeInvalidCommand, "witness verification plan requires at least one -role-output.")
+	}
+	frozen, err := readFrozenCharterFile(*frozenPath)
+	if err != nil {
+		return err
+	}
+	inputs := make([]planning.RoleOutputInput, 0, len(roleOutputPaths))
+	for _, path := range roleOutputPaths {
+		document, err := readRoleOutputFile(path)
+		if err != nil {
+			return err
+		}
+		inputs = append(inputs, planning.RoleOutputInput{
+			Path:     path,
+			RefID:    artifactIDFromPath(path),
+			Document: document,
+		})
+	}
+	result, err := planning.Run(planning.Options{
+		FrozenCharter: &frozen,
+		RoleOutputs:   inputs,
+		StateDir:      *stateDir,
+	})
+	if err != nil {
+		return err
+	}
+	if *out != "" {
+		return writeCanonical(*out, result.Plan)
+	}
+	return diag.WriteCanonical(os.Stdout, result.Plan)
+}
+
+func runVerificationAssemble(args []string) error {
+	flags := newFlagSet("witness verification assemble")
+	planPath := flags.String("plan", "", "verification plan path")
+	compatibilityPath := flags.String("compatibility-manifest", "", "retained compatibility manifest path")
+	capabilitiesPath := flags.String("relay-capabilities", "", "retained relay capabilities path")
+	integrationBundlePath := flags.String("integration-bundle", "", "retained integration bundle path")
+	stateDir := flags.String("state-dir", "", "verification state directory")
+	runRelay := flags.Bool("run-relay", false, "run planned relay verification batches before assembly")
+	relayPath := flags.String("relay", "", "convo-relay executable path")
+	backend := flags.String("backend", "", "relay backend suffix for verification recipes")
+	charterPath := flags.String("charter-freeze", "", "frozen Charter path for relay verification runs")
+	workspaceIsolation := flags.String("workspace-isolation", "", "relay workspace isolation mode")
+	relayHome := flags.String("relay-home", "", "convo-relay home directory")
+	launchCWD := flags.String("launch-cwd", "", "relay launch working directory")
+	settingsPath := flags.String("settings", "", "convo-relay settings path")
+	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow dirty relay launch source")
+	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness output directory for receipt verification")
+	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
+	out := flags.String("out", "", "verification manifest output path")
+	var batchPaths repeatedStrings
+	var verdictPaths repeatedStrings
+	var portableExports repeatedStrings
+	var receiptPaths repeatedStrings
+	var selectedContractPaths repeatedStrings
+	var artifactPaths repeatedStrings
+	flags.Var(&batchPaths, "batch", "verification-batch JSON path; may be repeated")
+	flags.Var(&verdictPaths, "relay-verdict", "relay verdict JSON path or batch-id=path; may be repeated")
+	flags.Var(&portableExports, "portable-export", "batch-id=portable export directory; may be repeated")
+	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
+	flags.Var(&selectedContractPaths, "selected-contract", "selected relay contract artifact path; may be repeated")
+	flags.Var(&artifactPaths, "artifact", "artifact input path for relay verification runs; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *planPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness verification assemble requires -plan.")
+	}
+	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0) {
+		return diag.New(diag.CodeInvalidCommand, "witness verification assemble -run-relay cannot be combined with pre-produced relay evidence flags.")
+	}
+	plan, err := readPlanFile(*planPath)
+	if err != nil {
+		return err
+	}
+	batches, err := readBatchEvidence(batchPaths)
+	if err != nil {
+		return err
+	}
+	relayEvidence, err := readRelayEvidence(verdictPaths, portableExports)
+	if err != nil {
+		return err
+	}
+	if *runRelay {
+		runBatches, err := relayRunBatchInputs(plan, batches, *stateDir)
+		if err != nil {
+			return err
+		}
+		runResult, err := relayrun.RunBatches(context.Background(), runBatches, relayrun.Options{
+			RelayPath:             *relayPath,
+			IntegrationBundlePath: *integrationBundlePath,
+			CharterPath:           *charterPath,
+			ArtifactPaths:         append([]string(nil), artifactPaths...),
+			OutputDir:             *stateDir,
+			Backend:               *backend,
+			WorkspaceIsolation:    *workspaceIsolation,
+			RelayHome:             *relayHome,
+			LaunchCWD:             *launchCWD,
+			SettingsPath:          *settingsPath,
+			AllowDirtySource:      *allowDirtySource,
+			Runner:                verificationAssembleRelayRunner,
+		})
+		if err != nil {
+			return err
+		}
+		relayEvidence = relayEvidenceFromRunResult(runResult)
+		batches = batchEvidenceFromRunInputs(runBatches)
+	}
+	receipts, err := readReceipts(receiptPaths)
+	if err != nil {
+		return err
+	}
+	evidenceRefs, err := manifestEvidenceRefs(*compatibilityPath, *capabilitiesPath, *integrationBundlePath, selectedContractPaths, plan.ConsumerIdentity)
+	if err != nil {
+		return err
+	}
+	result, err := planning.Assemble(planning.AssembleOptions{
+		Plan:         plan,
+		Batches:      batches,
+		RelayResults: relayEvidence,
+		Receipts:     receipts,
+		EvidenceRefs: evidenceRefs,
+
+		ReceiptOutputDir:   *receiptOutputDir,
+		ReceiptHMACKeyFile: *receiptHMACKeyFile,
+	})
+	if err != nil {
+		if result != nil {
+			if writeErr := writeCanonical(*out, result.Manifest); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
+	return writeCanonical(*out, verificationAssembleOutput(result))
+}
+
+func verificationAssembleOutput(result *planning.AssembleResult) any {
+	if len(result.UnverifiedRelationships) > 0 {
+		return result
+	}
+	return result.Manifest
+}
+
+type repeatedStrings []string
+
+func (values *repeatedStrings) String() string {
+	if values == nil {
+		return ""
+	}
+	return strings.Join(*values, ",")
+}
+
+func (values *repeatedStrings) Set(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("value must not be empty")
+	}
+	*values = append(*values, value)
+	return nil
+}
+
+func readFrozenCharterFile(path string) (charter.FrozenCharter, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return charter.FrozenCharter{}, fileReadError(err, path, "open frozen Charter")
+	}
+	return strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
+}
+
+func readRoleOutputFile(path string) (contracts.RoleOutputDocument, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return contracts.RoleOutputDocument{}, fileReadError(err, path, "open role-output")
+	}
+	return contracts.ReadRoleOutputBytes(data)
+}
+
+func readPlanFile(path string) (planning.PlanDocument, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return planning.PlanDocument{}, fileReadError(err, path, "open verification plan")
+	}
+	return strictjson.DecodeBytes[planning.PlanDocument](data, strictjson.DefaultMaxBytes*4)
+}
+
+func readBatchEvidence(paths []string) ([]planning.BatchEvidence, error) {
+	batches := make([]planning.BatchEvidence, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fileReadError(err, path, "open verification batch")
+		}
+		document, err := contracts.ReadVerificationBatchBytes(data)
+		if err != nil {
+			return nil, err
+		}
+		batches = append(batches, planning.BatchEvidence{
+			BatchID:  document.BatchID,
+			Document: document,
+			Path:     path,
+			RawBytes: append([]byte(nil), data...),
+		})
+	}
+	return batches, nil
+}
+
+func relayRunBatchInputs(plan planning.PlanDocument, batches []planning.BatchEvidence, stateDir string) ([]relayrun.BatchInput, error) {
+	if stateDir == "" {
+		return nil, diag.New("verification_assemble_missing_state_dir", "witness verification assemble -run-relay requires -state-dir.")
+	}
+	byID := map[string]planning.BatchEvidence{}
+	for _, batch := range batches {
+		id := batch.BatchID
+		if id == "" {
+			id = batch.Document.BatchID
+		}
+		byID[id] = batch
+	}
+	inputs := make([]relayrun.BatchInput, 0, len(plan.Batches))
+	for _, planned := range plan.Batches {
+		batch := byID[planned.BatchID]
+		if batch.Document.BatchID == "" {
+			path := filepath.Join(stateDir, "verification", "batches", planned.BatchID+".json")
+			loaded, err := readBatchEvidence([]string{path})
+			if err != nil {
+				return nil, err
+			}
+			batch = loaded[0]
+		}
+		inputs = append(inputs, relayrun.BatchInput{
+			Plan:     planned,
+			Document: batch.Document,
+			Path:     batch.Path,
+			RawBytes: append([]byte(nil), batch.RawBytes...),
+		})
+	}
+	return inputs, nil
+}
+
+func batchEvidenceFromRunInputs(inputs []relayrun.BatchInput) []planning.BatchEvidence {
+	batches := make([]planning.BatchEvidence, 0, len(inputs))
+	for _, input := range inputs {
+		batches = append(batches, planning.BatchEvidence{
+			BatchID:  input.Plan.BatchID,
+			Document: input.Document,
+			Path:     input.Path,
+			RawBytes: append([]byte(nil), input.RawBytes...),
+		})
+	}
+	return batches
+}
+
+func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidence {
+	if result == nil {
+		return nil
+	}
+	evidence := make([]planning.RelayEvidence, 0, len(result.Runs))
+	for _, run := range result.Runs {
+		if run.PortableExportDir == "" {
+			continue
+		}
+		record := planning.RelayEvidence{
+			BatchID:           run.BatchID,
+			PortableExportDir: run.PortableExportDir,
+		}
+		if run.PortableExportDigest != "" {
+			record.PortableExportRef = &contracts.ArtifactRef{
+				Kind:          "relay-root-portable-export",
+				ID:            run.BatchID,
+				Digest:        run.PortableExportDigest,
+				DigestProfile: digest.Profile,
+				MediaType:     "application/json",
+			}
+		}
+		evidence = append(evidence, record)
+	}
+	return evidence
+}
+
+func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]planning.RelayEvidence, error) {
+	byBatch := map[string]planning.RelayEvidence{}
+	for _, spec := range portableSpecs {
+		batchID, path, ok := splitKeyValueSpec(spec)
+		if !ok {
+			return nil, diag.New(diag.CodeInvalidCommand, "portable export bindings must use batch-id=directory.", diag.WithDetail("value", spec))
+		}
+		record := byBatch[batchID]
+		record.BatchID = batchID
+		record.PortableExportDir = path
+		byBatch[batchID] = record
+	}
+	for _, spec := range verdictSpecs {
+		batchID, path, bound := splitKeyValueSpec(spec)
+		if !bound {
+			path = spec
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fileReadError(err, path, "open relay verdicts")
+		}
+		verdicts, err := contracts.ReadRelayWitnessVerdictsBytes(data)
+		if err != nil {
+			return nil, err
+		}
+		if batchID == "" {
+			batchID = verdicts.BatchID
+		}
+		record := byBatch[batchID]
+		record.BatchID = batchID
+		record.Verdicts = &verdicts
+		byBatch[batchID] = record
+	}
+	result := make([]planning.RelayEvidence, 0, len(byBatch))
+	for _, record := range byBatch {
+		result = append(result, record)
+	}
+	return result, nil
+}
+
+func readReceipts(paths []string) ([]contracts.ExecutionReceipt, error) {
+	receipts := make([]contracts.ExecutionReceipt, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fileReadError(err, path, "open execution receipt")
+		}
+		receipt, err := contracts.ReadExecutionReceiptBytes(data)
+		if err != nil {
+			return nil, err
+		}
+		receipts = append(receipts, receipt)
+	}
+	return receipts, nil
+}
+
+func manifestEvidenceRefs(
+	compatibilityPath string,
+	capabilitiesPath string,
+	integrationBundlePath string,
+	selectedContractPaths []string,
+	consumerIdentity map[string]any,
+) (planning.ManifestEvidenceRefs, error) {
+	refs := planning.ManifestEvidenceRefs{ConsumerIdentity: cloneMap(consumerIdentity)}
+	var err error
+	if compatibilityPath != "" {
+		refs.CompatibilityManifest, err = artifactRefForFile("compatibility-manifest", compatibilityPath)
+		if err != nil {
+			return refs, err
+		}
+	}
+	if capabilitiesPath != "" {
+		refs.RelayCapabilities, err = artifactRefForFile("relay-capabilities", capabilitiesPath)
+		if err != nil {
+			return refs, err
+		}
+	}
+	if integrationBundlePath != "" {
+		refs.IntegrationBundle, err = artifactRefForFile("integration-bundle", integrationBundlePath)
+		if err != nil {
+			return refs, err
+		}
+	}
+	for _, path := range selectedContractPaths {
+		contractRefs, contractEvidence, err := selectedContractRefsAndEvidenceForFile(path)
+		if err != nil {
+			return refs, err
+		}
+		refs.SelectedContracts = append(refs.SelectedContracts, contractRefs...)
+		refs.SelectedContractEvidence = append(refs.SelectedContractEvidence, contractEvidence...)
+	}
+	return refs, nil
+}
+
+func selectedContractRefsForFile(path string) ([]contracts.ArtifactRef, error) {
+	refs, _, err := selectedContractRefsAndEvidenceForFile(path)
+	return refs, err
+}
+
+func selectedContractRefsAndEvidenceForFile(path string) ([]contracts.ArtifactRef, []planning.SelectedContractEvidence, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fileReadError(err, path, "open artifact reference source")
+	}
+	authenticated, err := planning.AuthenticatedSelectedContractsFromBytes(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	refs := make([]contracts.ArtifactRef, 0, len(authenticated))
+	evidence := make([]planning.SelectedContractEvidence, 0, len(authenticated))
+	baseID := artifactIDFromPath(path)
+	for _, contract := range authenticated {
+		id := baseID
+		if len(authenticated) > 1 {
+			id += ":" + artifactIDFromText(contract.ContractID)
+		}
+		ref := artifactRef("selected-contract", id, contract.ContractDigest)
+		refs = append(refs, ref)
+		evidence = append(evidence, planning.SelectedContractEvidence{
+			Ref:        ref,
+			ContractID: contract.ContractID,
+			Path:       path,
+			RawBytes:   append([]byte(nil), data...),
+		})
+	}
+	return refs, evidence, nil
+}
+
+func artifactRefForFile(kind string, path string) (contracts.ArtifactRef, error) {
+	if kind == "selected-contract" {
+		refs, _, err := selectedContractRefsAndEvidenceForFile(path)
+		if err != nil {
+			return contracts.ArtifactRef{}, err
+		}
+		if len(refs) != 1 {
+			return contracts.ArtifactRef{}, diag.New(diag.CodeInvalidCommand, "selected-contract artifact reference source retained multiple contracts; use selectedContractRefsForFile.", diag.WithDetail("path", path))
+		}
+		return refs[0], nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return contracts.ArtifactRef{}, fileReadError(err, path, "open artifact reference source")
+	}
+	refDigest := digest.RawBytes(data)
+	if value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32); err == nil {
+		if object, ok := value.(map[string]any); ok {
+			if payloadDigest, ok := object["payload_digest"].(string); ok && strings.TrimSpace(payloadDigest) != "" {
+				payload, hasPayload := object["payload"]
+				if !hasPayload {
+					return contracts.ArtifactRef{}, diag.New(diag.CodeInvalidCommand, "retained artifact payload_digest requires a retained payload.", diag.WithDetail("path", path))
+				}
+				payloadBytes, err := canonjson.Marshal(payload)
+				if err != nil {
+					return contracts.ArtifactRef{}, err
+				}
+				actualDigest := digest.RawBytes(payloadBytes)
+				if actualDigest != strings.TrimSpace(payloadDigest) {
+					return contracts.ArtifactRef{}, diag.New(
+						diag.CodeInvalidCommand,
+						"retained artifact payload_digest does not match the retained payload.",
+						diag.WithDetail("path", path),
+						diag.WithDetail("actual_digest", actualDigest),
+						diag.WithDetail("expected_digest", strings.TrimSpace(payloadDigest)),
+					)
+				}
+				refDigest = actualDigest
+			}
+		}
+	}
+	return artifactRef(kind, artifactIDFromPath(path), refDigest), nil
+}
+
+func artifactRef(kind string, id string, refDigest string) contracts.ArtifactRef {
+	return contracts.ArtifactRef{
+		Kind:          kind,
+		ID:            id,
+		Digest:        refDigest,
+		DigestProfile: digest.Profile,
+		MediaType:     "application/json",
+	}
+}
+
+func splitKeyValueSpec(value string) (string, string, bool) {
+	left, right, ok := strings.Cut(value, "=")
+	if !ok {
+		return "", value, false
+	}
+	return strings.TrimSpace(left), strings.TrimSpace(right), true
+}
+
+func artifactIDFromPath(path string) string {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if base == "" {
+		base = "artifact"
+	}
+	return artifactIDFromText(base)
+}
+
+func artifactIDFromText(value string) string {
+	var builder strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-', r == ':':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('-')
+		}
+	}
+	id := strings.Trim(builder.String(), ".-_")
+	if id == "" {
+		return "artifact"
+	}
+	return id
+}
+
+func cloneMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func fileReadError(err error, path string, action string) error {
+	return diag.Wrap(
+		err,
+		charter.CodeFileIO,
+		"file operation failed.",
+		diag.WithDetail("action", action),
+		diag.WithDetail("path", path),
+		diag.WithDetail("error", err.Error()),
 	)
 }
 
@@ -464,6 +1063,18 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var validation *charter.ValidationError
 	if errors.As(err, &validation) {
 		return validation.Diagnostics
+	}
+	var contractValidation *contracts.ValidationError
+	if errors.As(err, &contractValidation) {
+		return contractValidation.Diagnostics
+	}
+	var planningValidation *planning.ValidationError
+	if errors.As(err, &planningValidation) {
+		return planningValidation.Diagnostics
+	}
+	var preflightError *preflight.Error
+	if errors.As(err, &preflightError) {
+		return preflightError.Diagnostics
 	}
 	return nil
 }
