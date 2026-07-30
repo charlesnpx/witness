@@ -28,6 +28,11 @@ import (
 	"witness/internal/strictjson"
 )
 
+const (
+	verificationPlanMissingPreflight = "verification_plan_missing_preflight"
+	verificationPlanInvalidPreflight = "verification_plan_invalid_preflight"
+)
+
 var witnessCommands = map[string]map[string]bool{
 	"charter": {
 		"init":   true,
@@ -149,6 +154,15 @@ func runVerificationPreflight(args []string) error {
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
 	}
+	if err := rejectOutputPathAliases(*out,
+		protectedInput{role: "relay", path: *relayPath},
+		protectedInput{role: "integration-bundle", path: *integrationBundlePath},
+		protectedInput{role: "state-dir", path: *stateDir},
+		protectedInput{role: "source-dir", path: *sourceDir},
+		protectedInput{role: "snapshot-dir", path: *snapshotDir},
+	); err != nil {
+		return err
+	}
 	result, err := preflight.Run(context.Background(), preflight.Options{
 		RelayPath:             *relayPath,
 		IntegrationBundlePath: *integrationBundlePath,
@@ -166,6 +180,7 @@ func runVerificationPreflight(args []string) error {
 func runVerificationPlan(args []string) error {
 	flags := newFlagSet("witness verification plan")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
+	preflightPath := flags.String("preflight", "", "verification preflight result path")
 	stateDir := flags.String("state-dir", "", "verification state directory")
 	out := flags.String("out", "", "verification plan output path")
 	var roleOutputPaths repeatedStrings
@@ -185,8 +200,27 @@ func runVerificationPlan(args []string) error {
 	if len(roleOutputPaths) == 0 {
 		return diag.New(diag.CodeInvalidCommand, "witness verification plan requires at least one -role-output.")
 	}
-	frozen, err := readFrozenCharterFile(*frozenPath)
+	if *preflightPath == "" {
+		return diag.New(verificationPlanMissingPreflight, "witness verification plan requires -preflight.")
+	}
+	protected := []protectedInput{{role: "charter-freeze", path: *frozenPath}, {role: "preflight", path: *preflightPath}, {role: "state-dir", path: *stateDir}}
+	protected = append(protected, protectedInputsForPaths("role-output", roleOutputPaths)...)
+	if err := rejectOutputPathAliases(*out, protected...); err != nil {
+		return err
+	}
+	frozen, frozenBytes, err := readFrozenCharterFileWithBytes(*frozenPath)
 	if err != nil {
+		return err
+	}
+	preflightResult, err := readPreflightFile(*preflightPath)
+	if err != nil {
+		return err
+	}
+	if err := validatePlanningPreflightResult(preflightResult); err != nil {
+		return err
+	}
+	preflightBinding := planningPreflightBinding(preflightResult)
+	if err := validatePlanningPreflightBinding(preflightBinding); err != nil {
 		return err
 	}
 	inputs := make([]planning.RoleOutputInput, 0, len(roleOutputPaths))
@@ -203,8 +237,10 @@ func runVerificationPlan(args []string) error {
 	}
 	result, err := planning.Run(planning.Options{
 		FrozenCharter: &frozen,
+		CharterDigest: digest.RawBytes(frozenBytes),
 		RoleOutputs:   inputs,
 		StateDir:      *stateDir,
+		Preflight:     preflightBinding,
 	})
 	if err != nil {
 		return err
@@ -254,6 +290,23 @@ func runVerificationAssemble(args []string) error {
 	}
 	if *planPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble requires -plan.")
+	}
+	protected := []protectedInput{
+		{role: "plan", path: *planPath},
+		{role: "compatibility-manifest", path: *compatibilityPath},
+		{role: "relay-capabilities", path: *capabilitiesPath},
+		{role: "integration-bundle", path: *integrationBundlePath},
+		{role: "charter-freeze", path: *charterPath},
+		{role: "state-dir", path: *stateDir},
+		{role: "receipt-hmac-key-file", path: *receiptHMACKeyFile},
+	}
+	protected = append(protected, protectedInputsForPaths("batch", batchPaths)...)
+	protected = append(protected, protectedInputsForSpecs("relay-verdict", verdictPaths)...)
+	protected = append(protected, protectedInputsForPaths("receipt", receiptPaths)...)
+	protected = append(protected, protectedInputsForPaths("selected-contract", selectedContractPaths)...)
+	protected = append(protected, protectedInputsForPaths("artifact", artifactPaths)...)
+	if err := rejectOutputPathAliases(*out, protected...); err != nil {
+		return err
 	}
 	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0) {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble -run-relay cannot be combined with pre-produced relay evidence flags.")
@@ -359,6 +412,19 @@ func runAdjudicate(args []string) error {
 	if *manifestPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness adjudicate requires -manifest.")
 	}
+	protected := []protectedInput{
+		{role: "charter-freeze", path: *frozenPath},
+		{role: "manifest", path: *manifestPath},
+		{role: "receipt-hmac-key-file", path: *receiptHMACKeyFile},
+		{role: "prior-lineage", path: *priorLineagePath},
+		{role: "rules", path: *rulesPath},
+		{role: "policy", path: *policyPath},
+		{role: "ledger", path: *ledgerPath},
+	}
+	protected = append(protected, protectedInputsForPaths("role-output", roleOutputPaths)...)
+	if err := rejectOutputPathAliases(*out, protected...); err != nil {
+		return err
+	}
 	frozen, err := readFrozenCharterFile(*frozenPath)
 	if err != nil {
 		return err
@@ -430,6 +496,11 @@ func runMetrics(args []string) error {
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
+	}
+	protected := []protectedInput{{role: "ledger", path: *ledgerPath}, {role: "preflight", path: *preflightPath}}
+	protected = append(protected, protectedInputsForPaths("run-result", runResultPaths)...)
+	if err := rejectOutputPathAliases(*out, protected...); err != nil {
+		return err
 	}
 	document, err := metrics.Run(metrics.Options{
 		LedgerPath:     *ledgerPath,
@@ -650,6 +721,9 @@ func runLedgerShow(args []string) error {
 	if *ledgerPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness ledger show requires -ledger.")
 	}
+	if err := rejectOutputPathAliases(*out, protectedInput{role: "ledger", path: *ledgerPath}); err != nil {
+		return err
+	}
 	document, err := ledger.Show(*ledgerPath, ledger.ShowOptions{Kinds: kinds})
 	if err != nil {
 		return err
@@ -673,6 +747,9 @@ func runLedgerPromote(args []string) error {
 	}
 	if *ledgerPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness ledger promote requires -ledger.")
+	}
+	if err := rejectOutputPathAliases(*out, protectedInput{role: "ledger", path: *ledgerPath}); err != nil {
+		return err
 	}
 	record, err := ledger.AppendEvent(*ledgerPath, ledger.EventKindPromotion, ledger.PromotionEvent{
 		QuestionID: *questionID,
@@ -702,6 +779,9 @@ func runLedgerAcceptUnverified(args []string) error {
 	}
 	if *ledgerPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness ledger accept-unverified requires -ledger.")
+	}
+	if err := rejectOutputPathAliases(*out, protectedInput{role: "ledger", path: *ledgerPath}); err != nil {
+		return err
 	}
 	record, err := ledger.AppendEvent(*ledgerPath, ledger.EventKindAcceptUnverified, ledger.AcceptUnverifiedEvent{
 		FindingID:             *findingID,
@@ -742,6 +822,14 @@ func runPolicyShow(args []string) error {
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
 	}
+	if err := rejectOutputPathAliases(*out,
+		protectedInput{role: "policy", path: *policyPath},
+		protectedInput{role: "rules", path: *rulesPath},
+		protectedInput{role: "ledger", path: *ledgerPath},
+		protectedInput{role: "charter-freeze", path: *charterPath},
+	); err != nil {
+		return err
+	}
 	effective, err := loadEffectivePolicy(*policyPath, *rulesPath, *ledgerPath, *charterPath, *charterHash)
 	if err != nil {
 		return err
@@ -777,6 +865,14 @@ func runPolicyReleaseCaps(args []string) error {
 	}
 	if *policyPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness policy release-caps requires -policy.")
+	}
+	if err := rejectOutputPathAliases(*out,
+		protectedInput{role: "ledger", path: *ledgerPath},
+		protectedInput{role: "policy", path: *policyPath},
+		protectedInput{role: "rules", path: *rulesPath},
+		protectedInput{role: "charter-freeze", path: *charterPath},
+	); err != nil {
+		return err
 	}
 	inputs, err := readPolicyCommandInputs(*policyPath, *rulesPath, *charterPath, *charterHash)
 	if err != nil {
@@ -852,6 +948,14 @@ func runPolicyCheckApplication(args []string) error {
 	}
 	if !measuredTest.set {
 		return diag.New(diag.CodeInvalidCommand, "witness policy check-application requires -measured-test.")
+	}
+	if err := rejectOutputPathAliases(*out,
+		protectedInput{role: "ledger", path: *ledgerPath},
+		protectedInput{role: "policy", path: *policyPath},
+		protectedInput{role: "rules", path: *rulesPath},
+		protectedInput{role: "charter-freeze", path: *charterPath},
+	); err != nil {
+		return err
 	}
 	inputs, err := readPolicyCommandInputs(*policyPath, *rulesPath, *charterPath, *charterHash)
 	if err != nil {
@@ -1124,11 +1228,20 @@ func (value *optionalIntFlag) Set(raw string) error {
 }
 
 func readFrozenCharterFile(path string) (charter.FrozenCharter, error) {
+	frozen, _, err := readFrozenCharterFileWithBytes(path)
+	return frozen, err
+}
+
+func readFrozenCharterFileWithBytes(path string) (charter.FrozenCharter, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return charter.FrozenCharter{}, fileReadError(err, path, "open frozen Charter")
+		return charter.FrozenCharter{}, nil, fileReadError(err, path, "open frozen Charter")
 	}
-	return strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
+	frozen, err := strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return charter.FrozenCharter{}, nil, err
+	}
+	return frozen, append([]byte(nil), data...), nil
 }
 
 func readRoleOutputFile(path string) (contracts.RoleOutputDocument, error) {
@@ -1169,6 +1282,74 @@ func readReviewPolicyFile(path string) (contracts.ReviewPolicy, error) {
 		return contracts.ReviewPolicy{}, fileReadError(err, path, "open review policy")
 	}
 	return contracts.ReadReviewPolicyBytes(data)
+}
+
+func readPreflightFile(path string) (preflight.Result, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return preflight.Result{}, fileReadError(err, path, "open verification preflight")
+	}
+	return strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+}
+
+func planningPreflightBinding(result preflight.Result) planning.PreflightBinding {
+	return planning.PreflightBinding{
+		SnapshotDigest:          result.SnapshotDigest,
+		CompatibilityDigest:     result.ArtifactDigests["compatibility-manifest.json"],
+		RelayCapabilitiesDigest: result.ArtifactDigests["relay-capabilities.json"],
+		IntegrationBundleDigest: result.ContractDigests["integration_bundle"],
+	}
+}
+
+func validatePlanningPreflightResult(result preflight.Result) error {
+	if result.SchemaVersion != preflight.SchemaVersion {
+		return diag.New(
+			verificationPlanInvalidPreflight,
+			"verification preflight result schema_version is not supported.",
+			diag.WithDetail("expected", preflight.SchemaVersion),
+			diag.WithDetail("actual", result.SchemaVersion),
+		)
+	}
+	if !result.OK {
+		return diag.New(
+			verificationPlanInvalidPreflight,
+			"verification preflight result did not pass.",
+			diag.WithDetail("diagnostic_count", len(result.Diagnostics)),
+		)
+	}
+	if len(result.Diagnostics) > 0 {
+		return diag.New(
+			verificationPlanInvalidPreflight,
+			"verification preflight result contains blocking diagnostics.",
+			diag.WithDetail("diagnostics", result.Diagnostics),
+		)
+	}
+	return nil
+}
+
+func validatePlanningPreflightBinding(binding planning.PreflightBinding) error {
+	var missing []string
+	for _, item := range []struct {
+		label string
+		value string
+	}{
+		{label: "snapshot_digest", value: binding.SnapshotDigest},
+		{label: "compatibility_manifest", value: binding.CompatibilityDigest},
+		{label: "relay_capabilities", value: binding.RelayCapabilitiesDigest},
+		{label: "integration_bundle", value: binding.IntegrationBundleDigest},
+	} {
+		if strings.TrimSpace(item.value) == "" {
+			missing = append(missing, item.label)
+		}
+	}
+	if len(missing) > 0 {
+		return diag.New(
+			verificationPlanInvalidPreflight,
+			"verification preflight result is missing required pass-binding digests.",
+			diag.WithDetail("missing", missing),
+		)
+	}
+	return nil
 }
 
 func readBatchEvidence(paths []string) ([]planning.BatchEvidence, error) {
@@ -1316,8 +1497,8 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 		byBatch[batchID] = record
 	}
 	result := make([]planning.RelayEvidence, 0, len(byBatch))
-	for _, record := range byBatch {
-		result = append(result, record)
+	for _, batchID := range sortedRelayEvidenceBatchIDs(byBatch) {
+		result = append(result, byBatch[batchID])
 	}
 	return result, nil
 }
@@ -1352,6 +1533,11 @@ func manifestEvidenceRefs(
 		if err != nil {
 			return refs, err
 		}
+		compatibility, err := relayCompatibilityFromArtifactFile(compatibilityPath)
+		if err != nil {
+			return refs, err
+		}
+		refs.RelayCompatibility = &compatibility
 	}
 	if capabilitiesPath != "" {
 		refs.RelayCapabilities, err = artifactRefForFile("relay-capabilities", capabilitiesPath)
@@ -1374,6 +1560,21 @@ func manifestEvidenceRefs(
 		refs.SelectedContractEvidence = append(refs.SelectedContractEvidence, contractEvidence...)
 	}
 	return refs, nil
+}
+
+func relayCompatibilityFromArtifactFile(path string) (contracts.RelayCompatibility, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return contracts.RelayCompatibility{}, fileReadError(err, path, "open compatibility manifest")
+	}
+	payloadBytes, err := retainedPayloadCanonicalBytes(data)
+	if err != nil {
+		return contracts.RelayCompatibility{}, err
+	}
+	if len(payloadBytes) == 0 {
+		payloadBytes = data
+	}
+	return contracts.ReadRelayCompatibilityBytes(payloadBytes)
 }
 
 func selectedContractRefsForFile(path string) ([]contracts.ArtifactRef, error) {
@@ -1448,10 +1649,49 @@ func artifactRefForFile(kind string, path string) (contracts.ArtifactRef, error)
 					)
 				}
 				refDigest = actualDigest
+			} else if kind == "integration-bundle" {
+				semanticDigest, err := digest.SemanticJSON(value)
+				if err != nil {
+					return contracts.ArtifactRef{}, err
+				}
+				refDigest = semanticDigest
 			}
 		}
 	}
 	return artifactRef(kind, artifactIDFromPath(path), refDigest), nil
+}
+
+func retainedPayloadCanonicalBytes(data []byte) ([]byte, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, nil
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	payloadDigest, ok := object["payload_digest"].(string)
+	if !ok || strings.TrimSpace(payloadDigest) == "" {
+		return nil, nil
+	}
+	payload, hasPayload := object["payload"]
+	if !hasPayload {
+		return nil, diag.New(diag.CodeInvalidCommand, "retained artifact payload_digest requires a retained payload.")
+	}
+	payloadBytes, err := canonjson.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	actualDigest := digest.RawBytes(payloadBytes)
+	if actualDigest != strings.TrimSpace(payloadDigest) {
+		return nil, diag.New(
+			diag.CodeInvalidCommand,
+			"retained artifact payload_digest does not match the retained payload.",
+			diag.WithDetail("actual_digest", actualDigest),
+			diag.WithDetail("expected_digest", strings.TrimSpace(payloadDigest)),
+		)
+	}
+	return payloadBytes, nil
 }
 
 func artifactRef(kind string, id string, refDigest string) contracts.ArtifactRef {
@@ -1509,6 +1749,32 @@ func cloneMap(input map[string]any) map[string]any {
 		output[key] = value
 	}
 	return output
+}
+
+func protectedInputsForPaths(role string, paths []string) []protectedInput {
+	inputs := make([]protectedInput, 0, len(paths))
+	for _, path := range paths {
+		inputs = append(inputs, protectedInput{role: role, path: path})
+	}
+	return inputs
+}
+
+func protectedInputsForSpecs(role string, specs []string) []protectedInput {
+	inputs := make([]protectedInput, 0, len(specs))
+	for _, spec := range specs {
+		_, path, _ := splitKeyValueSpec(spec)
+		inputs = append(inputs, protectedInput{role: role, path: path})
+	}
+	return inputs
+}
+
+func sortedRelayEvidenceBatchIDs(values map[string]planning.RelayEvidence) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func fileReadError(err error, path string, action string) error {
@@ -1698,6 +1964,15 @@ type protectedInput struct {
 	path string
 }
 
+func (input protectedInput) rejectsContainedOutput() bool {
+	switch input.role {
+	case "state-dir", "snapshot-dir", "source-dir":
+		return true
+	default:
+		return false
+	}
+}
+
 func rejectOutputPathAliases(outputPath string, protectedInputs ...protectedInput) error {
 	if outputPath == "" {
 		return nil
@@ -1717,7 +1992,17 @@ func rejectOutputPathAliases(outputPath string, protectedInputs ...protectedInpu
 		if resolvedOutput.conflictsWith(resolvedInput) {
 			return diag.New(
 				charter.CodeOutputPathConflict,
-				"output path must not overwrite required charter inputs.",
+				"output path must not overwrite required inputs.",
+				diag.WithDetail("input_path", input.path),
+				diag.WithDetail("input_role", input.role),
+				diag.WithDetail("output_path", outputPath),
+				diag.WithDetail("resolved_path", resolvedOutput.canonical),
+			)
+		}
+		if input.rejectsContainedOutput() && resolvedOutput.isInside(resolvedInput) {
+			return diag.New(
+				charter.CodeOutputPathConflict,
+				"output path must not be inside protected input directories.",
 				diag.WithDetail("input_path", input.path),
 				diag.WithDetail("input_role", input.role),
 				diag.WithDetail("output_path", outputPath),
@@ -1746,6 +2031,25 @@ func (left comparablePathInfo) conflictsWith(right comparablePathInfo) bool {
 		}
 	}
 	return false
+}
+
+func (left comparablePathInfo) isInside(right comparablePathInfo) bool {
+	for _, leftPath := range left.paths {
+		for _, rightPath := range right.paths {
+			if pathInside(leftPath, rightPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathInside(child string, parent string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil || rel == "." || rel == "" {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func comparablePath(path string) (comparablePathInfo, error) {
@@ -1777,7 +2081,7 @@ func comparablePath(path string) (comparablePathInfo, error) {
 	}
 	comparable := comparablePathInfo{
 		canonical: canonical,
-		paths:     []string{canonical},
+		paths:     uniqueComparablePaths(canonical, filepath.Clean(absolute)),
 		info:      info,
 	}
 	if info == nil {
@@ -1786,15 +2090,36 @@ func comparablePath(path string) (comparablePathInfo, error) {
 			return comparablePathInfo{}, err
 		}
 		if ok {
-			comparable.paths = append(comparable.paths, target)
+			comparable.paths = appendComparablePath(comparable.paths, target)
 			resolvedTarget, err := comparablePathString(target)
 			if err != nil {
 				return comparablePathInfo{}, err
 			}
-			comparable.paths = append(comparable.paths, resolvedTarget)
+			comparable.paths = appendComparablePath(comparable.paths, resolvedTarget)
 		}
 	}
 	return comparable, nil
+}
+
+func uniqueComparablePaths(paths ...string) []string {
+	var unique []string
+	for _, path := range paths {
+		unique = appendComparablePath(unique, path)
+	}
+	return unique
+}
+
+func appendComparablePath(paths []string, path string) []string {
+	path = filepath.Clean(path)
+	if path == "" || path == "." {
+		return paths
+	}
+	for _, existing := range paths {
+		if existing == path {
+			return paths
+		}
+	}
+	return append(paths, path)
 }
 
 func comparablePathString(path string) (string, error) {
@@ -1814,21 +2139,7 @@ func comparablePathString(path string) (string, error) {
 		return resolved, nil
 	}
 	if os.IsNotExist(err) {
-		resolvedParent, parentErr := filepath.EvalSymlinks(filepath.Dir(absolute))
-		if parentErr == nil {
-			return filepath.Join(resolvedParent, filepath.Base(absolute)), nil
-		}
-		if !os.IsNotExist(parentErr) {
-			return "", diag.Wrap(
-				parentErr,
-				charter.CodeFileIO,
-				"file operation failed.",
-				diag.WithDetail("action", "resolve path"),
-				diag.WithDetail("path", path),
-				diag.WithDetail("error", parentErr.Error()),
-			)
-		}
-		return absolute, nil
+		return resolveThroughDeepestExistingAncestor(absolute, path)
 	}
 	return "", diag.Wrap(
 		err,
@@ -1838,6 +2149,34 @@ func comparablePathString(path string) (string, error) {
 		diag.WithDetail("path", path),
 		diag.WithDetail("error", err.Error()),
 	)
+}
+
+func resolveThroughDeepestExistingAncestor(absolute string, displayPath string) (string, error) {
+	current := filepath.Clean(absolute)
+	var remainder []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			parts := append([]string{resolved}, remainder...)
+			return filepath.Join(parts...), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", diag.Wrap(
+				err,
+				charter.CodeFileIO,
+				"file operation failed.",
+				diag.WithDetail("action", "resolve path"),
+				diag.WithDetail("path", displayPath),
+				diag.WithDetail("error", err.Error()),
+			)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return current, nil
+		}
+		remainder = append([]string{filepath.Base(current)}, remainder...)
+		current = parent
+	}
 }
 
 func finalSymlinkTarget(path string) (string, bool, error) {

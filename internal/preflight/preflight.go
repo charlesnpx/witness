@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"witness/internal/canonjson"
+	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
 	"witness/internal/freeze"
@@ -50,6 +51,7 @@ type Options struct {
 	SourceDir             string
 	SnapshotDir           string
 	AllowNonGitSource     bool
+	ConsumerIdentity      map[string]any
 	Runner                relayclient.Runner
 }
 
@@ -64,6 +66,7 @@ type Result struct {
 	ContractDigests      map[string]string `json:"contract_digests"`
 	BackendStrata        map[string]string `json:"backend_strata"`
 	SnapshotDigest       string            `json:"snapshot_digest,omitempty"`
+	ConsumerIdentity     map[string]any    `json:"consumer_identity"`
 	Diagnostics          []diag.Diagnostic `json:"diagnostics,omitempty"`
 }
 
@@ -130,6 +133,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		RecipePlanDigests:    map[string]string{},
 		ContractDigests:      map[string]string{},
 		BackendStrata:        map[string]string{},
+		ConsumerIdentity:     consumerIdentity(options.ConsumerIdentity),
 	}
 	var diagnostics []diag.Diagnostic
 	if options.StateDir == "" {
@@ -585,7 +589,8 @@ func loadIntegrationBundle(path string) (any, string, []diag.Diagnostic) {
 func selectedContractDigests(bundlePayload any, reports map[string]relayclient.CompileReport) (map[string]string, []diag.Diagnostic) {
 	digests := map[string]string{}
 	var diagnostics []diag.Diagnostic
-	for recipeID, report := range reports {
+	for _, recipeID := range sortedCompileReportKeys(reports) {
+		report := reports[recipeID]
 		if report.RootRecipePlan != nil && strings.TrimSpace(report.IntegrationContractDigest) == "" {
 			reportRecipeID := report.RecipeID
 			if reportRecipeID == "" {
@@ -598,7 +603,8 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 				diag.WithDetail("contract_id", report.IntegrationContract),
 			)))
 		}
-		for contractID, contractDigest := range report.ContractDigests {
+		for _, contractID := range sortedStringMapKeys(report.ContractDigests) {
+			contractDigest := report.ContractDigests[contractID]
 			if contractID != "" && contractDigest != "" {
 				digests[contractID] = contractDigest
 			}
@@ -610,7 +616,7 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 	}
 	foundContracts := map[string]bool{}
 	scanContracts(bundlePayload, wanted, foundContracts)
-	for contractID := range wanted {
+	for _, contractID := range sortedBoolMapKeys(wanted) {
 		if bundlePayload != nil && !foundContracts[contractID] {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
 				CodeRecipeContractMismatch,
@@ -876,36 +882,133 @@ func typedCompileFailureDiagnostic(recipeID string, relayDiagnostic diag.Diagnos
 	}
 }
 
-func compatibilityManifest(result *Result, diagnostics []diag.Diagnostic) map[string]any {
-	requiredCapabilities := make([]map[string]any, 0, len(RequiredCapabilities))
+func compatibilityManifest(result *Result, diagnostics []diag.Diagnostic) contracts.RelayCompatibility {
+	capabilities := make(map[string]bool, len(contracts.RequiredRelayCapabilityClosureV3))
 	missing := map[string]bool{}
 	for _, diagnostic := range diagnostics {
 		if diagnostic.Code == CodeMissingCapability {
-			if family, ok := diagnostic.Details["family"].(string); ok {
-				missing[family] = true
+			family, _ := diagnostic.Details["family"].(string)
+			capability := fmt.Sprint(diagnostic.Details["capability"])
+			for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+				if requirement.Family == family && fmt.Sprint(requirement.Capability) == capability {
+					missing[requirement.Key] = true
+				}
 			}
 		}
 	}
-	for _, requirement := range RequiredCapabilities {
-		requiredCapabilities = append(requiredCapabilities, map[string]any{
-			"family":     requirement.Family,
-			"capability": requirement.Capability,
-			"present":    !missing[requirement.Family],
+	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+		capabilities[requirement.Key] = !missing[requirement.Key]
+	}
+	return contracts.RelayCompatibility{
+		SchemaVersion:           contracts.RelayCompatibilityV3,
+		ConvoRelayVersion:       result.RelayVersion,
+		DigestProfile:           digest.Profile,
+		Capabilities:            capabilities,
+		CapabilitiesDigest:      result.ArtifactDigests["relay-capabilities.json"],
+		IntegrationBundleDigest: result.ContractDigests["integration_bundle"],
+		SelectedContracts:       relayCompatibilitySelectedContracts(result.ContractDigests),
+		RecipePlans:             relayCompatibilityRecipePlans(result.RecipePlanDigests),
+		CompileReports:          relayCompatibilityCompileReports(result.CompileReportDigests),
+		BackendStatus:           relayCompatibilityBackendStatus(result.BackendStrata),
+		ConsumerIdentity:        consumerIdentity(result.ConsumerIdentity),
+	}
+}
+
+func relayCompatibilitySelectedContracts(contractDigests map[string]string) []contracts.ContractDigest {
+	seen := map[string]bool{}
+	selected := make([]contracts.ContractDigest, 0, len(contracts.RequiredWitnessRecipeContractsV2))
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		if seen[requirement.ContractID] {
+			continue
+		}
+		seen[requirement.ContractID] = true
+		selected = append(selected, contracts.ContractDigest{
+			ContractID: requirement.ContractID,
+			Digest:     contractDigests[requirement.ContractID],
 		})
 	}
-	return map[string]any{
-		"schema_version":        "review-relay-compatibility-v3",
-		"digest_profile":        digest.Profile,
-		"preflight_schema":      SchemaVersion,
-		"ok":                    len(diagnostics) == 0,
-		"relay_version":         result.RelayVersion,
-		"required_capabilities": requiredCapabilities,
-		"required_recipes":      RequiredRecipes,
-		"backend_strata":        result.BackendStrata,
-		"artifact_digests":      result.ArtifactDigests,
-		"contract_digests":      result.ContractDigests,
-		"diagnostics":           diagnostics,
+	return selected
+}
+
+func relayCompatibilityRecipePlans(recipePlanDigests map[string]string) []contracts.RecipePlanDigest {
+	plans := make([]contracts.RecipePlanDigest, 0, len(contracts.RequiredWitnessRecipeContractsV2))
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		plans = append(plans, contracts.RecipePlanDigest{
+			RecipeID:   requirement.RecipeID,
+			ContractID: requirement.ContractID,
+			Digest:     recipePlanDigests[requirement.RecipeID],
+		})
 	}
+	return plans
+}
+
+func relayCompatibilityCompileReports(compileReportDigests map[string]string) []contracts.CompileReportRef {
+	reports := make([]contracts.CompileReportRef, 0, len(contracts.RequiredWitnessRecipeContractsV2))
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		reportDigest := compileReportDigests[requirement.RecipeID]
+		reports = append(reports, contracts.CompileReportRef{
+			RecipeID: requirement.RecipeID,
+			Status:   "retained",
+			Ref: contracts.ArtifactRef{
+				Kind:          "compile-report",
+				ID:            requirement.RecipeID,
+				Digest:        reportDigest,
+				DigestProfile: digest.Profile,
+				MediaType:     "application/json",
+			},
+			Digest: reportDigest,
+		})
+	}
+	return reports
+}
+
+func relayCompatibilityBackendStatus(strata map[string]string) []contracts.BackendStatus {
+	status := make([]contracts.BackendStatus, 0, len(requiredBackends))
+	for _, backend := range requiredBackends {
+		status = append(status, contracts.BackendStatus{
+			Backend: backend,
+			Status:  strata[backend],
+		})
+	}
+	return status
+}
+
+func consumerIdentity(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return map[string]any{"kind": "witness", "id": "verification-preflight"}
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func sortedCompileReportKeys(reports map[string]relayclient.CompileReport) []string {
+	keys := make([]string, 0, len(reports))
+	for key := range reports {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedStringMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedBoolMapKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func finish(result *Result, diagnostics []diag.Diagnostic) (*Result, error) {

@@ -51,12 +51,23 @@ func TestRunBatchesLaunchesEachBatchOnceAndRoutesFailurePending(t *testing.T) {
 	if err := os.WriteFile(batchPath, batchBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	artifactPath := filepath.Join(dir, "artifact.json")
+	artifactBytes := []byte("artifact")
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest := digest.RawBytes(artifactBytes)
 	runner := &fakeRelayRunner{t: t, batchPath: batchPath}
 	result, err := RunBatches(context.Background(), []BatchInput{{
 		Plan: planning.BatchPlan{
-			BatchID:     "defect-batch-1",
-			TaskShape:   contracts.BatchTaskDefect,
-			BatchDigest: digest.RawBytes(batchBytes),
+			BatchID:           "defect-batch-1",
+			TaskShape:         contracts.BatchTaskDefect,
+			BatchDigest:       digest.RawBytes(batchBytes),
+			ArtifactDigest:    artifactDigest,
+			ArtifactDigestSet: []string{artifactDigest},
+		},
+		Document: contracts.VerificationBatchDocument{
+			ArtifactDigest: artifactDigest,
 		},
 		Path:     batchPath,
 		RawBytes: batchBytes,
@@ -64,6 +75,7 @@ func TestRunBatchesLaunchesEachBatchOnceAndRoutesFailurePending(t *testing.T) {
 		RelayPath:             "fake-relay",
 		IntegrationBundlePath: "bundle.json",
 		CharterPath:           "charter.json",
+		ArtifactPaths:         []string{artifactPath},
 		Backend:               "codex",
 		Runner:                runner,
 	})
@@ -140,6 +152,149 @@ func TestRunBatchesRejectsEmptyPlanBatchDigestBeforeLaunch(t *testing.T) {
 		RelayPath:             "fake-relay",
 		IntegrationBundlePath: "bundle.json",
 		CharterPath:           "charter.json",
+		Backend:               "codex",
+		Runner:                runner,
+	})
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if runner.runCalls != 0 {
+		t.Fatalf("run calls = %d, want 0", runner.runCalls)
+	}
+	if len(result.Runs) != 1 || result.Runs[0].Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("runs = %#v, want unavailable", result.Runs)
+	}
+	if len(result.Runs[0].Diagnostics) != 1 || result.Runs[0].Diagnostics[0].Code != CodeInvalidBatchInput {
+		t.Fatalf("diagnostics = %#v, want %s", result.Runs[0].Diagnostics, CodeInvalidBatchInput)
+	}
+}
+
+func TestRunBatchesRejectsMissingPlanArtifactDigestSetBeforeLaunch(t *testing.T) {
+	dir := t.TempDir()
+	batchPath := filepath.Join(dir, "batch.json")
+	batchBytes := []byte(`{"batch":"input"}`)
+	if err := os.WriteFile(batchPath, batchBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(dir, "artifact.json")
+	artifactBytes := []byte("artifact")
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest := digest.RawBytes(artifactBytes)
+	runner := &fakeRelayRunner{t: t, batchPath: batchPath}
+	result, err := RunBatches(context.Background(), []BatchInput{{
+		Plan: planning.BatchPlan{
+			BatchID:        "defect-batch-1",
+			TaskShape:      contracts.BatchTaskDefect,
+			BatchDigest:    digest.RawBytes(batchBytes),
+			ArtifactDigest: artifactDigest,
+		},
+		Document: contracts.VerificationBatchDocument{
+			ArtifactDigest: artifactDigest,
+		},
+		Path:     batchPath,
+		RawBytes: batchBytes,
+	}}, Options{
+		RelayPath:             "fake-relay",
+		IntegrationBundlePath: "bundle.json",
+		CharterPath:           "charter.json",
+		ArtifactPaths:         []string{artifactPath},
+		Backend:               "codex",
+		Runner:                runner,
+	})
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if runner.runCalls != 0 {
+		t.Fatalf("run calls = %d, want 0", runner.runCalls)
+	}
+	if len(result.Runs) != 1 || result.Runs[0].Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("runs = %#v, want unavailable", result.Runs)
+	}
+	if len(result.Runs[0].Diagnostics) != 1 || result.Runs[0].Diagnostics[0].Code != CodeInvalidBatchInput {
+		t.Fatalf("diagnostics = %#v, want %s", result.Runs[0].Diagnostics, CodeInvalidBatchInput)
+	}
+}
+
+func TestRunBatchesRejectsMissingArtifactInputBeforeLaunch(t *testing.T) {
+	dir := t.TempDir()
+	batchPath := filepath.Join(dir, "batch.json")
+	batchBytes := []byte(`{"batch":"input"}`)
+	if err := os.WriteFile(batchPath, batchBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest := digest.RawBytes([]byte("artifact"))
+	runner := &fakeRelayRunner{t: t, batchPath: batchPath}
+	result, err := RunBatches(context.Background(), []BatchInput{{
+		Plan: planning.BatchPlan{
+			BatchID:           "defect-batch-1",
+			TaskShape:         contracts.BatchTaskDefect,
+			BatchDigest:       digest.RawBytes(batchBytes),
+			ArtifactDigest:    artifactDigest,
+			ArtifactDigestSet: []string{artifactDigest},
+		},
+		Document: contracts.VerificationBatchDocument{
+			ArtifactDigest: artifactDigest,
+		},
+		Path:     batchPath,
+		RawBytes: batchBytes,
+	}}, Options{
+		RelayPath:             "fake-relay",
+		IntegrationBundlePath: "bundle.json",
+		CharterPath:           "charter.json",
+		Backend:               "codex",
+		Runner:                runner,
+	})
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if runner.runCalls != 0 {
+		t.Fatalf("run calls = %d, want 0", runner.runCalls)
+	}
+	if len(result.Runs) != 1 || result.Runs[0].Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("runs = %#v, want unavailable", result.Runs)
+	}
+	if len(result.Runs[0].Diagnostics) != 1 || result.Runs[0].Diagnostics[0].Code != CodeInvalidBatchInput {
+		t.Fatalf("diagnostics = %#v, want %s", result.Runs[0].Diagnostics, CodeInvalidBatchInput)
+	}
+}
+
+func TestRunBatchesRejectsExtraUnplannedArtifactInputBeforeLaunch(t *testing.T) {
+	dir := t.TempDir()
+	batchPath := filepath.Join(dir, "batch.json")
+	batchBytes := []byte(`{"batch":"input"}`)
+	if err := os.WriteFile(batchPath, batchBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(dir, "artifact.json")
+	if err := os.WriteFile(artifactPath, []byte("artifact"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	extraArtifactPath := filepath.Join(dir, "extra-artifact.json")
+	if err := os.WriteFile(extraArtifactPath, []byte("extra artifact"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest := digest.RawBytes([]byte("artifact"))
+	runner := &fakeRelayRunner{t: t, batchPath: batchPath}
+	result, err := RunBatches(context.Background(), []BatchInput{{
+		Plan: planning.BatchPlan{
+			BatchID:           "defect-batch-1",
+			TaskShape:         contracts.BatchTaskDefect,
+			BatchDigest:       digest.RawBytes(batchBytes),
+			ArtifactDigest:    artifactDigest,
+			ArtifactDigestSet: []string{artifactDigest},
+		},
+		Document: contracts.VerificationBatchDocument{
+			ArtifactDigest: artifactDigest,
+		},
+		Path:     batchPath,
+		RawBytes: batchBytes,
+	}}, Options{
+		RelayPath:             "fake-relay",
+		IntegrationBundlePath: "bundle.json",
+		CharterPath:           "charter.json",
+		ArtifactPaths:         []string{artifactPath, extraArtifactPath},
 		Backend:               "codex",
 		Runner:                runner,
 	})

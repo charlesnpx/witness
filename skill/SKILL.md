@@ -4,6 +4,8 @@ Use this skill to run Witness review from a frozen source state and frozen Chart
 
 Finder roles are exactly: defect, economy, and optional goal-fit.
 
+Use the shipped relay integration bundle at `skill/bundle/relay-integration-bundle-v2.json` for all Witness v2 relay verification recipes.
+
 ## Finder Guidance
 
 All finder output is a `review-role-output-v3` role-output document. Findings must name Charter goals; existing code, tests, defenses, and review machinery create no goals.

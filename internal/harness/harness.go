@@ -2365,7 +2365,8 @@ func isShellProgram(program string) bool {
 }
 
 func validateEnvironment(diagnostics *[]diag.Diagnostic, env map[string]string) {
-	for key, value := range env {
+	for _, key := range sortedKeys(env) {
+		value := env[key]
 		if key == "" || strings.ContainsAny(key, "=\x00") {
 			*diagnostics = append(*diagnostics, newDiagnostic(CodeInvalidRequest, "environment keys must be non-empty names without '=' or NUL bytes.", "/environment", map[string]any{"key": key}))
 		}

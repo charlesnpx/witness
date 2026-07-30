@@ -15,6 +15,33 @@ import (
 	"witness/internal/strictjson"
 )
 
+func TestValidatePortablePayloadRefsTraversesMapsDeterministically(t *testing.T) {
+	value := map[string]any{
+		"z_late": map[string]any{
+			"kind":                   "portable_payload_ref",
+			"portable_id":            "missing-z",
+			"source_artifact_id":     "provider_result:z",
+			"source_artifact_digest": testDigest("z"),
+		},
+		"a_first": map[string]any{
+			"kind":                   "portable_payload_ref",
+			"portable_id":            "missing-a",
+			"source_artifact_id":     "provider_result:a",
+			"source_artifact_digest": testDigest("a"),
+		},
+	}
+
+	for i := 0; i < 50; i++ {
+		err := validatePortablePayloadRefs(value, map[string]map[string]any{})
+		if err == nil {
+			t.Fatal("validatePortablePayloadRefs succeeded, want missing ref")
+		}
+		if !strings.Contains(err.Error(), "missing-a") {
+			t.Fatalf("error = %v, want first sorted missing ref missing-a", err)
+		}
+	}
+}
+
 func TestVerifyDirectoryPortableTamperTable(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -67,7 +94,7 @@ func TestVerifyDirectoryPortableTamperTable(t *testing.T) {
 				inputs := manifest["inputs"].([]any)
 				duplicate := cloneObject(inputs[1].(map[string]any))
 				manifest["inputs"] = append(inputs, duplicate)
-				manifest["input_count"] = 3
+				manifest["input_count"] = len(inputs) + 1
 				fixture.replacePayload(t, rootArtifactKindNamedInputManifest, "named-input-manifest", manifest)
 				fixture.refresh(t)
 			},
@@ -337,6 +364,7 @@ func newPortableFixture(t *testing.T) *portableFixture {
 			"provider_retry":              "forbid",
 			"result_source":               "reducer",
 			"participant_turns":           4,
+			"integration_bundle_digest":   testDigest("integration-bundle"),
 			"integration_contract_id":     witnessContractFalsificationV2,
 			"integration_contract_digest": contractDigest,
 			"integration_contract_ref":    portableRef("integration-contract", integrationContractSource["id"].(string), integrationContractSource["digest"].(string)),

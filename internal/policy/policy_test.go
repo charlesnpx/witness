@@ -35,6 +35,13 @@ func TestPolicyLoadAndApplicationBranches(t *testing.T) {
 			wantReason:  ReasonPolicyDisabled,
 		},
 		{
+			name:        "bootstrap measured-zero positive remedy refuses",
+			policy:      contracts.DefaultReviewPolicy(),
+			charterHash: charterHash,
+			check:       positiveCheck(0, 0, 0, 0),
+			wantReason:  ReasonPolicyDisabled,
+		},
+		{
 			name:          "enabled with missing cap rejects on load",
 			policy:        contracts.ReviewPolicy{SchemaVersion: contracts.ReviewPolicyV2, PolicyID: "policy-1", DefectAdditiveAutoApplyEnabled: true},
 			charterHash:   charterHash,

@@ -43,10 +43,12 @@ type RoleOutputInput struct {
 
 type Options struct {
 	FrozenCharter    *charter.FrozenCharter
+	CharterDigest    string
 	RoleOutputs      []RoleOutputInput
 	StateDir         string
 	ConsumerIdentity map[string]any
 	Rules            contracts.ReviewRules
+	Preflight        PreflightBinding
 }
 
 type Result struct {
@@ -71,28 +73,46 @@ func (err *ValidationError) Error() string {
 }
 
 type PlanDocument struct {
-	SchemaVersion    string            `json:"schema_version"`
-	DigestProfile    string            `json:"digest_profile"`
-	PlanDigest       string            `json:"plan_digest"`
-	CharterHash      string            `json:"charter_hash"`
-	ArtifactDigest   string            `json:"artifact_digest"`
-	BatchSizeMaximum int               `json:"batch_size_maximum"`
-	Batches          []BatchPlan       `json:"batches"`
-	ExcludedFindings []ExcludedFinding `json:"excluded_findings,omitempty"`
-	Diagnostics      []diag.Diagnostic `json:"diagnostics,omitempty"`
-	ConsumerIdentity map[string]any    `json:"consumer_identity"`
+	SchemaVersion                    string            `json:"schema_version"`
+	DigestProfile                    string            `json:"digest_profile"`
+	PlanDigest                       string            `json:"plan_digest"`
+	CharterHash                      string            `json:"charter_hash"`
+	CharterDigest                    string            `json:"charter_digest,omitempty"`
+	ArtifactDigest                   string            `json:"artifact_digest"`
+	PreflightSnapshotDigest          string            `json:"preflight_snapshot_digest,omitempty"`
+	PreflightCompatibilityDigest     string            `json:"preflight_compatibility_digest,omitempty"`
+	PreflightRelayCapabilitiesDigest string            `json:"preflight_relay_capabilities_digest,omitempty"`
+	IntegrationBundleDigest          string            `json:"integration_bundle_digest,omitempty"`
+	BatchSizeMaximum                 int               `json:"batch_size_maximum"`
+	Batches                          []BatchPlan       `json:"batches"`
+	ExcludedFindings                 []ExcludedFinding `json:"excluded_findings,omitempty"`
+	Diagnostics                      []diag.Diagnostic `json:"diagnostics,omitempty"`
+	ConsumerIdentity                 map[string]any    `json:"consumer_identity"`
 }
 
 type BatchPlan struct {
-	BatchID                string                `json:"batch_id"`
-	Role                   string                `json:"role"`
-	TaskShape              string                `json:"task_shape"`
-	RecipeFamily           string                `json:"recipe_family"`
-	SourceRoleOutputRef    contracts.ArtifactRef `json:"source_role_output_ref"`
-	SourceRoleOutputDigest string                `json:"source_role_output_digest"`
-	BatchRef               contracts.ArtifactRef `json:"batch_ref"`
-	BatchDigest            string                `json:"batch_digest"`
-	FindingIDs             []string              `json:"finding_ids"`
+	BatchID                 string                `json:"batch_id"`
+	Role                    string                `json:"role"`
+	TaskShape               string                `json:"task_shape"`
+	RecipeFamily            string                `json:"recipe_family"`
+	CharterHash             string                `json:"charter_hash,omitempty"`
+	CharterDigest           string                `json:"charter_digest,omitempty"`
+	ArtifactDigest          string                `json:"artifact_digest,omitempty"`
+	ArtifactDigestSet       []string              `json:"artifact_digest_set,omitempty"`
+	PreflightSnapshotDigest string                `json:"preflight_snapshot_digest,omitempty"`
+	IntegrationBundleDigest string                `json:"integration_bundle_digest,omitempty"`
+	SourceRoleOutputRef     contracts.ArtifactRef `json:"source_role_output_ref"`
+	SourceRoleOutputDigest  string                `json:"source_role_output_digest"`
+	BatchRef                contracts.ArtifactRef `json:"batch_ref"`
+	BatchDigest             string                `json:"batch_digest"`
+	FindingIDs              []string              `json:"finding_ids"`
+}
+
+type PreflightBinding struct {
+	SnapshotDigest          string
+	CompatibilityDigest     string
+	RelayCapabilitiesDigest string
+	IntegrationBundleDigest string
 }
 
 type ExcludedFinding struct {
@@ -168,11 +188,16 @@ func Run(options Options) (*Result, error) {
 	}
 
 	plan := PlanDocument{
-		SchemaVersion:    SchemaVersion,
-		DigestProfile:    digest.Profile,
-		CharterHash:      options.FrozenCharter.CharterHash,
-		BatchSizeMaximum: MaxBatchFindings,
-		ConsumerIdentity: consumer,
+		SchemaVersion:                    SchemaVersion,
+		DigestProfile:                    digest.Profile,
+		CharterHash:                      options.FrozenCharter.CharterHash,
+		CharterDigest:                    strings.TrimSpace(options.CharterDigest),
+		PreflightSnapshotDigest:          strings.TrimSpace(options.Preflight.SnapshotDigest),
+		PreflightCompatibilityDigest:     strings.TrimSpace(options.Preflight.CompatibilityDigest),
+		PreflightRelayCapabilitiesDigest: strings.TrimSpace(options.Preflight.RelayCapabilitiesDigest),
+		IntegrationBundleDigest:          strings.TrimSpace(options.Preflight.IntegrationBundleDigest),
+		BatchSizeMaximum:                 MaxBatchFindings,
+		ConsumerIdentity:                 consumer,
 	}
 
 	roleDigests := make([]string, len(options.RoleOutputs))
@@ -247,7 +272,7 @@ func Run(options Options) (*Result, error) {
 				})
 				continue
 			}
-			preSpendDiagnostics, reason := preSpendDiagnostics(document, finding, rules, options.FrozenCharter)
+			preSpendDiagnostics, reason := preSpendDiagnostics(document, finding, options.FrozenCharter)
 			if len(preSpendDiagnostics) > 0 {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
 					Role:        document.Role,
@@ -281,7 +306,7 @@ func Run(options Options) (*Result, error) {
 	}
 
 	sortCandidates(candidates)
-	batches, err := buildBatches(options.RoleOutputs, roleDigests, candidates)
+	batches, err := buildBatches(options.RoleOutputs, roleDigests, candidates, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +348,7 @@ func WriteState(stateDir string, result *Result) error {
 	return writeCanonicalFile(filepath.Join(stateDir, "verification", "index.skeleton.json"), result.ManifestSkeleton)
 }
 
-func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contracts.Finding, rules contracts.ReviewRules, frozen *charter.FrozenCharter) ([]diag.Diagnostic, string) {
+func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contracts.Finding, frozen *charter.FrozenCharter) ([]diag.Diagnostic, string) {
 	if document.Role == contracts.RoleDefect && frozen != nil {
 		scope := charter.ValidateFindingScope(frozen.Charter.OperationalEnvelope, charter.FindingScope{
 			FindingID: finding.ID,
@@ -349,16 +374,8 @@ func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contract
 			return prefixDiagnostics("/witness", witness.Diagnostics), CodeInvalidReachability
 		}
 	}
-	if exceedsSeverityCap(finding.ClaimedSeverity, finding.Witness.Strength, rules) {
-		return []diag.Diagnostic{diag.FromError(diag.New(
-			CodeSeverityExceedsCap,
-			"claimed severity exceeds the maximum severity supported by the filed witness strength.",
-			diag.WithDetail("finding_id", finding.ID),
-			diag.WithDetail("claimed_severity", finding.ClaimedSeverity),
-			diag.WithDetail("witness_strength", finding.Witness.Strength),
-			diag.WithDetail("maximum_severity", rules.SeverityCaps[finding.Witness.Strength]),
-		))}, CodeSeverityExceedsCap
-	}
+	// review-rules-v2 caps are adjudication semantics: planning sends over-cap
+	// claims to verification, and adjudication caps admitted or pending results.
 	if finding.Recurrence != nil && finding.Recurrence.PriorFindingID == finding.ID {
 		return []diag.Diagnostic{diag.FromError(diag.New(
 			CodeRecursiveRecurrence,
@@ -370,7 +387,7 @@ func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contract
 	return nil, ""
 }
 
-func buildBatches(inputs []RoleOutputInput, roleDigests []string, candidates []candidate) ([]BatchOutput, error) {
+func buildBatches(inputs []RoleOutputInput, roleDigests []string, candidates []candidate, planDocument PlanDocument) ([]BatchOutput, error) {
 	var batches []BatchOutput
 	roleCounts := map[string]int{}
 	var current []candidate
@@ -398,12 +415,18 @@ func buildBatches(inputs []RoleOutputInput, roleDigests []string, candidates []c
 			roleOutputRef.Digest = roleDigests[first.sourceIndex]
 		}
 		plan := BatchPlan{
-			BatchID:                batchID,
-			Role:                   first.role,
-			TaskShape:              first.taskShape,
-			RecipeFamily:           recipeFamilyForTask(first.taskShape),
-			SourceRoleOutputRef:    roleOutputRef,
-			SourceRoleOutputDigest: document.SourceRoleOutputDigest,
+			BatchID:                 batchID,
+			Role:                    first.role,
+			TaskShape:               first.taskShape,
+			RecipeFamily:            recipeFamilyForTask(first.taskShape),
+			CharterHash:             planDocument.CharterHash,
+			CharterDigest:           planDocument.CharterDigest,
+			ArtifactDigest:          planDocument.ArtifactDigest,
+			ArtifactDigestSet:       plannedArtifactDigests(document.ArtifactDigest),
+			PreflightSnapshotDigest: planDocument.PreflightSnapshotDigest,
+			IntegrationBundleDigest: planDocument.IntegrationBundleDigest,
+			SourceRoleOutputRef:     roleOutputRef,
+			SourceRoleOutputDigest:  document.SourceRoleOutputDigest,
 			BatchRef: contracts.ArtifactRef{
 				Kind:          "verification-batch",
 				ID:            batchID,

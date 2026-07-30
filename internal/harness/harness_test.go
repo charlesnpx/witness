@@ -71,6 +71,27 @@ func TestRunEchoReceiptValidAndOutputDigestMatches(t *testing.T) {
 	}
 }
 
+func TestValidateEnvironmentDiagnosticsAreDeterministic(t *testing.T) {
+	env := map[string]string{
+		"z=": "last",
+		"a=": "first",
+		"m=": "middle",
+	}
+	var first []diag.Diagnostic
+	validateEnvironment(&first, env)
+	want := environmentDiagnosticKeys(first)
+	if len(want) != 3 || want[0] != "a=" || want[1] != "m=" || want[2] != "z=" {
+		t.Fatalf("diagnostic keys = %#v, want sorted invalid keys", want)
+	}
+	for i := 0; i < 25; i++ {
+		var diagnostics []diag.Diagnostic
+		validateEnvironment(&diagnostics, env)
+		if got := environmentDiagnosticKeys(diagnostics); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("run %d diagnostic keys = %#v, want %#v", i, got, want)
+		}
+	}
+}
+
 func TestVerifyReceiptTamperTable(t *testing.T) {
 	fixture := newRunFixture(t)
 	fixture.request.Command = contracts.ExecutableSpec{
@@ -157,6 +178,15 @@ func TestVerifyReceiptTamperTable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func environmentDiagnosticKeys(diagnostics []diag.Diagnostic) []string {
+	keys := make([]string, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		key, _ := diagnostic.Details["key"].(string)
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func TestVerifyReceiptWithoutArtifactsUnavailable(t *testing.T) {

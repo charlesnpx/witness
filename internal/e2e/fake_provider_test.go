@@ -199,18 +199,20 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 	root := t.TempDir()
 	passDir := filepath.Join(root, "pass")
 	mustMkdir(t, passDir)
+	resultsDir := filepath.Join(root, "results")
+	mustMkdir(t, resultsDir)
 	sourceDir := filepath.Join(root, "source")
 	mustMkdir(t, sourceDir)
 	writeFile(t, filepath.Join(sourceDir, "app.txt"), []byte("ok\n"), 0o644)
 
-	charterPath := filepath.Join(passDir, "charter.json")
+	charterPath := filepath.Join(resultsDir, "charter.json")
 	runOK(t, nil, bins.witness, "charter", "init", "-out", charterPath, "-actor", "owner", "-event-id", "initial-charter")
 	writeCharter(t, charterPath)
-	frozenPath := filepath.Join(passDir, "charter.freeze.json")
+	frozenPath := filepath.Join(resultsDir, "charter.freeze.json")
 	runOK(t, nil, bins.witness, "charter", "freeze", "-charter", charterPath, "-out", frozenPath)
 	frozen := readJSON[charter.FrozenCharter](t, frozenPath)
 
-	preflightPath := filepath.Join(passDir, "preflight.json")
+	preflightPath := filepath.Join(resultsDir, "preflight.json")
 	snapshotDir := filepath.Join(root, "snapshot")
 	bundlePath := filepath.Join(repoRoot(t), "testdata", "preflight", "integration-bundle-v2.fixture.json")
 	runOK(t, nil, bins.witness,
@@ -236,14 +238,14 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		CWD:                 ".",
 		ExpectedObservation: "stdout_contains=ok",
 	}
-	defectPath := filepath.Join(passDir, "defect-output.json")
-	economyPath := filepath.Join(passDir, "economy-output.json")
+	defectPath := filepath.Join(resultsDir, "defect-output.json")
+	economyPath := filepath.Join(resultsDir, "economy-output.json")
 	writeRoleOutputs(t, frozen, preflightResult.SnapshotDigest, executable, defectPath, economyPath)
 
-	keyPath := filepath.Join(passDir, "receipt.key")
+	keyPath := filepath.Join(resultsDir, "receipt.key")
 	writeFile(t, keyPath, []byte("e2e-hmac-key"), 0o600)
-	receiptDir := filepath.Join(passDir, "verification", "receipts")
-	requestPath := filepath.Join(passDir, "harness-request.json")
+	receiptDir := filepath.Join(resultsDir, "verification", "receipts")
+	requestPath := filepath.Join(resultsDir, "harness-request.json")
 	writeHarnessRequest(t, requestPath, frozen.CharterHash, preflightResult.SnapshotDigest, filepath.Join(snapshotDir, "manifest.json"), executable, keyPath)
 	harnessOut := runOK(t, nil, bins.harness, "run", "-request", requestPath, "-out-dir", receiptDir)
 	var harnessResult struct {
@@ -254,26 +256,28 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		t.Fatalf("harness output missing receipt_path: %s", harnessOut.stdout)
 	}
 
-	planPath := filepath.Join(passDir, "verification-plan.json")
+	planPath := filepath.Join(resultsDir, "verification-plan.json")
 	runOK(t, nil, bins.witness,
 		"verification", "plan",
 		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
 		"-state-dir", passDir,
 		"-role-output", defectPath,
 		"-role-output", economyPath,
 		"-out", planPath,
 	)
 
-	manifestPath := filepath.Join(passDir, "verification", "index.json")
+	manifestPath := filepath.Join(resultsDir, "verification", "index.json")
 	assembleArgs := []string{
 		"verification", "assemble",
 		"-plan", planPath,
 		"-state-dir", passDir,
 		"-run-relay",
 		"-relay", bins.relay,
-		"-relay-home", filepath.Join(passDir, "relay-home"),
+		"-relay-home", filepath.Join(resultsDir, "relay-home"),
 		"-integration-bundle", bundlePath,
 		"-charter-freeze", frozenPath,
+		"-artifact", filepath.Join(snapshotDir, "manifest.json"),
 		"-compatibility-manifest", filepath.Join(passDir, "compatibility-manifest.json"),
 		"-relay-capabilities", filepath.Join(passDir, "relay-capabilities.json"),
 		"-selected-contract", bundlePath,
@@ -291,8 +295,8 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 	}
 	runOK(t, env, bins.witness, assembleArgs...)
 
-	ledgerPath := filepath.Join(passDir, "ledger.jsonl")
-	runResultPath := filepath.Join(passDir, "run-result.json")
+	ledgerPath := filepath.Join(resultsDir, "ledger.jsonl")
+	runResultPath := filepath.Join(resultsDir, "run-result.json")
 	runOK(t, nil, bins.witness,
 		"adjudicate",
 		"-charter-freeze", frozenPath,
@@ -305,7 +309,7 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		"-out", runResultPath,
 	)
 
-	policyCheckPath := filepath.Join(passDir, "policy-check.json")
+	policyCheckPath := filepath.Join(resultsDir, "policy-check.json")
 	runOK(t, nil, bins.witness,
 		"policy", "check-application",
 		"-ledger", ledgerPath,
@@ -323,7 +327,7 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		"-out", policyCheckPath,
 	)
 
-	metricsPath := filepath.Join(passDir, "metrics.json")
+	metricsPath := filepath.Join(resultsDir, "metrics.json")
 	runOK(t, nil, bins.witness,
 		"metrics",
 		"-ledger", ledgerPath,
@@ -331,7 +335,7 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		"-run-result", runResultPath,
 		"-out", metricsPath,
 	)
-	ledgerShowPath := filepath.Join(passDir, "ledger-show.json")
+	ledgerShowPath := filepath.Join(resultsDir, "ledger-show.json")
 	runOK(t, nil, bins.witness, "ledger", "show", "-ledger", ledgerPath, "-out", ledgerShowPath)
 
 	return passResult{

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"witness/internal/canonjson"
+	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/relayclient"
 	"witness/internal/strictjson"
@@ -276,6 +278,21 @@ func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 			t.Fatalf("retained artifact %s: %v", path, err)
 		}
 	}
+	compatibilityBytes, compatibilityPayloadDigest := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "compatibility-manifest.json"))
+	compatibility, err := contracts.ReadRelayCompatibilityBytes(compatibilityBytes)
+	if err != nil {
+		t.Fatalf("compatibility round-trip decode: %v", err)
+	}
+	if diagnostics := contracts.ValidateRelayCompatibility(compatibility); len(diagnostics) != 0 {
+		t.Fatalf("compatibility diagnostics = %#v", diagnostics)
+	}
+	compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compatibilityPayloadDigest != compatibilityDigest || result.ArtifactDigests["compatibility-manifest.json"] != compatibilityDigest {
+		t.Fatalf("compatibility digest payload=%s result=%s recomputed=%s", compatibilityPayloadDigest, result.ArtifactDigests["compatibility-manifest.json"], compatibilityDigest)
+	}
 }
 
 func TestRunRejectsStateDirInsideSourceBeforeMkdirAll(t *testing.T) {
@@ -301,7 +318,7 @@ func TestLiveRelayCompileReports(t *testing.T) {
 		t.Skip("set WITNESS_LIVE_RELAY=1 to compile recipes against the installed relay")
 	}
 	client := relayclient.New("convo-relay")
-	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
+	bundlePath := shippedRelayIntegrationBundlePath()
 	for _, requirement := range RequiredRecipes {
 		report, err := client.CompileRecipe(context.Background(), requirement.ID, bundlePath)
 		if err != nil {
@@ -332,6 +349,35 @@ func loadFixture[T any](t *testing.T, name string) T {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func retainedPreflightPayloadBytes(t *testing.T, path string) ([]byte, string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("retained artifact is %T, want object", value)
+	}
+	payload, ok := envelope["payload"]
+	if !ok {
+		t.Fatal("retained artifact missing payload")
+	}
+	payloadDigest, ok := envelope["payload_digest"].(string)
+	if !ok || payloadDigest == "" {
+		t.Fatalf("payload_digest = %#v, want non-empty string", envelope["payload_digest"])
+	}
+	payloadBytes, err := canonjson.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payloadBytes, payloadDigest
 }
 
 func hasDiagnostic(diagnostics []diag.Diagnostic, code string) bool {

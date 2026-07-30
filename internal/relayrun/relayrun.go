@@ -6,14 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/planning"
 	"witness/internal/portable"
 	"witness/internal/relayclient"
+	"witness/internal/strictjson"
 )
 
 const (
@@ -85,7 +89,7 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		if diagnostics := validatePreLaunchBatchInput(batch); len(diagnostics) > 0 {
+		if diagnostics := validatePreLaunchBatchInput(batch, options); len(diagnostics) > 0 {
 			record.Diagnostics = append(record.Diagnostics, diagnostics...)
 			result.Runs = append(result.Runs, record)
 			continue
@@ -158,11 +162,12 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 	return result, nil
 }
 
-func validatePreLaunchBatchInput(batch BatchInput) []diag.Diagnostic {
+func validatePreLaunchBatchInput(batch BatchInput, options Options) []diag.Diagnostic {
 	data, err := os.ReadFile(batch.Path)
 	if err != nil {
 		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification batch input could not be read before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", batch.Path)))}
 	}
+	var diagnostics []diag.Diagnostic
 	actualDigest := digest.RawBytes(data)
 	if strings.TrimSpace(batch.Plan.BatchDigest) == "" {
 		return []diag.Diagnostic{diag.FromError(diag.New(
@@ -185,15 +190,266 @@ func validatePreLaunchBatchInput(batch BatchInput) []diag.Diagnostic {
 	if len(batch.RawBytes) > 0 {
 		rawDigest := digest.RawBytes(batch.RawBytes)
 		if actualDigest != rawDigest {
-			return []diag.Diagnostic{diag.FromError(diag.New(
+			diagnostics = append(diagnostics, diag.FromError(diag.New(
 				CodeInvalidBatchInput,
 				"relay verification batch file digest does not match the loaded batch bytes.",
 				diag.WithDetail("batch_id", batch.Plan.BatchID),
 				diag.WithDetail("path", batch.Path),
 				diag.WithDetail("actual_digest", actualDigest),
 				diag.WithDetail("expected_digest", rawDigest),
-			))}
+			)))
 		}
+	}
+	diagnostics = append(diagnostics, validatePreLaunchBatchDocument(batch)...)
+	diagnostics = append(diagnostics, validatePreLaunchCharter(batch, options.CharterPath)...)
+	diagnostics = append(diagnostics, validatePreLaunchArtifacts(batch, options.ArtifactPaths)...)
+	diagnostics = append(diagnostics, validatePreLaunchIntegrationBundle(batch, options.IntegrationBundlePath)...)
+	return diagnostics
+}
+
+func validatePreLaunchBatchDocument(batch BatchInput) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if expected := strings.TrimSpace(batch.Plan.CharterHash); expected != "" && batch.Document.CharterHash != expected {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidBatchInput,
+			"relay verification batch document charter_hash does not match the planned charter hash.",
+			diag.WithDetail("batch_id", batch.Plan.BatchID),
+			diag.WithDetail("actual_digest", batch.Document.CharterHash),
+			diag.WithDetail("expected_digest", expected),
+		)))
+	}
+	if expected := strings.TrimSpace(batch.Plan.ArtifactDigest); expected != "" && batch.Document.ArtifactDigest != expected {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidBatchInput,
+			"relay verification batch document artifact_digest does not match the planned artifact digest.",
+			diag.WithDetail("batch_id", batch.Plan.BatchID),
+			diag.WithDetail("actual_digest", batch.Document.ArtifactDigest),
+			diag.WithDetail("expected_digest", expected),
+		)))
+	}
+	return diagnostics
+}
+
+func validatePreLaunchCharter(batch BatchInput, charterPath string) []diag.Diagnostic {
+	expectedHash := strings.TrimSpace(batch.Plan.CharterHash)
+	expectedRawDigest := strings.TrimSpace(batch.Plan.CharterDigest)
+	if expectedHash == "" && expectedRawDigest == "" {
+		return nil
+	}
+	if strings.TrimSpace(charterPath) == "" {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeInvalidBatchInput,
+			"relay verification requires the planned frozen Charter input before launch.",
+			diag.WithDetail("batch_id", batch.Plan.BatchID),
+		))}
+	}
+	data, err := os.ReadFile(charterPath)
+	if err != nil {
+		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification frozen Charter input could not be read before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", charterPath)))}
+	}
+	var diagnostics []diag.Diagnostic
+	if expectedRawDigest != "" {
+		actualRawDigest := digest.RawBytes(data)
+		if actualRawDigest != expectedRawDigest {
+			diagnostics = append(diagnostics, diag.FromError(diag.New(
+				CodeInvalidBatchInput,
+				"relay verification frozen Charter bytes do not match the planned charter digest.",
+				diag.WithDetail("batch_id", batch.Plan.BatchID),
+				diag.WithDetail("path", charterPath),
+				diag.WithDetail("actual_digest", actualRawDigest),
+				diag.WithDetail("expected_digest", expectedRawDigest),
+			)))
+		}
+	}
+	if expectedHash != "" {
+		frozen, err := strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification frozen Charter input is not a valid frozen Charter.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", charterPath))))
+		} else if frozen.CharterHash != expectedHash {
+			diagnostics = append(diagnostics, diag.FromError(diag.New(
+				CodeInvalidBatchInput,
+				"relay verification frozen Charter hash does not match the planned charter hash.",
+				diag.WithDetail("batch_id", batch.Plan.BatchID),
+				diag.WithDetail("path", charterPath),
+				diag.WithDetail("actual_digest", frozen.CharterHash),
+				diag.WithDetail("expected_digest", expectedHash),
+			)))
+		}
+	}
+	return diagnostics
+}
+
+func validatePreLaunchArtifacts(batch BatchInput, artifactPaths []string) []diag.Diagnostic {
+	planned := plannedArtifactDigests(batch.Plan.ArtifactDigestSet...)
+	if len(planned) == 0 {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeInvalidBatchInput,
+			"relay verification requires a planned reviewed artifact digest set before launch.",
+			diag.WithDetail("batch_id", batch.Plan.BatchID),
+			diag.WithDetail("field", "artifact_digest_set"),
+		))}
+	}
+	plannedSet := stringSet(planned)
+	present := map[string]bool{}
+	var actualDigestSets [][]string
+	var unexpected []string
+	seenPath := false
+	for _, path := range artifactPaths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		seenPath = true
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification artifact input could not be read before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", path)))}
+		}
+		digests := reviewedArtifactDigests(data)
+		actualDigestSets = append(actualDigestSets, digests)
+		if matched := markPlannedArtifactDigests(present, plannedSet, digests); !matched {
+			unexpected = append(unexpected, digests...)
+		}
+	}
+	if !seenPath {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeInvalidBatchInput,
+			"relay verification requires the planned reviewed artifact input before launch.",
+			diag.WithDetail("batch_id", batch.Plan.BatchID),
+			diag.WithDetail("expected_digests", planned),
+		))}
+	}
+	missing := missingPlannedArtifactDigests(planned, present)
+	if len(unexpected) == 0 && len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(unexpected)
+	return []diag.Diagnostic{diag.FromError(diag.New(
+		CodeInvalidBatchInput,
+		"relay verification artifact inputs do not match the planned artifact digests.",
+		diag.WithDetail("batch_id", batch.Plan.BatchID),
+		diag.WithDetail("actual_digest_sets", actualDigestSets),
+		diag.WithDetail("expected_digests", planned),
+		diag.WithDetail("missing_digests", missing),
+		diag.WithDetail("unplanned_digests", uniqueStrings(unexpected)),
+	))}
+}
+
+func reviewedArtifactDigests(data []byte) []string {
+	digests := []string{digest.RawBytes(data)}
+	if snapshotDigest, ok := frozenSnapshotManifestDigest(data); ok && !stringSliceContains(digests, snapshotDigest) {
+		digests = append(digests, snapshotDigest)
+	}
+	sort.Strings(digests)
+	return digests
+}
+
+func plannedArtifactDigests(values ...string) []string {
+	var planned []string
+	for _, value := range values {
+		planned = appendUniqueString(planned, strings.TrimSpace(value))
+	}
+	sort.Strings(planned)
+	return planned
+}
+
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
+func markPlannedArtifactDigests(present map[string]bool, plannedSet map[string]bool, actual []string) bool {
+	matched := false
+	for _, value := range actual {
+		if plannedSet[value] {
+			present[value] = true
+			matched = true
+		}
+	}
+	return matched
+}
+
+func missingPlannedArtifactDigests(planned []string, present map[string]bool) []string {
+	var missing []string
+	for _, value := range planned {
+		if !present[value] {
+			missing = append(missing, value)
+		}
+	}
+	return missing
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func uniqueStrings(values []string) []string {
+	var unique []string
+	for _, value := range values {
+		unique = appendUniqueString(unique, value)
+	}
+	sort.Strings(unique)
+	return unique
+}
+
+func frozenSnapshotManifestDigest(data []byte) (string, bool) {
+	manifest, err := strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*32)
+	if err != nil || manifest.SchemaVersion != freeze.SchemaVersion {
+		return "", false
+	}
+	manifestDigest, err := freeze.ManifestDigest(manifest)
+	if err != nil {
+		return "", false
+	}
+	if manifest.Source.ManifestDigest != manifestDigest || manifest.Workspace.ManifestDigest != manifestDigest {
+		return "", false
+	}
+	return manifestDigest, true
+}
+
+func validatePreLaunchIntegrationBundle(batch BatchInput, bundlePath string) []diag.Diagnostic {
+	expected := strings.TrimSpace(batch.Plan.IntegrationBundleDigest)
+	if expected == "" {
+		return nil
+	}
+	if strings.TrimSpace(bundlePath) == "" {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeInvalidBatchInput,
+			"relay verification requires the planned integration bundle before launch.",
+			diag.WithDetail("batch_id", batch.Plan.BatchID),
+		))}
+	}
+	data, err := os.ReadFile(bundlePath)
+	if err != nil {
+		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle could not be read before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
+	}
+	payload, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle is not strict JSON.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
+	}
+	actual, err := digest.SemanticJSON(payload)
+	if err != nil {
+		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle digest could not be computed.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
+	}
+	if actual != expected {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeInvalidBatchInput,
+			"relay verification integration bundle does not match the planned bundle digest.",
+			diag.WithDetail("batch_id", batch.Plan.BatchID),
+			diag.WithDetail("path", bundlePath),
+			diag.WithDetail("actual_digest", actual),
+			diag.WithDetail("expected_digest", expected),
+		))}
 	}
 	return nil
 }
@@ -264,6 +520,15 @@ func firstString(values map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func stringValue(value any) string {

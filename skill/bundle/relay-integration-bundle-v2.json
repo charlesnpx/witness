@@ -1,0 +1,350 @@
+{
+  "schema_version": "relay-integration-bundle-v2",
+  "id": "witness/review-relay-integration-v2",
+  "contracts": {
+    "witnessed-review/economy-equivalence-v2": {
+      "turns": [
+        {
+          "participant_turn": 1,
+          "slot": "slot_0",
+          "instructions": "Presenter filing pass: enumerate every supplied finding ID and restate each economy claim, equivalence witness, proposed removal or simplification, Charter goal references, and witness digest exactly as filed. Use only the bound charter, findings, and artifact inputs."
+        },
+        {
+          "participant_turn": 2,
+          "slot": "slot_1",
+          "instructions": "Falsifier attack pass: challenge every supplied equivalence witness. Identify a concrete Charter goal, required behavior, or bound artifact fact that would fail after the proposed removal or simplification, and provide a counter-witness for any claimed weakening or breakage."
+        },
+        {
+          "participant_turn": 3,
+          "slot": "slot_0",
+          "instructions": "Presenter defense pass: defend only with material already present in the filed witness, deterministic batch, frozen Charter, bound artifact inputs, or immutable refs cited by those inputs. Do not add new findings, new goals, or stronger uncited evidence."
+        },
+        {
+          "participant_turn": 4,
+          "slot": "slot_1",
+          "instructions": "Falsifier final pass: state the strongest remaining attack for every supplied ID, identify any presenter strengthening the reducer must ignore, and do not introduce new finding IDs."
+        }
+      ],
+      "reducer": {
+        "instructions": "Emit exactly one relay-witness-verdicts-v2 JSON object. Cover every supplied finding ID exactly once and preserve each supplied witness digest exactly. A survived verdict means the filed witness survived as filed; it does not validate the remedy, proposed tests, or command execution. For survived, verdict_class and counter_witness must be null. For weakened and broken, verdict_class is required and a concrete counter_witness is required. Classes unreachable and outside_envelope are valid only with broken because they mean the filed witness cannot establish an in-envelope reachable violation, not merely a partial logical or premise weakness. Do not emit execution_attestation, execution-attestation, or execution_contradiction fields."
+      },
+      "prompt_context": {
+        "participant_transcript": "complete",
+        "facilitator_ledger": "trace_only"
+      },
+      "inputs": {
+        "artifact": {
+          "required": false,
+          "cardinality": "many",
+          "max_bytes": 1048576
+        },
+        "charter": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        },
+        "findings": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        }
+      },
+      "result": {
+        "transport": "json",
+        "schema": {
+          "$defs": {
+            "artifact_ref": {
+              "type": "object",
+              "required": ["kind", "id", "digest"],
+              "properties": {
+                "kind": {"type": "string", "minLength": 1},
+                "id": {"type": "string", "minLength": 1},
+                "digest": {"type": "string", "minLength": 71, "maxLength": 71},
+                "digest_profile": {"const": "relay-root-digests-v1"},
+                "media_type": {"type": "string"}
+              },
+              "additionalProperties": false
+            },
+            "scope_anchor": {
+              "type": "object",
+              "required": ["dimension"],
+              "properties": {
+                "dimension": {"type": "string", "minLength": 1},
+                "entry_id": {"type": "string"},
+                "property": {"type": "string"},
+                "value": {"type": "string"},
+                "affected_decision": {"type": "string"},
+                "excluded": {"type": "boolean"}
+              },
+              "additionalProperties": false
+            },
+            "counter_witness": {
+              "type": "object",
+              "required": ["summary", "evidence"],
+              "properties": {
+                "summary": {"type": "string", "minLength": 1},
+                "evidence": {"type": "string", "minLength": 1},
+                "artifact_refs": {
+                  "type": "array",
+                  "items": {"$ref": "#/$defs/artifact_ref"}
+                },
+                "scope_anchors": {
+                  "type": "array",
+                  "items": {"$ref": "#/$defs/scope_anchor"}
+                }
+              },
+              "additionalProperties": false
+            },
+            "verdict": {
+              "type": "object",
+              "required": ["finding_id", "witness_digest", "verdict", "verdict_class", "counter_witness"],
+              "properties": {
+                "finding_id": {"type": "string", "minLength": 1},
+                "witness_digest": {"type": "string", "minLength": 71, "maxLength": 71},
+                "verdict": {"enum": ["survived", "weakened", "broken"]},
+                "verdict_class": {"type": ["string", "null"], "enum": ["logic", "unreachable", "outside_envelope", "missing_premise", "other", null]},
+                "counter_witness": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {"$ref": "#/$defs/counter_witness"}
+                  ]
+                },
+                "rationale": {"type": "string"}
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "required": ["verdict"],
+                    "properties": {"verdict": {"const": "survived"}}
+                  },
+                  "then": {
+                    "properties": {
+                      "verdict_class": {"type": "null"},
+                      "counter_witness": {"type": "null"}
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": ["verdict"],
+                    "properties": {"verdict": {"enum": ["weakened", "broken"]}}
+                  },
+                  "then": {
+                    "properties": {
+                      "verdict_class": {"enum": ["logic", "unreachable", "outside_envelope", "missing_premise", "other"]},
+                      "counter_witness": {"$ref": "#/$defs/counter_witness"}
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": ["verdict_class"],
+                    "properties": {"verdict_class": {"enum": ["unreachable", "outside_envelope"]}}
+                  },
+                  "then": {
+                    "properties": {"verdict": {"const": "broken"}}
+                  }
+                }
+              ],
+              "additionalProperties": false
+            }
+          },
+          "type": "object",
+          "required": ["schema_version", "batch_id", "verdicts"],
+          "properties": {
+            "schema_version": {"const": "relay-witness-verdicts-v2"},
+            "batch_id": {"type": "string", "minLength": 1},
+            "verdicts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {"$ref": "#/$defs/verdict"}
+            }
+          },
+          "additionalProperties": false
+        },
+        "assertions": []
+      }
+    },
+    "witnessed-review/witness-falsification-v2": {
+      "turns": [
+        {
+          "participant_turn": 1,
+          "slot": "slot_0",
+          "instructions": "Presenter filing pass: enumerate every supplied finding ID and restate each defect claim, witness, scope anchor, Charter goal reference, proposed test, and witness digest exactly as filed. Use only the bound charter, findings, and artifact inputs."
+        },
+        {
+          "participant_turn": 2,
+          "slot": "slot_1",
+          "instructions": "Falsifier attack pass: attack every supplied defect witness. Test whether the filed witness establishes an in-envelope reachable Charter violation, and provide a concrete counter-witness for any claimed weakening or breakage."
+        },
+        {
+          "participant_turn": 3,
+          "slot": "slot_0",
+          "instructions": "Presenter defense pass: defend only with material already present in the filed witness, deterministic batch, frozen Charter, bound artifact inputs, or immutable refs cited by those inputs. Do not add new findings, new goals, or stronger uncited evidence."
+        },
+        {
+          "participant_turn": 4,
+          "slot": "slot_1",
+          "instructions": "Falsifier final pass: state the strongest remaining attack for every supplied ID, identify any presenter strengthening the reducer must ignore, and do not introduce new finding IDs."
+        }
+      ],
+      "reducer": {
+        "instructions": "Emit exactly one relay-witness-verdicts-v2 JSON object. Cover every supplied finding ID exactly once and preserve each supplied witness digest exactly. A survived verdict means the filed witness survived as filed; it does not validate the remedy, proposed tests, or command execution. For survived, verdict_class and counter_witness must be null. For weakened and broken, verdict_class is required and a concrete counter_witness is required. Classes unreachable and outside_envelope are valid only with broken because they mean the filed witness cannot establish an in-envelope reachable violation, not merely a partial logical or premise weakness. Do not emit execution_attestation, execution-attestation, or execution_contradiction fields."
+      },
+      "prompt_context": {
+        "participant_transcript": "complete",
+        "facilitator_ledger": "trace_only"
+      },
+      "inputs": {
+        "artifact": {
+          "required": false,
+          "cardinality": "many",
+          "max_bytes": 1048576
+        },
+        "charter": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        },
+        "findings": {
+          "required": true,
+          "cardinality": "one",
+          "media_type": "application/json",
+          "max_bytes": 262144,
+          "schema": {
+            "type": "object"
+          }
+        }
+      },
+      "result": {
+        "transport": "json",
+        "schema": {
+          "$defs": {
+            "artifact_ref": {
+              "type": "object",
+              "required": ["kind", "id", "digest"],
+              "properties": {
+                "kind": {"type": "string", "minLength": 1},
+                "id": {"type": "string", "minLength": 1},
+                "digest": {"type": "string", "minLength": 71, "maxLength": 71},
+                "digest_profile": {"const": "relay-root-digests-v1"},
+                "media_type": {"type": "string"}
+              },
+              "additionalProperties": false
+            },
+            "scope_anchor": {
+              "type": "object",
+              "required": ["dimension"],
+              "properties": {
+                "dimension": {"type": "string", "minLength": 1},
+                "entry_id": {"type": "string"},
+                "property": {"type": "string"},
+                "value": {"type": "string"},
+                "affected_decision": {"type": "string"},
+                "excluded": {"type": "boolean"}
+              },
+              "additionalProperties": false
+            },
+            "counter_witness": {
+              "type": "object",
+              "required": ["summary", "evidence"],
+              "properties": {
+                "summary": {"type": "string", "minLength": 1},
+                "evidence": {"type": "string", "minLength": 1},
+                "artifact_refs": {
+                  "type": "array",
+                  "items": {"$ref": "#/$defs/artifact_ref"}
+                },
+                "scope_anchors": {
+                  "type": "array",
+                  "items": {"$ref": "#/$defs/scope_anchor"}
+                }
+              },
+              "additionalProperties": false
+            },
+            "verdict": {
+              "type": "object",
+              "required": ["finding_id", "witness_digest", "verdict", "verdict_class", "counter_witness"],
+              "properties": {
+                "finding_id": {"type": "string", "minLength": 1},
+                "witness_digest": {"type": "string", "minLength": 71, "maxLength": 71},
+                "verdict": {"enum": ["survived", "weakened", "broken"]},
+                "verdict_class": {"type": ["string", "null"], "enum": ["logic", "unreachable", "outside_envelope", "missing_premise", "other", null]},
+                "counter_witness": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {"$ref": "#/$defs/counter_witness"}
+                  ]
+                },
+                "rationale": {"type": "string"}
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "required": ["verdict"],
+                    "properties": {"verdict": {"const": "survived"}}
+                  },
+                  "then": {
+                    "properties": {
+                      "verdict_class": {"type": "null"},
+                      "counter_witness": {"type": "null"}
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": ["verdict"],
+                    "properties": {"verdict": {"enum": ["weakened", "broken"]}}
+                  },
+                  "then": {
+                    "properties": {
+                      "verdict_class": {"enum": ["logic", "unreachable", "outside_envelope", "missing_premise", "other"]},
+                      "counter_witness": {"$ref": "#/$defs/counter_witness"}
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": ["verdict_class"],
+                    "properties": {"verdict_class": {"enum": ["unreachable", "outside_envelope"]}}
+                  },
+                  "then": {
+                    "properties": {"verdict": {"const": "broken"}}
+                  }
+                }
+              ],
+              "additionalProperties": false
+            }
+          },
+          "type": "object",
+          "required": ["schema_version", "batch_id", "verdicts"],
+          "properties": {
+            "schema_version": {"const": "relay-witness-verdicts-v2"},
+            "batch_id": {"type": "string", "minLength": 1},
+            "verdicts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {"$ref": "#/$defs/verdict"}
+            }
+          },
+          "additionalProperties": false
+        },
+        "assertions": []
+      }
+    }
+  }
+}

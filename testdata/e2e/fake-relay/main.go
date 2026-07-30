@@ -280,7 +280,11 @@ func verifyExport(args []string) error {
 
 func writePortableExport(outputDir string, state sessionState) (string, error) {
 	contractID := recipeContracts[state.RecipeID]
-	_, contractBody, contractDigest, err := contractFromBundle(state.IntegrationBundlePath, contractID)
+	bundle, contractBody, contractDigest, err := contractFromBundle(state.IntegrationBundlePath, contractID)
+	if err != nil {
+		return "", err
+	}
+	bundleDigest, err := digest.SemanticJSON(bundle)
 	if err != nil {
 		return "", err
 	}
@@ -291,6 +295,13 @@ func writePortableExport(outputDir string, state sessionState) (string, error) {
 	charterBytes, err := os.ReadFile(state.Inputs["charter"])
 	if err != nil {
 		return "", err
+	}
+	var artifactBytes []byte
+	if artifactPath := state.Inputs["artifact"]; artifactPath != "" {
+		artifactBytes, err = os.ReadFile(artifactPath)
+		if err != nil {
+			return "", err
+		}
 	}
 	verdicts := verdictDocument(batch)
 	verdictBytes, err := canonjson.Marshal(verdicts)
@@ -310,8 +321,8 @@ func writePortableExport(outputDir string, state sessionState) (string, error) {
 		return "", err
 	}
 	integrationContractRef := portableRef("integration-contract", "integration_contract:selected", integrationContractDigest)
-	rootPlanPayload := rootRecipePlan(state.RecipeID, contractID, contractDigest, "", integrationContractRef)
-	namedInputs, inputPayloads, err := namedInputPayloads(contractID, charterBytes, batchBytes)
+	rootPlanPayload := rootRecipePlan(state.RecipeID, contractID, contractDigest, bundleDigest, integrationContractRef)
+	namedInputs, inputPayloads, err := namedInputPayloads(contractID, charterBytes, batchBytes, artifactBytes)
 	if err != nil {
 		return "", err
 	}
@@ -425,7 +436,7 @@ func rootRecipePlan(recipeID string, contractID string, contractDigest string, b
 	return plan
 }
 
-func namedInputPayloads(contractID string, charterBytes []byte, batchBytes []byte) (portablePayload, []portablePayload, error) {
+func namedInputPayloads(contractID string, charterBytes []byte, batchBytes []byte, artifactBytes []byte) (portablePayload, []portablePayload, error) {
 	type input struct {
 		name      string
 		ordinal   int
@@ -435,6 +446,9 @@ func namedInputPayloads(contractID string, charterBytes []byte, batchBytes []byt
 	inputs := []input{
 		{name: "charter", ordinal: 1, data: charterBytes, mediaType: "application/json"},
 		{name: "findings", ordinal: 2, data: batchBytes, mediaType: "application/json"},
+	}
+	if len(artifactBytes) > 0 {
+		inputs = append(inputs, input{name: "artifact", ordinal: 3, data: artifactBytes, mediaType: "application/json"})
 	}
 	manifestEntries := make([]any, 0, len(inputs))
 	payloads := make([]portablePayload, 0, len(inputs))

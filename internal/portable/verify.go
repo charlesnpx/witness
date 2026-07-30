@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -354,8 +355,8 @@ func validatePortablePayloadRefs(value any, inventoryByID map[string]map[string]
 	}
 	switch typed := value.(type) {
 	case map[string]any:
-		for _, item := range typed {
-			if err := validatePortablePayloadRefs(item, inventoryByID); err != nil {
+		for _, key := range sortedAnyMapKeys(typed) {
+			if err := validatePortablePayloadRefs(typed[key], inventoryByID); err != nil {
 				return err
 			}
 		}
@@ -495,7 +496,7 @@ func validateProviderLineage(payloads []Payload, inventoryByID map[string]map[st
 		}
 		invocationKeys[key] = portableID
 	}
-	for portableID := range resultRecords {
+	for _, portableID := range sortedPayloadIDs(resultRecords) {
 		switch resultIncomingEdges[portableID] {
 		case 1:
 			continue
@@ -676,8 +677,8 @@ func findSourceArtifactRefs(value any) []map[string]any {
 	var refs []map[string]any
 	switch typed := value.(type) {
 	case map[string]any:
-		for _, item := range typed {
-			refs = append(refs, findSourceArtifactRefs(item)...)
+		for _, key := range sortedAnyMapKeys(typed) {
+			refs = append(refs, findSourceArtifactRefs(typed[key])...)
 		}
 	case []any:
 		for _, item := range typed {
@@ -778,12 +779,30 @@ func validateAllowedKeys(label string, object map[string]any, keys []string) err
 	for _, key := range keys {
 		allowed[key] = true
 	}
-	for key := range object {
+	for _, key := range sortedObjectKeys(object) {
 		if !allowed[key] {
 			return invalidf("%s contains unsupported field %q", label, key)
 		}
 	}
 	return nil
+}
+
+func sortedPayloadIDs(values map[string]map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedObjectKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func exactJSONInteger(value any) (int, bool) {

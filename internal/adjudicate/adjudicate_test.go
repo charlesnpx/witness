@@ -12,6 +12,7 @@ import (
 	"witness/internal/contracts"
 	"witness/internal/digest"
 	"witness/internal/harness"
+	"witness/internal/planning"
 )
 
 func TestAdjudicationBranchTable(t *testing.T) {
@@ -320,6 +321,40 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonRelayWeakened)
 		assertHasReason(t, got, ReasonSeverityCapped)
 	})
+}
+
+func TestPlanningAndAdjudicationAgreeOnOverCapSeverity(t *testing.T) {
+	frozen := testFrozenCharter(t)
+	artifactDigest := testDigest("artifact")
+	finding := defectFinding("finding-over-cap", contracts.WitnessStrengthConstructed, contracts.SeverityCritical)
+	roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
+
+	planResult, err := planning.Run(planning.Options{
+		FrozenCharter: &frozen,
+		RoleOutputs: []planning.RoleOutputInput{{
+			Path:     "defect.json",
+			Document: roleOutput,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("planning Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) != 1 || len(planResult.Plan.Batches[0].FindingIDs) != 1 || planResult.Plan.Batches[0].FindingIDs[0] != finding.ID {
+		t.Fatalf("planned batches = %#v, want over-cap finding batched", planResult.Plan.Batches)
+	}
+	if len(planResult.Plan.ExcludedFindings) != 0 {
+		t.Fatalf("excluded findings = %#v, want none for over-cap severity", planResult.Plan.ExcludedFindings)
+	}
+
+	result := runAdjudication(t, runInput{
+		frozen:      frozen,
+		roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		manifest:    manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
+	})
+	got := onlyFinding(t, result)
+	assertDisposition(t, got, contracts.DispositionAdmitted)
+	assertSeverity(t, got, contracts.SeverityHigh)
+	assertHasReason(t, got, ReasonSeverityCapped)
 }
 
 func TestAdjudicationRejectsInvalidEmbeddedNormalizedCharter(t *testing.T) {

@@ -490,6 +490,10 @@ func unsignedManifestDigest(manifest Manifest) (string, error) {
 	return digest.RawBytes(encoded), nil
 }
 
+func ManifestDigest(manifest Manifest) (string, error) {
+	return unsignedManifestDigest(manifest)
+}
+
 func writeCanonicalFile(path string, value any) error {
 	encoded, err := canonjson.Marshal(value)
 	if err != nil {

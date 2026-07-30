@@ -291,7 +291,7 @@ func CheckApplication(effective Effective, check ApplicationCheck) (Decision, er
 		return decision.refuse(ReasonCallerDecision), nil
 	}
 	measuredNonPositive := check.MeasuredDelta != nil && check.MeasuredDelta.Production <= 0 && check.MeasuredDelta.Test <= 0
-	if check.RemedySign == RemedySignNonPositive || measuredNonPositive {
+	if check.RemedySign == RemedySignNonPositive {
 		if check.MeasuredDelta == nil {
 			return decision.refuse(ReasonMissingMeasuredDelta), nil
 		}
@@ -301,6 +301,9 @@ func CheckApplication(effective Effective, check ApplicationCheck) (Decision, er
 		decision.Allow = true
 		decision.Reasons = []string{ReasonNonPositiveRemedy}
 		return decision, nil
+	}
+	if check.RemedySign != RemedySignPositive {
+		return decision.refuse(ReasonCallerDecision), nil
 	}
 	if check.RemedyDirection != "" && check.RemedyDirection != contracts.RemedyDirectionAdd {
 		return decision.refuse(ReasonCallerDecision), nil

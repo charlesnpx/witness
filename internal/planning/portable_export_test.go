@@ -21,11 +21,13 @@ func writePlanningPortableExport(t *testing.T, verdicts contracts.RelayWitnessVe
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "portable")
 	charterBytes := []byte(`{"charter":"input"}`)
+	artifactBytes := []byte("artifact")
 	batchBytes, err := persistedVerificationBatchBytes(batch)
 	if err != nil {
 		t.Fatal(err)
 	}
 	charterDigest := digest.RawBytes(charterBytes)
+	artifactDigest := digest.RawBytes(artifactBytes)
 	batchDigest := digest.RawBytes(batchBytes)
 	canonicalResult := mustPlanningCanonicalString(t, verdicts)
 	contract := planningContractBody("witnessed-review/witness-falsification-v2")
@@ -68,6 +70,7 @@ func writePlanningPortableExport(t *testing.T, verdicts contracts.RelayWitnessVe
 			"provider_retry":              "forbid",
 			"result_source":               "reducer",
 			"participant_turns":           4,
+			"integration_bundle_digest":   testDigest("bundle"),
 			"integration_contract_id":     "witnessed-review/witness-falsification-v2",
 			"integration_contract_digest": contractDigest,
 			"integration_contract_ref":    planningPortableRefWithDigest("integration-contract", "integration_contract:selected", integrationContractSource["digest"].(string)),
@@ -79,15 +82,17 @@ func writePlanningPortableExport(t *testing.T, verdicts contracts.RelayWitnessVe
 		planningPortablePayloadFor(t, "integration_contract", "integration-contract", integrationContract, integrationContractSource),
 		planningPortablePayloadFor(t, "named_input_content", "named-input-content-1", planningNamedInputContentPayload("charter", 1, charterBytes), planningSourceRef("named_input_content:000001")),
 		planningPortablePayloadFor(t, "named_input_content", "named-input-content-2", planningNamedInputContentPayload("findings", 2, batchBytes), planningSourceRef("named_input_content:000002")),
+		planningPortablePayloadFor(t, "named_input_content", "named-input-content-3", planningNamedInputContentPayload("artifact", 3, artifactBytes), planningSourceRef("named_input_content:000003")),
 		planningPortablePayloadFor(t, "named_input_manifest", "named-input-manifest", map[string]any{
 			"kind":           "named_input_manifest",
 			"schema_version": 2,
 			"digest_profile": digest.Profile,
 			"contract_id":    "witnessed-review/witness-falsification-v2",
-			"input_count":    2,
+			"input_count":    3,
 			"inputs": []any{
 				planningNamedInputEntry("charter", 1, "named-input-content-1", "named_input_content:000001", len(charterBytes), charterDigest),
 				planningNamedInputEntry("findings", 2, "named-input-content-2", "named_input_content:000002", len(batchBytes), batchDigest),
+				planningNamedInputEntry("artifact", 3, "named-input-content-3", "named_input_content:000003", len(artifactBytes), artifactDigest),
 			},
 		}, planningSourceRef("named_input_manifest:selected")),
 		planningPortablePayloadFor(t, "canonical_result", "canonical-result", map[string]any{
@@ -258,6 +263,7 @@ func planningContractBody(contractID string) map[string]any {
 		},
 		"reducer": map[string]any{"instructions": "Return relay witness verdict JSON."},
 		"inputs": map[string]any{
+			"artifact": map[string]any{"required": false, "cardinality": "many", "media_type": "application/json", "max_bytes": 1048576},
 			"charter":  map[string]any{"required": true, "cardinality": "one", "media_type": "application/json", "max_bytes": 1048576},
 			"findings": map[string]any{"required": true, "cardinality": "one", "media_type": "application/json", "max_bytes": 1048576},
 		},

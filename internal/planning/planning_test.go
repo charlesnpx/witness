@@ -53,6 +53,9 @@ func TestPlanningBatchesDeterministicallyByRoleSeverityAndID(t *testing.T) {
 		if diagnostics := contracts.ValidateVerificationBatch(batch.Document, &roleOutput); len(diagnostics) > 0 {
 			t.Fatalf("batch %s diagnostics = %#v", batch.Plan.BatchID, diagnostics)
 		}
+		if fmt.Sprint(batch.Plan.ArtifactDigestSet) != fmt.Sprint([]string{roleOutput.ArtifactDigest}) {
+			t.Fatalf("batch %s artifact digest set = %v, want [%s]", batch.Plan.BatchID, batch.Plan.ArtifactDigestSet, roleOutput.ArtifactDigest)
+		}
 		if len(batch.Document.Findings) > MaxBatchFindings {
 			t.Fatalf("batch %s size = %d", batch.Plan.BatchID, len(batch.Document.Findings))
 		}
@@ -117,11 +120,11 @@ func TestPlanningPreSpendViolationsAreAdvisoryBeforeBatching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(result.Plan.Batches) != 0 {
-		t.Fatalf("planned batches = %#v, want none", result.Plan.Batches)
+	if len(result.Plan.Batches) != 1 || len(result.Plan.Batches[0].FindingIDs) != 1 || result.Plan.Batches[0].FindingIDs[0] != "over-strength" {
+		t.Fatalf("planned batches = %#v, want one batch for over-strength", result.Plan.Batches)
 	}
-	if len(result.Plan.ExcludedFindings) != 3 {
-		t.Fatalf("excluded findings = %#v, want 3", result.Plan.ExcludedFindings)
+	if len(result.Plan.ExcludedFindings) != 2 {
+		t.Fatalf("excluded findings = %#v, want 2", result.Plan.ExcludedFindings)
 	}
 	reasons := map[string]string{}
 	for _, excluded := range result.Plan.ExcludedFindings {
@@ -133,8 +136,8 @@ func TestPlanningPreSpendViolationsAreAdvisoryBeforeBatching(t *testing.T) {
 	if reasons["invalid-anchor"] != CodeInvalidRoleOutput {
 		t.Fatalf("invalid anchor reason = %s, want %s", reasons["invalid-anchor"], CodeInvalidRoleOutput)
 	}
-	if reasons["over-strength"] != CodeSeverityExceedsCap {
-		t.Fatalf("over-strength reason = %s, want %s", reasons["over-strength"], CodeSeverityExceedsCap)
+	if _, excluded := reasons["over-strength"]; excluded {
+		t.Fatalf("over-strength was excluded with reason %s, want verification batch", reasons["over-strength"])
 	}
 	if reasons["recursive"] != CodeRecursiveRecurrence {
 		t.Fatalf("recursive reason = %s, want %s", reasons["recursive"], CodeRecursiveRecurrence)

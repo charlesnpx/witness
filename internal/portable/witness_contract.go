@@ -2,11 +2,14 @@ package portable
 
 import (
 	"encoding/base64"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"witness/internal/canonjson"
 	"witness/internal/digest"
+	"witness/internal/freeze"
+	"witness/internal/strictjson"
 )
 
 const (
@@ -24,6 +27,10 @@ type ContractBinding struct {
 	ContractDigest string
 	ArtifactDigest string
 	PortableID     string
+}
+
+type IntegrationBundleBinding struct {
+	BundleDigest string
 }
 
 type namedInputContent struct {
@@ -75,6 +82,17 @@ func ContractBindingFromReport(report *DetailedReport) (*ContractBinding, error)
 	return validateContractBinding(rootPlan, contractPayload, inventoryByID)
 }
 
+func IntegrationBundleBindingFromReport(report *DetailedReport) (*IntegrationBundleBinding, error) {
+	if report == nil {
+		return nil, invalidf("portable export report is required")
+	}
+	rootPlan, err := singlePayloadObject(report.Payloads, rootArtifactKindRootRecipePlan)
+	if err != nil {
+		return nil, err
+	}
+	return validateIntegrationBundleBinding(rootPlan)
+}
+
 func NamedInputDigestPresent(report *DetailedReport, name string, rawDigest string) bool {
 	if report == nil || strings.TrimSpace(rawDigest) == "" {
 		return false
@@ -84,19 +102,75 @@ func NamedInputDigestPresent(report *DetailedReport, name string, rawDigest stri
 }
 
 func NamedInputRawDigest(report *DetailedReport, name string) (string, error) {
-	if report == nil {
-		return "", invalidf("portable export report is required")
-	}
-	manifest, err := singlePayloadObject(report.Payloads, rootArtifactKindNamedInputManifest)
+	digests, err := NamedInputRawDigests(report, name)
 	if err != nil {
 		return "", err
 	}
+	if len(digests) != 1 {
+		return "", invalidf("portable export named input %s must resolve to exactly one contract-designated entry, got %d", name, len(digests))
+	}
+	return digests[0], nil
+}
+
+func NamedInputRawDigests(report *DetailedReport, name string) ([]string, error) {
+	contents, err := namedInputContents(report, name)
+	if err != nil {
+		return nil, err
+	}
+	digests := make([]string, 0, len(contents))
+	for _, content := range contents {
+		digests = append(digests, content.RawDigest)
+	}
+	sort.Strings(digests)
+	return digests, nil
+}
+
+func NamedInputArtifactDigests(report *DetailedReport, name string) ([]string, error) {
+	digestSets, err := NamedInputArtifactDigestSets(report, name)
+	if err != nil {
+		return nil, err
+	}
+	var digests []string
+	for _, digestSet := range digestSets {
+		for _, value := range digestSet {
+			digests = appendUniqueString(digests, value)
+		}
+	}
+	sort.Strings(digests)
+	return digests, nil
+}
+
+func NamedInputArtifactDigestSets(report *DetailedReport, name string) ([][]string, error) {
+	contents, err := namedInputContents(report, name)
+	if err != nil {
+		return nil, err
+	}
+	digestSets := make([][]string, 0, len(contents))
+	for _, content := range contents {
+		digestSet := []string{content.RawDigest}
+		if snapshotDigest, ok := frozenSnapshotManifestDigest(content.Data); ok {
+			digestSet = appendUniqueString(digestSet, snapshotDigest)
+		}
+		sort.Strings(digestSet)
+		digestSets = append(digestSets, digestSet)
+	}
+	return digestSets, nil
+}
+
+func namedInputContents(report *DetailedReport, name string) ([]namedInputContent, error) {
+	if report == nil {
+		return nil, invalidf("portable export report is required")
+	}
+	manifest, err := singlePayloadObject(report.Payloads, rootArtifactKindNamedInputManifest)
+	if err != nil {
+		return nil, err
+	}
 	inputs, ok := manifest["inputs"].([]any)
 	if !ok {
-		return "", invalidf("portable export requires named inputs with digests")
+		return nil, invalidf("portable export requires named inputs with digests")
 	}
 	payloadsByID := payloadByPortableID(report.Payloads)
-	var matched []map[string]any
+	var contents []namedInputContent
 	for _, raw := range inputs {
 		entry, ok := raw.(map[string]any)
 		if !ok {
@@ -105,16 +179,41 @@ func NamedInputRawDigest(report *DetailedReport, name string) (string, error) {
 		if name != "" && stringValue(entry["name"]) != name {
 			continue
 		}
-		matched = append(matched, entry)
+		content, err := namedInputEntryContent(entry, payloadsByID)
+		if err != nil {
+			return nil, err
+		}
+		contents = append(contents, *content)
 	}
-	if len(matched) != 1 {
-		return "", invalidf("portable export named input %s must resolve to exactly one contract-designated entry, got %d", name, len(matched))
+	return contents, nil
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
 	}
-	content, err := namedInputEntryContent(matched[0], payloadsByID)
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func frozenSnapshotManifestDigest(data []byte) (string, bool) {
+	manifest, err := strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*32)
+	if err != nil || manifest.SchemaVersion != freeze.SchemaVersion {
+		return "", false
+	}
+	manifestDigest, err := freeze.ManifestDigest(manifest)
 	if err != nil {
-		return "", err
+		return "", false
 	}
-	return content.RawDigest, nil
+	if manifest.Source.ManifestDigest != manifestDigest || manifest.Workspace.ManifestDigest != manifestDigest {
+		return "", false
+	}
+	return manifestDigest, true
 }
 
 func validateWitnessRunContract(manifest map[string]any, payloads []Payload, inventoryByID map[string]map[string]any) ([]UnverifiedRelationship, error) {
@@ -144,6 +243,9 @@ func validateWitnessRunContract(manifest map[string]any, payloads []Payload, inv
 	}
 	if stringValue(rootPlan["provider_retry"]) != "forbid" {
 		return nil, invalidf("portable export root plan requires provider_retry=forbid")
+	}
+	if _, err := validateIntegrationBundleBinding(rootPlan); err != nil {
+		return nil, err
 	}
 	turns, ok := exactJSONInteger(rootPlan["participant_turns"])
 	if !ok || turns != 4 {
@@ -315,6 +417,14 @@ func validateContractBinding(rootPlan map[string]any, contractPayload Payload, i
 	}, nil
 }
 
+func validateIntegrationBundleBinding(rootPlan map[string]any) (*IntegrationBundleBinding, error) {
+	bundleDigest := strings.TrimSpace(stringValue(rootPlan["integration_bundle_digest"]))
+	if !validDigest(bundleDigest) {
+		return nil, invalidf("portable export root plan requires integration_bundle_digest")
+	}
+	return &IntegrationBundleBinding{BundleDigest: bundleDigest}, nil
+}
+
 type contractNamedInputSpec struct {
 	Required    bool
 	Cardinality string
@@ -387,7 +497,8 @@ func validateNamedInputManifest(manifest map[string]any, payloads []Payload, inv
 			return invalidf("portable export named input %s raw_digest does not match content", name)
 		}
 	}
-	for name, spec := range contractInputs {
+	for _, name := range sortedContractInputNames(contractInputs) {
+		spec := contractInputs[name]
 		count := counts[name]
 		if spec.Cardinality == "one" && count > 1 {
 			return invalidf("portable export named input %s violates selected contract cardinality one", name)
@@ -408,7 +519,8 @@ func contractNamedInputSpecs(contractBody map[string]any) (map[string]contractNa
 		return nil, invalidf("portable export selected contract requires named input declarations")
 	}
 	specs := map[string]contractNamedInputSpec{}
-	for name, raw := range inputs {
+	for _, name := range sortedAnyMapKeys(inputs) {
+		raw := inputs[name]
 		if strings.TrimSpace(name) == "" {
 			return nil, invalidf("portable export selected contract has an empty named input")
 		}
@@ -427,6 +539,24 @@ func contractNamedInputSpecs(contractBody map[string]any) (map[string]contractNa
 		specs[name] = contractNamedInputSpec{Required: required, Cardinality: cardinality}
 	}
 	return specs, nil
+}
+
+func sortedContractInputNames(inputs map[string]contractNamedInputSpec) []string {
+	keys := make([]string, 0, len(inputs))
+	for key := range inputs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedAnyMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func namedInputEntryContent(entry map[string]any, payloadsByID map[string]Payload) (*namedInputContent, error) {
