@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"witness/internal/adjudicate"
@@ -16,7 +18,9 @@ import (
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/ledger"
 	"witness/internal/planning"
+	"witness/internal/policy"
 	"witness/internal/preflight"
 	"witness/internal/relayclient"
 	"witness/internal/relayrun"
@@ -96,6 +100,12 @@ func route(args []string) error {
 			}
 			if args[0] == "verification" {
 				return runVerification(args[1], args[2:])
+			}
+			if args[0] == "ledger" {
+				return runLedger(args[1], args[2:])
+			}
+			if args[0] == "policy" {
+				return runPolicy(args[1], args[2:])
 			}
 			return notImplemented(strings.Join(args[:2], " "))
 		}
@@ -326,6 +336,7 @@ func runAdjudicate(args []string) error {
 	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
 	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	out := flags.String("out", "", "adjudication run-result output path")
 	var roleOutputPaths repeatedStrings
 	flags.Var(&roleOutputPaths, "role-output", "role-output JSON path; may be repeated")
@@ -371,32 +382,28 @@ func runAdjudicate(args []string) error {
 			Document: document,
 		})
 	}
-	var rules contracts.ReviewRules
-	if *rulesPath != "" {
-		rules, err = readReviewRulesFile(*rulesPath)
-		if err != nil {
-			return err
-		}
-	}
-	var policy contracts.ReviewPolicy
-	if *policyPath != "" {
-		policy, err = readReviewPolicyFile(*policyPath)
-		if err != nil {
-			return err
-		}
+	effective, err := loadEffectivePolicy(*policyPath, *rulesPath, *ledgerPath, *frozenPath, "")
+	if err != nil {
+		return err
 	}
 	result, err := adjudicate.Run(adjudicate.Options{
-		FrozenCharter:        &frozen,
-		RoleOutputs:          inputs,
-		Manifest:             manifest,
-		ReceiptOutputDir:     *receiptOutputDir,
-		ReceiptHMACKeyFile:   *receiptHMACKeyFile,
-		Rules:                rules,
-		Policy:               policy,
-		PriorLineage:         priorLineage,
-		PriorLineageProvided: priorLineageProvided,
+		FrozenCharter:                &frozen,
+		RoleOutputs:                  inputs,
+		Manifest:                     manifest,
+		ReceiptOutputDir:             *receiptOutputDir,
+		ReceiptHMACKeyFile:           *receiptHMACKeyFile,
+		Rules:                        effective.Rules,
+		Policy:                       effective.Policy,
+		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
+		PriorLineage:                 priorLineage,
+		PriorLineageProvided:         priorLineageProvided,
 	})
 	if result != nil {
+		if *ledgerPath != "" {
+			if _, appendErr := appendAdjudicationLineage(*ledgerPath, result, inputs, frozen); appendErr != nil {
+				return appendErr
+			}
+		}
 		if writeErr := writeCanonical(*out, result); writeErr != nil {
 			return writeErr
 		}
@@ -405,6 +412,586 @@ func runAdjudicate(args []string) error {
 		return err
 	}
 	return nil
+}
+
+func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) ([]ledger.Record, error) {
+	if result == nil || result.ResultDigest == "" {
+		return nil, diag.New(diag.CodeInvalidCommand, "adjudication result is missing a run digest.")
+	}
+	records, err := readLedgerRecordsIfSet(path)
+	if err != nil {
+		return nil, err
+	}
+	duplicate, err := ledger.ContainsRunDigest(records, result.ResultDigest)
+	if err != nil {
+		return nil, err
+	}
+	if duplicate {
+		return nil, ledger.DuplicateRunDigestError(result.ResultDigest)
+	}
+	return ledger.AppendEvents(path, adjudicationLedgerEvents(result, inputs, frozen))
+}
+
+func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) []ledger.EventToAppend {
+	questions := adjudicationMissingGoalQuestions(inputs)
+	events := []ledger.EventToAppend{{
+		Kind: ledger.EventKindAdjudicationRun,
+		Payload: ledger.AdjudicationRunEvent{
+			RunDigest:                 result.ResultDigest,
+			ResultSchemaVersion:       result.SchemaVersion,
+			PolicyID:                  result.PolicyID,
+			PolicyDigest:              result.PolicyDigest,
+			RulesDigest:               result.RulesDigest,
+			CharterHash:               result.CharterHash,
+			ArtifactDigest:            result.ArtifactDigest,
+			ManifestDigest:            result.ManifestDigest,
+			CapReleaseCharterMismatch: result.CapReleaseCharterMismatch,
+			FindingCount:              len(result.Findings),
+			PendingVerificationCount:  result.Summary.PendingVerification,
+			AutomaticCandidateCount:   result.Summary.AutomaticCandidate,
+			CallerDecisionCount:       result.Summary.CallerDecision,
+			PolicyDecisionRecordCount: len(result.Findings),
+			MissingGoalQuestionCount:  len(questions),
+		},
+	}}
+	for _, finding := range result.Findings {
+		events = append(events, ledger.EventToAppend{
+			Kind: ledger.EventKindVerdict,
+			Payload: ledger.VerdictEvent{
+				RunDigest:         result.ResultDigest,
+				FindingID:         finding.FindingID,
+				Role:              finding.Role,
+				Kind:              finding.Kind,
+				Disposition:       finding.Disposition,
+				ApplicationClass:  finding.ApplicationClass,
+				ClaimedSeverity:   finding.ClaimedSeverity,
+				EffectiveSeverity: finding.EffectiveSeverity,
+				SeverityCap:       finding.SeverityCap,
+				Reasons:           finding.Reasons,
+				FindingDigest:     finding.FindingDigest,
+				WitnessDigest:     finding.WitnessDigest,
+				VerdictClass:      finding.VerdictClass,
+			},
+		})
+	}
+	for _, question := range questions {
+		events = append(events, ledger.EventToAppend{
+			Kind: ledger.EventKindQuestion,
+			Payload: ledger.QuestionEvent{
+				RunDigest:   result.ResultDigest,
+				QuestionID:  question.ID,
+				FindingID:   question.FindingID,
+				CharterHash: result.CharterHash,
+				Statement:   question.Statement,
+			},
+		})
+	}
+	for _, finding := range result.Findings {
+		if finding.Disposition != contracts.DispositionPendingVerification {
+			continue
+		}
+		events = append(events, ledger.EventToAppend{
+			Kind: ledger.EventKindPendingVerification,
+			Payload: ledger.PendingVerificationEvent{
+				RunDigest:      result.ResultDigest,
+				FindingID:      finding.FindingID,
+				VerificationID: pendingVerificationID(result.ResultDigest, finding.FindingID),
+				Status:         finding.Disposition,
+			},
+		})
+	}
+	operationalEnvelopePresent := frozen.Charter.OperationalEnvelope != nil
+	for _, finding := range result.Findings {
+		allow := finding.ApplicationClass == contracts.ApplicationClassAutomaticCandidate
+		events = append(events, ledger.EventToAppend{
+			Kind: ledger.EventKindPolicyDecision,
+			Payload: ledger.PolicyDecisionEvent{
+				RunDigest:                  result.ResultDigest,
+				Allow:                      ledger.BoolPtr(allow),
+				Reasons:                    policyDecisionReasons(finding),
+				PolicyID:                   result.PolicyID,
+				PolicyDigest:               result.PolicyDigest,
+				RulesDigest:                result.RulesDigest,
+				CharterHash:                result.CharterHash,
+				CapReleaseCharterMismatch:  result.CapReleaseCharterMismatch,
+				CapReleaseUnit:             result.CapReleaseUnit,
+				PositiveCapAllowanceUsed:   false,
+				FindingID:                  finding.FindingID,
+				ApplicationClass:           finding.ApplicationClass,
+				OperationalEnvelopePresent: operationalEnvelopePresent,
+			},
+		})
+	}
+	return events
+}
+
+type adjudicationQuestion struct {
+	ID        string
+	FindingID string
+	Statement string
+	source    int
+	index     int
+}
+
+func adjudicationMissingGoalQuestions(inputs []adjudicate.RoleOutputInput) []adjudicationQuestion {
+	var questions []adjudicationQuestion
+	for sourceIndex, input := range inputs {
+		for questionIndex, question := range input.Document.MissingGoalQuestions {
+			questions = append(questions, adjudicationQuestion{
+				ID:        question.ID,
+				FindingID: question.FindingID,
+				Statement: question.Statement,
+				source:    sourceIndex,
+				index:     questionIndex,
+			})
+		}
+	}
+	sort.SliceStable(questions, func(i, j int) bool {
+		if questions[i].ID != questions[j].ID {
+			return questions[i].ID < questions[j].ID
+		}
+		if questions[i].FindingID != questions[j].FindingID {
+			return questions[i].FindingID < questions[j].FindingID
+		}
+		if questions[i].source != questions[j].source {
+			return questions[i].source < questions[j].source
+		}
+		return questions[i].index < questions[j].index
+	})
+	return questions
+}
+
+func pendingVerificationID(runDigest string, findingID string) string {
+	suffix := strings.TrimPrefix(runDigest, digest.Prefix)
+	if len(suffix) > 12 {
+		suffix = suffix[:12]
+	}
+	return "pending-" + findingID + "-" + suffix
+}
+
+func policyDecisionReasons(finding adjudicate.FindingVerdict) []string {
+	if len(finding.Reasons) > 0 {
+		return append([]string(nil), finding.Reasons...)
+	}
+	if finding.ApplicationClass != "" {
+		return []string{finding.ApplicationClass}
+	}
+	return []string{"adjudicated"}
+}
+
+func runLedger(command string, args []string) error {
+	switch command {
+	case "show":
+		return runLedgerShow(args)
+	case "promote":
+		return runLedgerPromote(args)
+	case "accept-unverified":
+		return runLedgerAcceptUnverified(args)
+	default:
+		return notImplemented("ledger " + command)
+	}
+}
+
+func runLedgerShow(args []string) error {
+	flags := newFlagSet("witness ledger show")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	out := flags.String("out", "", "ledger show output path")
+	var kinds repeatedStrings
+	flags.Var(&kinds, "kind", "event kind filter; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *ledgerPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness ledger show requires -ledger.")
+	}
+	document, err := ledger.Show(*ledgerPath, ledger.ShowOptions{Kinds: kinds})
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, document)
+}
+
+func runLedgerPromote(args []string) error {
+	flags := newFlagSet("witness ledger promote")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	questionID := flags.String("question-id", "", "missing-goal question ID")
+	goalRef := flags.String("goal-ref", "", "owner-authorized Charter goal reference")
+	actor := flags.String("actor", "", "owner actor")
+	rationale := flags.String("rationale", "", "owner rationale")
+	out := flags.String("out", "", "ledger promotion output path")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *ledgerPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness ledger promote requires -ledger.")
+	}
+	record, err := ledger.AppendEvent(*ledgerPath, ledger.EventKindPromotion, ledger.PromotionEvent{
+		QuestionID: *questionID,
+		GoalRef:    *goalRef,
+		Actor:      *actor,
+		Rationale:  *rationale,
+	})
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-promote-v1", record))
+}
+
+func runLedgerAcceptUnverified(args []string) error {
+	flags := newFlagSet("witness ledger accept-unverified")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	findingID := flags.String("finding-id", "", "pending-verification finding ID")
+	pendingVerificationID := flags.String("pending-verification-id", "", "pending verification result ID")
+	actor := flags.String("actor", "", "owner actor")
+	rationale := flags.String("rationale", "", "owner rationale")
+	out := flags.String("out", "", "ledger accept-unverified output path")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *ledgerPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness ledger accept-unverified requires -ledger.")
+	}
+	record, err := ledger.AppendEvent(*ledgerPath, ledger.EventKindAcceptUnverified, ledger.AcceptUnverifiedEvent{
+		FindingID:             *findingID,
+		PendingVerificationID: *pendingVerificationID,
+		Actor:                 *actor,
+		Rationale:             *rationale,
+	})
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-accept-unverified-v1", record))
+}
+
+func runPolicy(command string, args []string) error {
+	switch command {
+	case "show":
+		return runPolicyShow(args)
+	case "release-caps":
+		return runPolicyReleaseCaps(args)
+	case "check-application":
+		return runPolicyCheckApplication(args)
+	default:
+		return notImplemented("policy " + command)
+	}
+}
+
+func runPolicyShow(args []string) error {
+	flags := newFlagSet("witness policy show")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
+	charterHash := flags.String("charter-hash", "", "current Charter hash")
+	out := flags.String("out", "", "policy show output path")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	effective, err := loadEffectivePolicy(*policyPath, *rulesPath, *ledgerPath, *charterPath, *charterHash)
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, effective.ShowDocument())
+}
+
+func runPolicyReleaseCaps(args []string) error {
+	flags := newFlagSet("witness policy release-caps")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	policyPath := flags.String("policy", "", "review-policy JSON path")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
+	charterHash := flags.String("charter-hash", "", "current Charter hash")
+	unit := flags.String("unit", "lines", "cap unit")
+	productionCap := flags.Int("production-cap", 0, "production cap")
+	testCap := flags.Int("test-cap", 0, "test cap")
+	basis := flags.String("basis", "", "cap-release basis")
+	evidence := flags.String("evidence", "", "cap-release evidence")
+	rationale := flags.String("rationale", "", "cap-release rationale")
+	actor := flags.String("actor", "", "owner actor")
+	policyDigest := flags.String("policy-digest", "", "expected policy digest")
+	rulesDigest := flags.String("rules-digest", "", "expected rules digest")
+	out := flags.String("out", "", "cap-release output path")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *ledgerPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness policy release-caps requires -ledger.")
+	}
+	if *policyPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness policy release-caps requires -policy.")
+	}
+	inputs, err := readPolicyCommandInputs(*policyPath, *rulesPath, *charterPath, *charterHash)
+	if err != nil {
+		return err
+	}
+	if inputs.CharterHash == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness policy release-caps requires -charter-freeze or -charter-hash.")
+	}
+	release, err := policy.BuildCapRelease(policy.ReleaseInput{
+		Policy:        inputs.Policy,
+		Rules:         inputs.Rules,
+		Unit:          *unit,
+		ProductionCap: *productionCap,
+		TestCap:       *testCap,
+		Basis:         *basis,
+		Evidence:      *evidence,
+		Rationale:     *rationale,
+		Actor:         *actor,
+		PolicyDigest:  *policyDigest,
+		RulesDigest:   *rulesDigest,
+		CharterHash:   inputs.CharterHash,
+	})
+	if err != nil {
+		return err
+	}
+	record, err := ledger.AppendEvent(*ledgerPath, ledger.EventKindCapRelease, ledger.CapReleaseEvent{Release: release})
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, policyReleaseCapsOutput{
+		SchemaVersion: "witness-policy-release-caps-v1",
+		CapRelease:    release,
+		LedgerRecord:  record,
+	})
+}
+
+func runPolicyCheckApplication(args []string) error {
+	flags := newFlagSet("witness policy check-application")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
+	charterHash := flags.String("charter-hash", "", "current Charter hash")
+	role := flags.String("role", contracts.RoleDefect, "application role")
+	remedyDirection := flags.String("remedy-direction", contracts.RemedyDirectionAdd, "remedy direction")
+	remedySign := flags.String("remedy-sign", policy.RemedySignPositive, "remedy sign")
+	operationalEnvelopePresent := flags.Bool("operational-envelope-present", false, "whether an Operational Envelope is present")
+	estimateProductionStatus := flags.String("estimated-production-status", contracts.DeltaStatusKnown, "estimated production delta status")
+	estimateProductionLines := flags.Int("estimated-production-lines", 0, "estimated production line delta")
+	estimateProductionFiles := flags.Int("estimated-production-files", 0, "estimated production file delta")
+	estimateTestStatus := flags.String("estimated-test-status", contracts.DeltaStatusKnown, "estimated test delta status")
+	estimateTestLines := flags.Int("estimated-test-lines", 0, "estimated test line delta")
+	estimateTestFiles := flags.Int("estimated-test-files", 0, "estimated test file delta")
+	findingID := flags.String("finding-id", "", "finding ID for lineage")
+	unit := flags.String("unit", "lines", "measured delta unit")
+	out := flags.String("out", "", "policy application check output path")
+	var measuredProduction optionalIntFlag
+	var measuredTest optionalIntFlag
+	flags.Var(&measuredProduction, "measured-production", "measured production line delta")
+	flags.Var(&measuredTest, "measured-test", "measured test line delta")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	setFlags := visitedFlagNames(flags)
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *ledgerPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness policy check-application requires -ledger.")
+	}
+	if !measuredProduction.set {
+		return diag.New(diag.CodeInvalidCommand, "witness policy check-application requires -measured-production.")
+	}
+	if !measuredTest.set {
+		return diag.New(diag.CodeInvalidCommand, "witness policy check-application requires -measured-test.")
+	}
+	inputs, err := readPolicyCommandInputs(*policyPath, *rulesPath, *charterPath, *charterHash)
+	if err != nil {
+		return err
+	}
+	envelopePresent := *operationalEnvelopePresent
+	if inputs.OperationalEnvelopePresent != nil {
+		envelopePresent = *inputs.OperationalEnvelopePresent
+	}
+	records, err := readLedgerRecordsIfSet(*ledgerPath)
+	if err != nil {
+		return err
+	}
+	releases, err := ledger.CapReleases(records)
+	if err != nil {
+		return err
+	}
+	check := policy.ApplicationCheck{
+		Role:                       *role,
+		RemedyDirection:            *remedyDirection,
+		RemedySign:                 *remedySign,
+		Unit:                       *unit,
+		OperationalEnvelopePresent: envelopePresent,
+		EstimatedDelta: contracts.SplitDeltaEstimate{
+			Production: estimateDeltaFromFlags(*estimateProductionStatus, *estimateProductionLines, *estimateProductionFiles, setFlags["estimated-production-status"], setFlags["estimated-production-lines"], setFlags["estimated-production-files"]),
+			Test:       estimateDeltaFromFlags(*estimateTestStatus, *estimateTestLines, *estimateTestFiles, setFlags["estimated-test-status"], setFlags["estimated-test-lines"], setFlags["estimated-test-files"]),
+		},
+		MeasuredDelta: &contracts.MeasuredDelta{Production: measuredProduction.value, Test: measuredTest.value},
+	}
+	if err := validateEstimateDeltaFlagCounts("production", check.Unit, check.EstimatedDelta.Production, setFlags["estimated-production-lines"], setFlags["estimated-production-files"]); err != nil {
+		return err
+	}
+	if err := validateEstimateDeltaFlagCounts("test", check.Unit, check.EstimatedDelta.Test, setFlags["estimated-test-lines"], setFlags["estimated-test-files"]); err != nil {
+		return err
+	}
+	effective, err := policy.Load(policy.LoadOptions{
+		Policy:      inputs.Policy,
+		Rules:       inputs.Rules,
+		CharterHash: inputs.CharterHash,
+		Unit:        check.Unit,
+		CapReleases: releases,
+	})
+	if err != nil {
+		return err
+	}
+	decision, err := policy.CheckApplication(effective, check)
+	if err != nil {
+		return err
+	}
+	appended, err := ledger.AppendEvents(*ledgerPath, []ledger.EventToAppend{
+		{
+			Kind: ledger.EventKindMeasuredDelta,
+			Payload: ledger.MeasuredDeltaEvent{
+				Production: ledger.IntPtr(measuredProduction.value),
+				Test:       ledger.IntPtr(measuredTest.value),
+				Unit:       *unit,
+				FindingID:  *findingID,
+			},
+		},
+		{
+			Kind: ledger.EventKindPolicyDecision,
+			Payload: ledger.PolicyDecisionEvent{
+				Allow:                      ledger.BoolPtr(decision.Allow),
+				Reasons:                    decision.Reasons,
+				PolicyID:                   decision.PolicyID,
+				PolicyDigest:               decision.PolicyDigest,
+				RulesDigest:                decision.RulesDigest,
+				CharterHash:                decision.CharterHash,
+				CapReleaseCharterMismatch:  decision.CapReleaseCharterMismatch,
+				CapReleaseUnit:             decision.CapReleaseUnit,
+				Unit:                       decision.Unit,
+				PositiveCapAllowanceUsed:   decision.PositiveCapAllowanceConsumed,
+				FindingID:                  *findingID,
+				OperationalEnvelopePresent: envelopePresent,
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return writeCanonical(*out, policyCheckApplicationOutput{
+		SchemaVersion: "witness-policy-check-application-v1",
+		Allow:         decision.Allow,
+		Reasons:       decision.Reasons,
+		Decision:      decision,
+		LedgerRecords: appended,
+	})
+}
+
+type ledgerAppendDocument struct {
+	SchemaVersion string        `json:"schema_version"`
+	Record        ledger.Record `json:"record"`
+}
+
+type policyReleaseCapsOutput struct {
+	SchemaVersion string                     `json:"schema_version"`
+	CapRelease    contracts.CapReleaseRecord `json:"cap_release"`
+	LedgerRecord  ledger.Record              `json:"ledger_record"`
+}
+
+type policyCheckApplicationOutput struct {
+	SchemaVersion string          `json:"schema_version"`
+	Allow         bool            `json:"allow"`
+	Reasons       []string        `json:"reasons"`
+	Decision      policy.Decision `json:"decision"`
+	LedgerRecords []ledger.Record `json:"ledger_records"`
+}
+
+type policyCommandInputs struct {
+	Policy                     contracts.ReviewPolicy
+	Rules                      contracts.ReviewRules
+	CharterHash                string
+	OperationalEnvelopePresent *bool
+}
+
+func ledgerAppendOutput(schemaVersion string, record ledger.Record) ledgerAppendDocument {
+	return ledgerAppendDocument{SchemaVersion: schemaVersion, Record: record}
+}
+
+func loadEffectivePolicy(policyPath string, rulesPath string, ledgerPath string, charterPath string, charterHash string) (policy.Effective, error) {
+	inputs, err := readPolicyCommandInputs(policyPath, rulesPath, charterPath, charterHash)
+	if err != nil {
+		return policy.Effective{}, err
+	}
+	records, err := readLedgerRecordsIfSet(ledgerPath)
+	if err != nil {
+		return policy.Effective{}, err
+	}
+	releases, err := ledger.CapReleases(records)
+	if err != nil {
+		return policy.Effective{}, err
+	}
+	return policy.Load(policy.LoadOptions{
+		Policy:      inputs.Policy,
+		Rules:       inputs.Rules,
+		CharterHash: inputs.CharterHash,
+		CapReleases: releases,
+	})
+}
+
+func readPolicyCommandInputs(policyPath string, rulesPath string, charterPath string, charterHash string) (policyCommandInputs, error) {
+	policyDocument := contracts.DefaultReviewPolicy()
+	var err error
+	if policyPath != "" {
+		policyDocument, err = readReviewPolicyFile(policyPath)
+		if err != nil {
+			return policyCommandInputs{}, err
+		}
+	}
+	rules := contracts.DefaultReviewRules()
+	if rulesPath != "" {
+		rules, err = readReviewRulesFile(rulesPath)
+		if err != nil {
+			return policyCommandInputs{}, err
+		}
+	}
+	result := policyCommandInputs{Policy: policyDocument, Rules: rules, CharterHash: charterHash}
+	if charterPath == "" {
+		return result, nil
+	}
+	frozen, err := readFrozenCharterFile(charterPath)
+	if err != nil {
+		return policyCommandInputs{}, err
+	}
+	if charterHash != "" && charterHash != frozen.CharterHash {
+		return policyCommandInputs{}, diag.New(
+			diag.CodeInvalidCommand,
+			"supplied -charter-hash does not match -charter-freeze.",
+			diag.WithDetail("expected", frozen.CharterHash),
+			diag.WithDetail("actual", charterHash),
+		)
+	}
+	envelopePresent := frozen.Charter.OperationalEnvelope != nil
+	result.CharterHash = frozen.CharterHash
+	result.OperationalEnvelopePresent = &envelopePresent
+	return result, nil
+}
+
+func readLedgerRecordsIfSet(path string) ([]ledger.Record, error) {
+	if path == "" {
+		return nil, nil
+	}
+	return ledger.ReadFile(path)
 }
 
 type repeatedStrings []string
@@ -421,6 +1008,75 @@ func (values *repeatedStrings) Set(value string) error {
 		return fmt.Errorf("value must not be empty")
 	}
 	*values = append(*values, value)
+	return nil
+}
+
+func visitedFlagNames(flags *flag.FlagSet) map[string]bool {
+	values := map[string]bool{}
+	flags.Visit(func(flag *flag.Flag) {
+		values[flag.Name] = true
+	})
+	return values
+}
+
+func estimateDeltaFromFlags(status string, lines int, files int, statusSet bool, linesSet bool, filesSet bool) contracts.DeltaEstimate {
+	if !statusSet && !linesSet && !filesSet {
+		return contracts.DeltaEstimate{Status: contracts.DeltaStatusUnknown}
+	}
+	if !statusSet {
+		status = contracts.DeltaStatusKnown
+	}
+	return contracts.DeltaEstimate{Status: status, Lines: lines, Files: files}
+}
+
+func validateEstimateDeltaFlagCounts(component string, unit string, delta contracts.DeltaEstimate, linesSet bool, filesSet bool) error {
+	if delta.Status != contracts.DeltaStatusKnown {
+		return nil
+	}
+	requiredFlag := ""
+	switch strings.TrimSpace(unit) {
+	case "", policy.UnitLines:
+		if !linesSet {
+			requiredFlag = "-estimated-" + component + "-lines"
+		}
+	case policy.UnitFiles:
+		if !filesSet {
+			requiredFlag = "-estimated-" + component + "-files"
+		}
+	default:
+		return nil
+	}
+	if requiredFlag == "" {
+		return nil
+	}
+	return diag.New(
+		diag.CodeInvalidCommand,
+		"-estimated-"+component+"-status known requires "+requiredFlag+" to be explicitly set.",
+		diag.WithDetail("status", delta.Status),
+		diag.WithDetail("unit", strings.TrimSpace(unit)),
+		diag.WithDetail("required_flag", requiredFlag),
+	)
+}
+
+type optionalIntFlag struct {
+	value int
+	set   bool
+}
+
+func (value *optionalIntFlag) String() string {
+	if value == nil || !value.set {
+		return ""
+	}
+	return strconv.Itoa(value.value)
+}
+
+func (value *optionalIntFlag) Set(raw string) error {
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	value.value = parsed
+	value.set = true
 	return nil
 }
 
@@ -1193,6 +1849,14 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var adjudicateValidation *adjudicate.ValidationError
 	if errors.As(err, &adjudicateValidation) {
 		return adjudicateValidation.Diagnostics
+	}
+	var ledgerValidation *ledger.ValidationError
+	if errors.As(err, &ledgerValidation) {
+		return ledgerValidation.Diagnostics
+	}
+	var policyValidation *policy.ValidationError
+	if errors.As(err, &policyValidation) {
+		return policyValidation.Diagnostics
 	}
 	var preflightError *preflight.Error
 	if errors.As(err, &preflightError) {

@@ -400,6 +400,27 @@ func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {
 	}
 }
 
+func TestDeltaEstimateTracksExplicitZeroPresence(t *testing.T) {
+	explicit, err := strictjson.DecodeBytes[DeltaEstimate]([]byte(`{"status":"known","files":0}`), strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !explicit.FilesPresent() || explicit.Files != 0 {
+		t.Fatalf("files presence/value = %v/%d, want explicit zero", explicit.FilesPresent(), explicit.Files)
+	}
+	if explicit.LinesPresent() {
+		t.Fatal("lines presence = true, want omitted")
+	}
+
+	malformed, err := strictjson.DecodeBytes[DeltaEstimate]([]byte(`{"status":"model-specific","files":2}`), strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if malformed.Status != DeltaStatusUnknown || malformed.Files != 0 || malformed.FilesPresent() {
+		t.Fatalf("malformed delta = %#v, want unknown without file presence", malformed)
+	}
+}
+
 func TestReducerRequiresExplicitNullFieldsForRawSurvivedVerdict(t *testing.T) {
 	raw := `{
 	  "schema_version":"relay-witness-verdicts-v2",

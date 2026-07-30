@@ -55,8 +55,9 @@ type Options struct {
 	ReceiptHMACKey     []byte
 	ReceiptHMACKeyFile string
 
-	Rules  contracts.ReviewRules
-	Policy contracts.ReviewPolicy
+	Rules                        contracts.ReviewRules
+	Policy                       contracts.ReviewPolicy
+	PolicyCapReleaseLedgerBacked bool
 
 	PriorLineage         []PriorLineageRecord
 	PriorLineageProvided bool
@@ -85,19 +86,23 @@ type PriorLineageResolutionEvent struct {
 }
 
 type Result struct {
-	SchemaVersion  string            `json:"schema_version"`
-	DigestProfile  string            `json:"digest_profile"`
-	ResultDigest   string            `json:"result_digest,omitempty"`
-	RulesVersion   string            `json:"rules_version"`
-	RulesID        string            `json:"rules_id"`
-	PolicyVersion  string            `json:"policy_version"`
-	PolicyID       string            `json:"policy_id"`
-	CharterHash    string            `json:"charter_hash"`
-	ArtifactDigest string            `json:"artifact_digest"`
-	ManifestDigest string            `json:"manifest_digest"`
-	Findings       []FindingVerdict  `json:"findings"`
-	Summary        Summary           `json:"summary"`
-	Diagnostics    []diag.Diagnostic `json:"diagnostics,omitempty"`
+	SchemaVersion             string            `json:"schema_version"`
+	DigestProfile             string            `json:"digest_profile"`
+	ResultDigest              string            `json:"result_digest,omitempty"`
+	RulesVersion              string            `json:"rules_version"`
+	RulesID                   string            `json:"rules_id"`
+	PolicyVersion             string            `json:"policy_version"`
+	PolicyID                  string            `json:"policy_id"`
+	PolicyDigest              string            `json:"policy_digest,omitempty"`
+	RulesDigest               string            `json:"rules_digest,omitempty"`
+	CapReleaseCharterMismatch bool              `json:"cap_release_charter_mismatch"`
+	CapReleaseUnit            string            `json:"cap_release_unit,omitempty"`
+	CharterHash               string            `json:"charter_hash"`
+	ArtifactDigest            string            `json:"artifact_digest"`
+	ManifestDigest            string            `json:"manifest_digest"`
+	Findings                  []FindingVerdict  `json:"findings"`
+	Summary                   Summary           `json:"summary"`
+	Diagnostics               []diag.Diagnostic `json:"diagnostics,omitempty"`
 }
 
 type Summary struct {
@@ -182,8 +187,17 @@ func Run(options Options) (*Result, error) {
 	if policy.SchemaVersion == "" {
 		policy = contracts.DefaultReviewPolicy()
 	}
-	if result := contracts.ValidateReviewPolicy(policy, policyContext(rules, policy, options.FrozenCharter)); len(result.Diagnostics) > 0 {
-		return nil, validationError(CodeInvalidPolicy, result.Diagnostics)
+	if !options.PolicyCapReleaseLedgerBacked {
+		policy.CapRelease = nil
+	}
+	validationContext := policyContext(rules, policy, options.FrozenCharter)
+	policyValidation := contracts.ValidateReviewPolicy(policy, validationContext)
+	if len(policyValidation.Diagnostics) > 0 {
+		return nil, validationError(CodeInvalidPolicy, policyValidation.Diagnostics)
+	}
+	capReleaseUnit := ""
+	if policy.CapRelease != nil {
+		capReleaseUnit = policy.CapRelease.Unit
 	}
 
 	var global []diag.Diagnostic
@@ -213,16 +227,20 @@ func Run(options Options) (*Result, error) {
 	relay := indexRelay(options.Manifest)
 
 	result := &Result{
-		SchemaVersion:  ResultSchemaVersion,
-		DigestProfile:  digest.Profile,
-		RulesVersion:   contracts.ReviewRulesV2,
-		RulesID:        rules.RulesID,
-		PolicyVersion:  contracts.ReviewPolicyV2,
-		PolicyID:       policy.PolicyID,
-		CharterHash:    options.Manifest.CharterHash,
-		ArtifactDigest: options.Manifest.ArtifactDigest,
-		ManifestDigest: manifestDigest,
-		Diagnostics:    append([]diag.Diagnostic(nil), documentDiagnostics...),
+		SchemaVersion:             ResultSchemaVersion,
+		DigestProfile:             digest.Profile,
+		RulesVersion:              contracts.ReviewRulesV2,
+		RulesID:                   rules.RulesID,
+		PolicyVersion:             contracts.ReviewPolicyV2,
+		PolicyID:                  policy.PolicyID,
+		PolicyDigest:              validationContext.PolicyDigest,
+		RulesDigest:               validationContext.RulesDigest,
+		CapReleaseCharterMismatch: policyValidation.CapReleaseCharterMismatch,
+		CapReleaseUnit:            capReleaseUnit,
+		CharterHash:               options.Manifest.CharterHash,
+		ArtifactDigest:            options.Manifest.ArtifactDigest,
+		ManifestDigest:            manifestDigest,
+		Diagnostics:               append([]diag.Diagnostic(nil), documentDiagnostics...),
 	}
 	for _, finding := range loadedFindings {
 		verdict := adjudicateFinding(finding, receipts, relay, options, rules, policy)
@@ -304,7 +322,9 @@ func ValidatePriorLineage(records []PriorLineageRecord) []diag.Diagnostic {
 
 func policyContext(rules contracts.ReviewRules, policy contracts.ReviewPolicy, frozen *charter.FrozenCharter) *contracts.PolicyValidationContext {
 	rulesDigest, _ := contracts.ReviewRulesDigest(rules)
-	policyDigest, _ := contracts.ReviewPolicyDigest(policy)
+	policyForDigest := policy
+	policyForDigest.CapRelease = nil
+	policyDigest, _ := contracts.ReviewPolicyDigest(policyForDigest)
 	context := &contracts.PolicyValidationContext{
 		RulesDigest:  rulesDigest,
 		PolicyDigest: policyDigest,
@@ -904,13 +924,15 @@ func classifyApplication(role string, finding contracts.Finding, disposition str
 		return contracts.ApplicationClassCallerDecision
 	}
 	if role == contracts.RoleDefect && finding.SmallestSufficientRemedy.Direction == contracts.RemedyDirectionAdd {
-		if !policy.DefectAdditiveAutoApplyEnabled || frozen == nil || frozen.Charter.OperationalEnvelope == nil {
+		if !policy.DefectAdditiveAutoApplyEnabled || policy.CapRelease == nil || frozen == nil || frozen.Charter.OperationalEnvelope == nil {
 			return contracts.ApplicationClassCallerDecision
 		}
-		if !deltaKnown(finding.EstimatedDelta) || policy.ProductionCap == nil || policy.TestCap == nil {
+		productionEstimate, productionKnown := estimatedDeltaValueForUnit(finding.EstimatedDelta.Production, policy.CapRelease.Unit)
+		testEstimate, testKnown := estimatedDeltaValueForUnit(finding.EstimatedDelta.Test, policy.CapRelease.Unit)
+		if !productionKnown || !testKnown || policy.ProductionCap == nil || policy.TestCap == nil {
 			return contracts.ApplicationClassCallerDecision
 		}
-		if finding.EstimatedDelta.Production.Lines > *policy.ProductionCap || finding.EstimatedDelta.Test.Lines > *policy.TestCap {
+		if productionEstimate > *policy.ProductionCap || testEstimate > *policy.TestCap {
 			return contracts.ApplicationClassCallerDecision
 		}
 		return contracts.ApplicationClassAutomaticCandidate
@@ -923,6 +945,24 @@ func classifyApplication(role string, finding contracts.Finding, disposition str
 
 func deltaKnown(delta contracts.SplitDeltaEstimate) bool {
 	return delta.Production.Status == contracts.DeltaStatusKnown && delta.Test.Status == contracts.DeltaStatusKnown
+}
+
+func estimatedDeltaValueForUnit(delta contracts.DeltaEstimate, unit string) (int, bool) {
+	if delta.Status != contracts.DeltaStatusKnown {
+		return 0, false
+	}
+	switch strings.TrimSpace(unit) {
+	case "files":
+		if !delta.FilesPresent() {
+			return 0, false
+		}
+		return delta.Files, true
+	default:
+		if !delta.LinesPresent() {
+			return 0, false
+		}
+		return delta.Lines, true
+	}
 }
 
 func nonPositiveDelta(delta contracts.SplitDeltaEstimate) bool {

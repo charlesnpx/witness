@@ -69,6 +69,9 @@ type DeltaEstimate struct {
 	Status string `json:"status"`
 	Lines  int    `json:"lines,omitempty"`
 	Files  int    `json:"files,omitempty"`
+
+	linesPresent bool
+	filesPresent bool
 }
 
 func (finding *Finding) UnmarshalJSON(data []byte) error {
@@ -102,8 +105,11 @@ func (witness *Witness) UnmarshalJSON(data []byte) error {
 }
 
 func (delta *DeltaEstimate) UnmarshalJSON(data []byte) error {
-	type deltaEstimateAlias DeltaEstimate
-	var decoded deltaEstimateAlias
+	var decoded struct {
+		Status string `json:"status"`
+		Lines  int    `json:"lines,omitempty"`
+		Files  int    `json:"files,omitempty"`
+	}
 	if err := decodeStrictContractJSON(data, &decoded); err != nil {
 		return err
 	}
@@ -111,8 +117,28 @@ func (delta *DeltaEstimate) UnmarshalJSON(data []byte) error {
 		*delta = DeltaEstimate{Status: DeltaStatusUnknown}
 		return nil
 	}
-	*delta = DeltaEstimate(decoded)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, linesPresent := fields["lines"]
+	_, filesPresent := fields["files"]
+	*delta = DeltaEstimate{
+		Status:       decoded.Status,
+		Lines:        decoded.Lines,
+		Files:        decoded.Files,
+		linesPresent: linesPresent,
+		filesPresent: filesPresent,
+	}
 	return nil
+}
+
+func (delta DeltaEstimate) LinesPresent() bool {
+	return delta.linesPresent || delta.Lines != 0
+}
+
+func (delta DeltaEstimate) FilesPresent() bool {
+	return delta.filesPresent || delta.Files != 0
 }
 
 type SmallestSufficientRemedy struct {

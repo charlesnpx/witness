@@ -16,7 +16,9 @@ import (
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/ledger"
 	"witness/internal/planning"
+	"witness/internal/policy"
 	"witness/internal/relayclient"
 	"witness/internal/strictjson"
 )
@@ -269,6 +271,528 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	}
 	if len(result.Findings) != 1 || result.Findings[0].Disposition != contracts.DispositionAdmitted {
 		t.Fatalf("adjudication findings = %#v", result.Findings)
+	}
+}
+
+func TestPolicyAndLedgerCLI(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	releaseOut := filepath.Join(dir, "release.json")
+	showOut := filepath.Join(dir, "policy-show.json")
+	checkOut := filepath.Join(dir, "policy-check.json")
+	ledgerShowOut := filepath.Join(dir, "ledger-show.json")
+	promoteOut := filepath.Join(dir, "promote.json")
+	acceptOut := filepath.Join(dir, "accept.json")
+
+	productionCap := 5
+	testCap := 5
+	document := contracts.ReviewPolicy{
+		SchemaVersion:                  contracts.ReviewPolicyV2,
+		PolicyID:                       "policy-cli",
+		DefectAdditiveAutoApplyEnabled: true,
+		ProductionCap:                  &productionCap,
+		TestCap:                        &testCap,
+	}
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(policyPath, document); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"policy", "release-caps",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-production-cap", "5",
+		"-test-cap", "5",
+		"-basis", contracts.CapReleaseBasisOwnerJudgment,
+		"-rationale", "Owner accepted conservative caps.",
+		"-actor", "owner",
+		"-out", releaseOut,
+	}); err != nil {
+		t.Fatalf("policy release-caps: %v", err)
+	}
+	if err := route([]string{
+		"policy", "show",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-out", showOut,
+	}); err != nil {
+		t.Fatalf("policy show: %v", err)
+	}
+	showData, err := os.ReadFile(showOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	show, err := strictjson.DecodeBytes[policy.ShowDocument](showData, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !show.PositiveCapAllowanceUsable || show.CapRelease == nil || show.CapReleaseCharterMismatch {
+		t.Fatalf("policy show = %#v", show)
+	}
+	if err := route([]string{
+		"policy", "check-application",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-estimated-production-lines", "1",
+		"-estimated-test-lines", "1",
+		"-measured-production", "1",
+		"-measured-test", "1",
+		"-finding-id", "finding-1",
+		"-out", checkOut,
+	}); err != nil {
+		t.Fatalf("policy check-application: %v", err)
+	}
+	checkData, err := os.ReadFile(checkOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check, err := strictjson.DecodeBytes[policyCheckApplicationOutput](checkData, strictjson.DefaultMaxBytes*2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !check.Allow || len(check.LedgerRecords) != 2 {
+		t.Fatalf("policy check output = %#v", check)
+	}
+	if err := route([]string{
+		"ledger", "promote",
+		"-ledger", ledgerPath,
+		"-question-id", "question-1",
+		"-goal-ref", "goal-cli",
+		"-actor", "owner",
+		"-rationale", "Owner promoted missing goal.",
+		"-out", promoteOut,
+	}); err != nil {
+		t.Fatalf("ledger promote: %v", err)
+	}
+	if err := route([]string{
+		"ledger", "accept-unverified",
+		"-ledger", ledgerPath,
+		"-finding-id", "finding-1",
+		"-pending-verification-id", "verify-1",
+		"-actor", "owner",
+		"-rationale", "Owner accepted pending risk.",
+		"-out", acceptOut,
+	}); err != nil {
+		t.Fatalf("ledger accept-unverified: %v", err)
+	}
+	if err := route([]string{
+		"ledger", "show",
+		"-ledger", ledgerPath,
+		"-kind", ledger.EventKindPolicyDecision,
+		"-out", ledgerShowOut,
+	}); err != nil {
+		t.Fatalf("ledger show: %v", err)
+	}
+	ledgerShowData, err := os.ReadFile(ledgerShowOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerShow, err := strictjson.DecodeBytes[ledger.ShowDocument](ledgerShowData, strictjson.DefaultMaxBytes*2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledgerShow.Records) != 1 || ledgerShow.Records[0].EventKind != ledger.EventKindPolicyDecision {
+		t.Fatalf("filtered ledger show = %#v", ledgerShow)
+	}
+}
+
+func TestPolicyCheckApplicationDefaultsOmittedEstimatesUnknown(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	outPath := filepath.Join(dir, "policy-check.json")
+	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitLines)
+
+	if err := route([]string{
+		"policy", "check-application",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-measured-production", "1",
+		"-measured-test", "1",
+		"-finding-id", "finding-1",
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("policy check-application: %v", err)
+	}
+	check := readPolicyCheckOutput(t, outPath)
+	if check.Allow || len(check.Reasons) != 1 || check.Reasons[0] != policy.ReasonUnknownEstimatedDelta {
+		t.Fatalf("policy check output = %#v, want unknown estimate refusal", check)
+	}
+	if check.Decision.EstimatedDelta.Production.Status != contracts.DeltaStatusUnknown || check.Decision.EstimatedDelta.Test.Status != contracts.DeltaStatusUnknown {
+		t.Fatalf("estimated delta = %#v, want unknown statuses", check.Decision.EstimatedDelta)
+	}
+}
+
+func TestPolicyCheckApplicationKnownEstimateRequiresExplicitCount(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	outPath := filepath.Join(dir, "policy-check.json")
+	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitLines)
+
+	err := route([]string{
+		"policy", "check-application",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-estimated-production-status", contracts.DeltaStatusKnown,
+		"-estimated-test-lines", "1",
+		"-measured-production", "1",
+		"-measured-test", "1",
+		"-finding-id", "finding-1",
+		"-out", outPath,
+	})
+	if err == nil {
+		t.Fatal("policy check-application accepted known production estimate without an explicit count")
+	}
+	if got := diag.FromError(err).Code; got != diag.CodeInvalidCommand {
+		t.Fatalf("diagnostic code = %s, want %s; err=%v", got, diag.CodeInvalidCommand, err)
+	}
+}
+
+func TestPolicyCheckApplicationRefusesReleaseUnitMismatch(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	outPath := filepath.Join(dir, "policy-check.json")
+	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitFiles)
+
+	err := route([]string{
+		"policy", "check-application",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-unit", policy.UnitLines,
+		"-estimated-production-lines", "1",
+		"-estimated-test-lines", "1",
+		"-measured-production", "1",
+		"-measured-test", "1",
+		"-finding-id", "finding-1",
+		"-out", outPath,
+	})
+	if err == nil {
+		t.Fatal("policy check-application accepted a release with the wrong unit")
+	}
+	var validation *policy.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("error = %T, want policy.ValidationError", err)
+	}
+	if len(validation.Diagnostics) == 0 || validation.Diagnostics[0].Code != policy.CodeInvalidPolicyLoad {
+		t.Fatalf("diagnostics = %#v, want %s", validation.Diagnostics, policy.CodeInvalidPolicyLoad)
+	}
+}
+
+func TestPolicyCheckApplicationUsesLatestMatchingUnitRelease(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	outPath := filepath.Join(dir, "policy-check.json")
+	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitLines)
+	if err := route([]string{
+		"policy", "release-caps",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-unit", policy.UnitFiles,
+		"-production-cap", "5",
+		"-test-cap", "5",
+		"-basis", contracts.CapReleaseBasisOwnerJudgment,
+		"-rationale", "Owner accepted conservative file caps.",
+		"-actor", "owner",
+		"-out", filepath.Join(dir, "release-files.json"),
+	}); err != nil {
+		t.Fatalf("policy release-caps files: %v", err)
+	}
+
+	if err := route([]string{
+		"policy", "check-application",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-unit", policy.UnitLines,
+		"-estimated-production-lines", "1",
+		"-estimated-test-lines", "1",
+		"-measured-production", "1",
+		"-measured-test", "1",
+		"-finding-id", "finding-1",
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("policy check-application: %v", err)
+	}
+	check := readPolicyCheckOutput(t, outPath)
+	if !check.Allow || check.Decision.CapReleaseUnit != policy.UnitLines {
+		t.Fatalf("policy check output = %#v, want allow under latest matching lines release", check)
+	}
+}
+
+func TestAdjudicateCLIIgnoresEmbeddedCapReleaseWithoutLedger(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	roleOutput := validCLIRoleOutput(frozen)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	manifestPath := filepath.Join(dir, "manifest.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	outPath := filepath.Join(dir, "adjudication.json")
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
+		t.Fatal(err)
+	}
+	productionCap := 5
+	testCap := 5
+	policyDocument := contracts.ReviewPolicy{
+		SchemaVersion:                  contracts.ReviewPolicyV2,
+		PolicyID:                       "policy-cli",
+		DefectAdditiveAutoApplyEnabled: true,
+		ProductionCap:                  &productionCap,
+		TestCap:                        &testCap,
+	}
+	release, err := policy.BuildCapRelease(policy.ReleaseInput{
+		Policy:        policyDocument,
+		Rules:         contracts.DefaultReviewRules(),
+		Unit:          policy.UnitLines,
+		ProductionCap: productionCap,
+		TestCap:       testCap,
+		Basis:         contracts.CapReleaseBasisOwnerJudgment,
+		Rationale:     "Owner accepted conservative caps.",
+		Actor:         "owner",
+		CharterHash:   frozen.CharterHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyDocument.CapRelease = &release
+	if err := writeCanonical(policyPath, policyDocument); err != nil {
+		t.Fatal(err)
+	}
+
+	err = route([]string{
+		"adjudicate",
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-role-output", roleOutputPath,
+		"-manifest", manifestPath,
+		"-out", outPath,
+	})
+	if err == nil {
+		t.Fatal("adjudicate accepted an embedded cap_release without ledger provenance")
+	}
+	var validation *policy.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("error = %T, want policy.ValidationError", err)
+	}
+	if len(validation.Diagnostics) == 0 || validation.Diagnostics[0].Code != policy.CodeInvalidPolicyLoad {
+		t.Fatalf("diagnostics = %#v, want %s", validation.Diagnostics, policy.CodeInvalidPolicyLoad)
+	}
+}
+
+func TestAdjudicateCLILedgerQuestionAllowsEmptyFindingID(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.MissingGoalQuestions = []contracts.MissingGoalQuestion{{
+		ID:               "question-anchor",
+		Dimension:        charter.DimensionScaleBounds,
+		AnchorIndex:      0,
+		Property:         "maximum reviewed size",
+		Value:            "100 files",
+		AffectedDecision: "automatic application",
+		Statement:        "Should maximum reviewed size be an explicit goal?",
+	}}
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	manifestPath := filepath.Join(dir, "manifest.json")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	outPath := filepath.Join(dir, "adjudication.json")
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := route([]string{
+		"adjudicate",
+		"-ledger", ledgerPath,
+		"-charter-freeze", frozenPath,
+		"-role-output", roleOutputPath,
+		"-manifest", manifestPath,
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("adjudicate with empty question finding_id: %v", err)
+	}
+	records, err := ledger.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	questionRecords := 0
+	for _, record := range records {
+		if record.EventKind == ledger.EventKindQuestion {
+			questionRecords++
+		}
+	}
+	if questionRecords != 1 {
+		t.Fatalf("question records = %d, want 1; records=%#v", questionRecords, records)
+	}
+}
+
+func TestAdjudicateCLILedgerBackedPolicyAppendsLineageAndRefusesDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.MissingGoalQuestions = []contracts.MissingGoalQuestion{{
+		ID:               "question-1",
+		FindingID:        "finding-1",
+		Dimension:        charter.DimensionScaleBounds,
+		AnchorIndex:      0,
+		Property:         "maximum reviewed size",
+		Value:            "100 files",
+		AffectedDecision: "automatic application",
+		Statement:        "Should maximum reviewed size be an explicit goal?",
+	}}
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	manifestPath := filepath.Join(dir, "manifest.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	outPath := filepath.Join(dir, "adjudication.json")
+
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	manifest := validCLIAdjudicationManifest(t, frozen, roleOutput)
+	manifest.Batches[0].Status = contracts.RecordStatusUnavailable
+	manifest.Batches[0].RelayVerdicts = nil
+	manifest.Batches[0].FailureReason = "relay unavailable"
+	if err := writeCanonical(manifestPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	productionCap := 5
+	testCap := 5
+	policyDocument := contracts.ReviewPolicy{
+		SchemaVersion:                  contracts.ReviewPolicyV2,
+		PolicyID:                       "policy-cli",
+		DefectAdditiveAutoApplyEnabled: true,
+		ProductionCap:                  &productionCap,
+		TestCap:                        &testCap,
+	}
+	if err := writeCanonical(policyPath, policyDocument); err != nil {
+		t.Fatal(err)
+	}
+	err := route([]string{
+		"adjudicate",
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-role-output", roleOutputPath,
+		"-manifest", manifestPath,
+		"-out", outPath,
+	})
+	if err == nil {
+		t.Fatal("adjudicate without ledger-backed cap release succeeded, want fail-closed error")
+	}
+	release, err := policy.BuildCapRelease(policy.ReleaseInput{
+		Policy:        policyDocument,
+		Rules:         contracts.DefaultReviewRules(),
+		Unit:          policy.UnitLines,
+		ProductionCap: productionCap,
+		TestCap:       testCap,
+		Basis:         contracts.CapReleaseBasisOwnerJudgment,
+		Rationale:     "Owner accepted conservative caps.",
+		Actor:         "owner",
+		CharterHash:   digest.RawBytes([]byte("older-charter")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.AppendEvent(ledgerPath, ledger.EventKindCapRelease, ledger.CapReleaseEvent{Release: release}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := route([]string{
+		"adjudicate",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-role-output", roleOutputPath,
+		"-manifest", manifestPath,
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("adjudicate with ledger: %v", err)
+	}
+	resultData, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := strictjson.DecodeBytes[adjudicate.Result](resultData, strictjson.DefaultMaxBytes*2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.CapReleaseCharterMismatch {
+		t.Fatalf("cap_release_charter_mismatch = false, want true; result=%#v", result)
+	}
+	records, err := ledger.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]int{}
+	for _, record := range records {
+		kinds[record.EventKind]++
+	}
+	for _, kind := range []string{
+		ledger.EventKindCapRelease,
+		ledger.EventKindAdjudicationRun,
+		ledger.EventKindVerdict,
+		ledger.EventKindQuestion,
+		ledger.EventKindPendingVerification,
+		ledger.EventKindPolicyDecision,
+	} {
+		if kinds[kind] == 0 {
+			t.Fatalf("ledger event kinds = %#v, missing %s", kinds, kind)
+		}
+	}
+
+	err = route([]string{
+		"adjudicate",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-role-output", roleOutputPath,
+		"-manifest", manifestPath,
+		"-out", outPath,
+	})
+	if err == nil {
+		t.Fatal("second adjudicate succeeded, want duplicate run digest refusal")
+	}
+	if got := diag.FromError(err).Code; got != ledger.CodeDuplicateRunDigest {
+		t.Fatalf("diagnostic code = %s, want %s; err=%v", got, ledger.CodeDuplicateRunDigest, err)
 	}
 }
 
@@ -1316,6 +1840,53 @@ func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocume
 			}},
 		}},
 	}
+}
+
+func writeCLIAutoPolicy(t *testing.T, frozen charter.FrozenCharter, frozenPath string, policyPath string, ledgerPath string, unit string) {
+	t.Helper()
+	productionCap := 5
+	testCap := 5
+	document := contracts.ReviewPolicy{
+		SchemaVersion:                  contracts.ReviewPolicyV2,
+		PolicyID:                       "policy-cli",
+		DefectAdditiveAutoApplyEnabled: true,
+		ProductionCap:                  &productionCap,
+		TestCap:                        &testCap,
+	}
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(policyPath, document); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"policy", "release-caps",
+		"-ledger", ledgerPath,
+		"-policy", policyPath,
+		"-charter-freeze", frozenPath,
+		"-unit", unit,
+		"-production-cap", "5",
+		"-test-cap", "5",
+		"-basis", contracts.CapReleaseBasisOwnerJudgment,
+		"-rationale", "Owner accepted conservative caps.",
+		"-actor", "owner",
+		"-out", filepath.Join(filepath.Dir(policyPath), "release-"+unit+".json"),
+	}); err != nil {
+		t.Fatalf("policy release-caps: %v", err)
+	}
+}
+
+func readPolicyCheckOutput(t *testing.T, path string) policyCheckApplicationOutput {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := strictjson.DecodeBytes[policyCheckApplicationOutput](data, strictjson.DefaultMaxBytes*2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return output
 }
 
 func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, roleOutput contracts.RoleOutputDocument) contracts.VerificationManifest {
