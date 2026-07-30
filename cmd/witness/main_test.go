@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"witness/internal/adjudicate"
 	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/diag"
@@ -226,6 +227,117 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 	}
 	if len(manifest.Batches) != 1 || manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
 		t.Fatalf("manifest batches = %#v, want unavailable missing relay verification", manifest.Batches)
+	}
+}
+
+func TestAdjudicateCLIWritesRunResult(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	roleOutput := validCLIRoleOutput(frozen)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	manifestPath := filepath.Join(dir, "manifest.json")
+	outPath := filepath.Join(dir, "adjudication.json")
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"adjudicate",
+		"-charter-freeze", frozenPath,
+		"-role-output", roleOutputPath,
+		"-manifest", manifestPath,
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("adjudicate: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SchemaVersion != adjudicate.ResultSchemaVersion || result.ResultDigest == "" {
+		t.Fatalf("adjudication result header = %#v", result)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Disposition != contracts.DispositionAdmitted {
+		t.Fatalf("adjudication findings = %#v", result.Findings)
+	}
+}
+
+func TestAdjudicateCLIAcceptsPriorLineage(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	roleOutput := validCLIRoleOutput(frozen)
+	finding := roleOutput.Findings[0]
+	witnessDigest, err := contracts.WitnessDigest(finding.Witness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding.Recurrence = &contracts.RecurrenceRef{
+		PriorFindingID: "prior-finding",
+		FindingKey:     "cli-recurring-finding",
+		WitnessDigest:  witnessDigest,
+		ArtifactDigest: roleOutput.ArtifactDigest,
+	}
+	roleOutput.Findings[0] = finding
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	manifestPath := filepath.Join(dir, "manifest.json")
+	lineagePath := filepath.Join(dir, "prior-lineage.jsonl")
+	outPath := filepath.Join(dir, "adjudication.json")
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
+		t.Fatal(err)
+	}
+	lineage := adjudicate.PriorLineageRecord{
+		FindingID:      "prior-finding",
+		FindingKey:     "cli-recurring-finding",
+		CharterHash:    frozen.CharterHash,
+		ArtifactDigest: roleOutput.ArtifactDigest,
+		WitnessDigest:  witnessDigest,
+		Disposition:    contracts.DispositionAdmitted,
+	}
+	if err := os.WriteFile(lineagePath, append(mustCanonicalBytes(t, lineage), '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"adjudicate",
+		"-charter-freeze", frozenPath,
+		"-role-output", roleOutputPath,
+		"-manifest", manifestPath,
+		"-prior-lineage", lineagePath,
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("adjudicate: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Disposition != contracts.DispositionAdmitted {
+		t.Fatalf("adjudication findings = %#v", result.Findings)
+	}
+	for _, reason := range result.Findings[0].Reasons {
+		if reason == adjudicate.ReasonRecurrenceLineageUnavailable || reason == adjudicate.ReasonInvalidRecurrenceLineage {
+			t.Fatalf("adjudication reasons = %#v, recurrence lineage should pass", result.Findings[0].Reasons)
+		}
 	}
 }
 
@@ -1203,6 +1315,52 @@ func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocume
 				CharterRefs:        []contracts.CharterRef{{GoalID: "goal-cli"}},
 			}},
 		}},
+	}
+}
+
+func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, roleOutput contracts.RoleOutputDocument) contracts.VerificationManifest {
+	t.Helper()
+	finding := roleOutput.Findings[0]
+	witnessDigest, err := contracts.WitnessDigest(finding.Witness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdicts := contracts.RelayWitnessVerdictsDocument{
+		SchemaVersion: contracts.RelayWitnessVerdictsV2,
+		BatchID:       "batch-1",
+		Verdicts: []contracts.WitnessVerdict{{
+			FindingID:     finding.ID,
+			WitnessDigest: witnessDigest,
+			Verdict:       contracts.VerdictSurvived,
+			VerdictClass:  nil,
+		}},
+	}
+	resultDigest, err := contracts.RelayWitnessVerdictsDigest(verdicts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchRef := artifactRef("verification-batch", "batch-1", digest.RawBytes([]byte("batch")))
+	exportRef := artifactRef("relay-root-portable-export", "batch-1", digest.RawBytes([]byte("export")))
+	return contracts.VerificationManifest{
+		SchemaVersion:         contracts.VerificationManifestV3,
+		PlanDigest:            digest.RawBytes([]byte("plan")),
+		CharterHash:           frozen.CharterHash,
+		ArtifactDigest:        roleOutput.ArtifactDigest,
+		CompatibilityManifest: artifactRef("compatibility-manifest", "compatibility", digest.RawBytes([]byte("compatibility"))),
+		RelayCapabilities:     artifactRef("relay-capabilities", "capabilities", digest.RawBytes([]byte("capabilities"))),
+		IntegrationBundle:     artifactRef("integration-bundle", "bundle", digest.RawBytes([]byte("bundle"))),
+		SelectedContracts:     []contracts.ArtifactRef{artifactRef("selected-contract", "contract", digest.RawBytes([]byte("contract")))},
+		Batches: []contracts.VerificationManifestBatch{{
+			BatchID:               "batch-1",
+			Status:                contracts.RecordStatusValid,
+			BatchRef:              batchRef,
+			BatchDigest:           batchRef.Digest,
+			PortableExportRef:     &exportRef,
+			PortableExportDigest:  exportRef.Digest,
+			CanonicalResultDigest: resultDigest,
+			RelayVerdicts:         &verdicts,
+		}},
+		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
 	}
 }
 

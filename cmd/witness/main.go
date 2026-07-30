@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"witness/internal/adjudicate"
 	"witness/internal/canonjson"
 	"witness/internal/charter"
 	"witness/internal/contracts"
@@ -76,6 +77,9 @@ func route(args []string) error {
 		return diag.New(diag.CodeInvalidCommand, "missing witness command.")
 	}
 	if singleCommands[args[0]] {
+		if args[0] == "adjudicate" {
+			return runAdjudicate(args[1:])
+		}
 		return notImplemented(args[0])
 	}
 	if subcommands, ok := witnessCommands[args[0]]; ok {
@@ -313,6 +317,96 @@ func verificationAssembleOutput(result *planning.AssembleResult) any {
 	return result.Manifest
 }
 
+func runAdjudicate(args []string) error {
+	flags := newFlagSet("witness adjudicate")
+	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
+	manifestPath := flags.String("manifest", "", "verification manifest path")
+	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
+	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
+	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
+	out := flags.String("out", "", "adjudication run-result output path")
+	var roleOutputPaths repeatedStrings
+	flags.Var(&roleOutputPaths, "role-output", "role-output JSON path; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *frozenPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness adjudicate requires -charter-freeze.")
+	}
+	if len(roleOutputPaths) == 0 {
+		return diag.New(diag.CodeInvalidCommand, "witness adjudicate requires at least one -role-output.")
+	}
+	if *manifestPath == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness adjudicate requires -manifest.")
+	}
+	frozen, err := readFrozenCharterFile(*frozenPath)
+	if err != nil {
+		return err
+	}
+	manifest, err := readVerificationManifestFile(*manifestPath)
+	if err != nil {
+		return err
+	}
+	var priorLineage []adjudicate.PriorLineageRecord
+	priorLineageProvided := *priorLineagePath != ""
+	if priorLineageProvided {
+		priorLineage, err = adjudicate.ReadPriorLineageFile(*priorLineagePath)
+		if err != nil {
+			return err
+		}
+	}
+	inputs := make([]adjudicate.RoleOutputInput, 0, len(roleOutputPaths))
+	for _, path := range roleOutputPaths {
+		document, err := readRoleOutputFile(path)
+		if err != nil {
+			return err
+		}
+		inputs = append(inputs, adjudicate.RoleOutputInput{
+			Path:     path,
+			Document: document,
+		})
+	}
+	var rules contracts.ReviewRules
+	if *rulesPath != "" {
+		rules, err = readReviewRulesFile(*rulesPath)
+		if err != nil {
+			return err
+		}
+	}
+	var policy contracts.ReviewPolicy
+	if *policyPath != "" {
+		policy, err = readReviewPolicyFile(*policyPath)
+		if err != nil {
+			return err
+		}
+	}
+	result, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter:        &frozen,
+		RoleOutputs:          inputs,
+		Manifest:             manifest,
+		ReceiptOutputDir:     *receiptOutputDir,
+		ReceiptHMACKeyFile:   *receiptHMACKeyFile,
+		Rules:                rules,
+		Policy:               policy,
+		PriorLineage:         priorLineage,
+		PriorLineageProvided: priorLineageProvided,
+	})
+	if result != nil {
+		if writeErr := writeCanonical(*out, result); writeErr != nil {
+			return writeErr
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 type repeatedStrings []string
 
 func (values *repeatedStrings) String() string {
@@ -352,6 +446,30 @@ func readPlanFile(path string) (planning.PlanDocument, error) {
 		return planning.PlanDocument{}, fileReadError(err, path, "open verification plan")
 	}
 	return strictjson.DecodeBytes[planning.PlanDocument](data, strictjson.DefaultMaxBytes*4)
+}
+
+func readVerificationManifestFile(path string) (contracts.VerificationManifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return contracts.VerificationManifest{}, fileReadError(err, path, "open verification manifest")
+	}
+	return contracts.ReadVerificationManifestBytes(data)
+}
+
+func readReviewRulesFile(path string) (contracts.ReviewRules, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return contracts.ReviewRules{}, fileReadError(err, path, "open review rules")
+	}
+	return contracts.ReadReviewRulesBytes(data)
+}
+
+func readReviewPolicyFile(path string) (contracts.ReviewPolicy, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return contracts.ReviewPolicy{}, fileReadError(err, path, "open review policy")
+	}
+	return contracts.ReadReviewPolicyBytes(data)
 }
 
 func readBatchEvidence(paths []string) ([]planning.BatchEvidence, error) {
@@ -1071,6 +1189,10 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var planningValidation *planning.ValidationError
 	if errors.As(err, &planningValidation) {
 		return planningValidation.Diagnostics
+	}
+	var adjudicateValidation *adjudicate.ValidationError
+	if errors.As(err, &adjudicateValidation) {
+		return adjudicateValidation.Diagnostics
 	}
 	var preflightError *preflight.Error
 	if errors.As(err, &preflightError) {
