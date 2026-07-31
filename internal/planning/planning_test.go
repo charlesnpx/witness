@@ -181,6 +181,53 @@ func TestPlanningRejectsRoleOutputArtifactDigestDifferentFromPreflightSnapshot(t
 	}
 }
 
+func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	snapshotDigest := digest.RawBytes([]byte("preflight snapshot"))
+	mismatched := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-a", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	mismatched.ArtifactDigest = digest.RawBytes([]byte("role output artifact"))
+	mismatched.ConsumerIdentity = map[string]any{"kind": "test", "id": "consumer-a"}
+
+	matching := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-b", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	matching.ArtifactDigest = snapshotDigest
+	matching.ConsumerIdentity = map[string]any{"kind": "test", "id": "consumer-b"}
+
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "defect-a.json", Document: mismatched},
+			{Path: "defect-b.json", Document: matching},
+		},
+		Preflight: PreflightBinding{SnapshotDigest: snapshotDigest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Plan.ConsumerIdentity["id"] != "consumer-b" {
+		t.Fatalf("consumer identity = %#v, want consumer-b", result.Plan.ConsumerIdentity)
+	}
+	if len(result.Plan.Batches) != 1 || fmt.Sprint(result.Plan.Batches[0].FindingIDs) != fmt.Sprint([]string{"finding-b"}) {
+		t.Fatalf("planned batches = %#v, want finding-b from matching output", result.Plan.Batches)
+	}
+	var found bool
+	for _, diagnostic := range result.Plan.Diagnostics {
+		if diagnostic.Code != CodeSnapshotArtifactMismatch {
+			continue
+		}
+		found = true
+		if diagnostic.Details["role_output"] != "defect-a.json" || diagnostic.Details["artifact_digest"] != mismatched.ArtifactDigest || diagnostic.Details["expected"] != snapshotDigest {
+			t.Fatalf("mismatch diagnostic details = %#v", diagnostic.Details)
+		}
+	}
+	if !found {
+		t.Fatalf("missing %s diagnostic: %#v", CodeSnapshotArtifactMismatch, result.Plan.Diagnostics)
+	}
+}
+
 func planningTestRoleOutput(frozen *charter.FrozenCharter, role string, findings []contracts.Finding) contracts.RoleOutputDocument {
 	return contracts.RoleOutputDocument{
 		SchemaVersion:  contracts.RoleOutputV3,

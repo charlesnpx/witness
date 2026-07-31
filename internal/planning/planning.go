@@ -180,15 +180,15 @@ func Run(options Options) (*Result, error) {
 	}
 
 	result := &Result{}
+	preflightSnapshotDigest := strings.TrimSpace(options.Preflight.SnapshotDigest)
 	consumer := cloneIdentity(options.ConsumerIdentity)
 	if len(consumer) == 0 {
-		consumer = firstConsumerIdentity(options.RoleOutputs)
+		consumer = firstConsumerIdentity(options.RoleOutputs, preflightSnapshotDigest)
 	}
 	if len(consumer) == 0 {
 		consumer = map[string]any{"kind": "witness", "id": "verification-plan"}
 	}
 
-	preflightSnapshotDigest := strings.TrimSpace(options.Preflight.SnapshotDigest)
 	plan := PlanDocument{
 		SchemaVersion:                    SchemaVersion,
 		DigestProfile:                    digest.Profile,
@@ -648,8 +648,11 @@ func recipeFamilyForTask(taskShape string) string {
 	}
 }
 
-func firstConsumerIdentity(inputs []RoleOutputInput) map[string]any {
+func firstConsumerIdentity(inputs []RoleOutputInput, preflightSnapshotDigest string) map[string]any {
 	for _, input := range inputs {
+		if preflightSnapshotDigest != "" && input.Document.ArtifactDigest != "" && input.Document.ArtifactDigest != preflightSnapshotDigest {
+			continue
+		}
 		if len(input.Document.ConsumerIdentity) > 0 {
 			return cloneIdentity(input.Document.ConsumerIdentity)
 		}
