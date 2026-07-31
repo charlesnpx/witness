@@ -22,6 +22,7 @@ const (
 	CodeInvalidReviewRules         = "planning_invalid_review_rules"
 	CodeMixedCharter               = "planning_mixed_charter"
 	CodeMixedArtifact              = "planning_mixed_artifact"
+	CodeSnapshotArtifactMismatch   = "planning_snapshot_artifact_mismatch"
 	CodeInvalidRoleOutput          = "planning_invalid_role_output"
 	CodeScopeAdvisory              = "planning_scope_advisory"
 	CodeInvalidReachability        = "planning_invalid_reachability"
@@ -187,12 +188,14 @@ func Run(options Options) (*Result, error) {
 		consumer = map[string]any{"kind": "witness", "id": "verification-plan"}
 	}
 
+	preflightSnapshotDigest := strings.TrimSpace(options.Preflight.SnapshotDigest)
 	plan := PlanDocument{
 		SchemaVersion:                    SchemaVersion,
 		DigestProfile:                    digest.Profile,
 		CharterHash:                      options.FrozenCharter.CharterHash,
 		CharterDigest:                    strings.TrimSpace(options.CharterDigest),
-		PreflightSnapshotDigest:          strings.TrimSpace(options.Preflight.SnapshotDigest),
+		ArtifactDigest:                   preflightSnapshotDigest,
+		PreflightSnapshotDigest:          preflightSnapshotDigest,
 		PreflightCompatibilityDigest:     strings.TrimSpace(options.Preflight.CompatibilityDigest),
 		PreflightRelayCapabilitiesDigest: strings.TrimSpace(options.Preflight.RelayCapabilitiesDigest),
 		IntegrationBundleDigest:          strings.TrimSpace(options.Preflight.IntegrationBundleDigest),
@@ -213,9 +216,19 @@ func Run(options Options) (*Result, error) {
 				diag.WithDetail("expected", options.FrozenCharter.CharterHash),
 			)))
 		}
-		if plan.ArtifactDigest == "" {
+		if preflightSnapshotDigest != "" && document.ArtifactDigest != "" && document.ArtifactDigest != preflightSnapshotDigest {
+			plan.Diagnostics = append(plan.Diagnostics, diag.FromError(diag.New(
+				CodeSnapshotArtifactMismatch,
+				"role-output artifact digest does not match the preflight frozen snapshot.",
+				diag.WithDetail("role_output", inputLabel(input, sourceIndex)),
+				diag.WithDetail("artifact_digest", document.ArtifactDigest),
+				diag.WithDetail("expected", preflightSnapshotDigest),
+			)))
+			continue
+		}
+		if preflightSnapshotDigest == "" && plan.ArtifactDigest == "" {
 			plan.ArtifactDigest = document.ArtifactDigest
-		} else if document.ArtifactDigest != "" && document.ArtifactDigest != plan.ArtifactDigest {
+		} else if preflightSnapshotDigest == "" && document.ArtifactDigest != "" && document.ArtifactDigest != plan.ArtifactDigest {
 			plan.Diagnostics = append(plan.Diagnostics, diag.FromError(diag.New(
 				CodeMixedArtifact,
 				"all planned role-output documents must reference the same reviewed artifact digest.",

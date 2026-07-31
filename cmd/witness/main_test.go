@@ -2278,7 +2278,7 @@ func writeCLIPreflightResult(t *testing.T, dir string, name string, stateDir str
 			"integration_bundle": bundleRef.Digest,
 		},
 		BackendStrata:    map[string]string{},
-		SnapshotDigest:   digest.RawBytes([]byte("snapshot")),
+		SnapshotDigest:   digest.RawBytes([]byte("artifact")),
 		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
 	}
 	if err := writeCanonical(path, result); err != nil {

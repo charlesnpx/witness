@@ -479,7 +479,7 @@ func planningTestPreflightBinding(t *testing.T) PreflightBinding {
 	t.Helper()
 	refs := validManifestEvidenceRefs()
 	return PreflightBinding{
-		SnapshotDigest:          testDigest("snapshot"),
+		SnapshotDigest:          testDigest("artifact"),
 		CompatibilityDigest:     refs.CompatibilityManifest.Digest,
 		RelayCapabilitiesDigest: refs.RelayCapabilities.Digest,
 		IntegrationBundleDigest: refs.IntegrationBundle.Digest,

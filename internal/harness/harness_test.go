@@ -368,6 +368,111 @@ func TestRunReportsDirectoryOnlyMutationDelta(t *testing.T) {
 	}
 }
 
+func TestRunAllowsNestedWorkspaceCWD(t *testing.T) {
+	sourceDir := t.TempDir()
+	nestedDir := filepath.Join(sourceDir, "nested")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "input.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newRunFixtureFromSource(t, sourceDir)
+	fixture.request.Command = contracts.ExecutableSpec{
+		Argv:                helperCommand(t),
+		CWD:                 "nested",
+		ExpectedObservation: "exit_code=0",
+	}
+	fixture.request.Environment = map[string]string{
+		"WITNESS_HARNESS_HELPER":      "1",
+		"WITNESS_HARNESS_HELPER_MODE": "write",
+	}
+
+	result, err := Run(context.Background(), RunOptions{Request: fixture.request, OutputDir: fixture.outputDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltaRef := findProducedArtifact(t, result.Receipt, "workspace-mutation-report")
+	deltaPath, err := ArtifactPath(fixture.outputDir, deltaRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(deltaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta, err := strictjson.DecodeBytes[WorkspaceDelta](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delta.Added) != 1 || delta.Added[0].Path != "nested/created.txt" {
+		t.Fatalf("delta added = %#v", delta.Added)
+	}
+}
+
+func TestRunRejectsWorkspaceCWDSymlinkEscape(t *testing.T) {
+	sourceDir := t.TempDir()
+	var outsideDir string
+	for _, name := range []string{"w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9"} {
+		candidate := filepath.Join("/tmp", name)
+		if err := os.Mkdir(candidate, 0o755); err == nil {
+			outsideDir = candidate
+			break
+		} else if !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+	}
+	if outsideDir == "" {
+		t.Fatal("no short temporary outside path available")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+	if err := os.Symlink(outsideDir, filepath.Join(sourceDir, "outside")); err != nil {
+		t.Fatal(err)
+	}
+	expectedResolved, err := filepath.EvalSymlinks(outsideDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newRunFixtureFromSource(t, sourceDir)
+	fixture.request.Command = contracts.ExecutableSpec{
+		Argv:                helperCommand(t),
+		CWD:                 "outside",
+		ExpectedObservation: "exit_code=0",
+	}
+	fixture.request.Environment = map[string]string{
+		"WITNESS_HARNESS_HELPER":      "1",
+		"WITNESS_HARNESS_HELPER_MODE": "write",
+	}
+
+	_, err = Run(context.Background(), RunOptions{Request: fixture.request, OutputDir: fixture.outputDir})
+	if err == nil {
+		t.Fatal("Run succeeded with command.cwd symlink escape")
+	}
+	var harnessErr *Error
+	if !errors.As(err, &harnessErr) || !hasDiagnostic(harnessErr.Diagnostics, CodeWorkspaceCWDEscape) {
+		t.Fatalf("err = %#v", err)
+	}
+	var cwdDiagnostic diag.Diagnostic
+	for _, diagnostic := range harnessErr.Diagnostics {
+		if diagnostic.Code == CodeWorkspaceCWDEscape {
+			cwdDiagnostic = diagnostic
+			break
+		}
+	}
+	if cwdDiagnostic.Path != "/command/cwd" {
+		t.Fatalf("diagnostic path = %q, want /command/cwd", cwdDiagnostic.Path)
+	}
+	if cwdDiagnostic.Details["resolved"] != expectedResolved {
+		t.Fatalf("resolved detail = %#v, want %s", cwdDiagnostic.Details["resolved"], expectedResolved)
+	}
+	marker := filepath.Join(outsideDir, "created.txt")
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("command executed outside workspace and wrote %s", marker)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+}
+
 func TestInventoryWorkspaceRecordsDirectorySpecialModeBits(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "sticky")
@@ -643,6 +748,11 @@ func newRunFixture(t *testing.T) runFixture {
 	if err := os.WriteFile(filepath.Join(sourceDir, "input.txt"), []byte("source\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return newRunFixtureFromSource(t, sourceDir)
+}
+
+func newRunFixtureFromSource(t *testing.T, sourceDir string) runFixture {
+	t.Helper()
 	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
 	snapshot, err := freeze.Create(context.Background(), freeze.Options{
 		SourceDir:   sourceDir,

@@ -144,6 +144,43 @@ func TestPlanningPreSpendViolationsAreAdvisoryBeforeBatching(t *testing.T) {
 	}
 }
 
+func TestPlanningRejectsRoleOutputArtifactDigestDifferentFromPreflightSnapshot(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	snapshotDigest := digest.RawBytes([]byte("preflight snapshot"))
+	roleOutput.ArtifactDigest = digest.RawBytes([]byte("role output artifact"))
+
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     PreflightBinding{SnapshotDigest: snapshotDigest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Plan.ArtifactDigest != snapshotDigest {
+		t.Fatalf("artifact_digest = %s, want preflight snapshot %s", result.Plan.ArtifactDigest, snapshotDigest)
+	}
+	if len(result.Plan.Batches) != 0 || len(result.Batches) != 0 {
+		t.Fatalf("planned batches = %#v, outputs = %#v; want none", result.Plan.Batches, result.Batches)
+	}
+	var found bool
+	for _, diagnostic := range result.Plan.Diagnostics {
+		if diagnostic.Code != CodeSnapshotArtifactMismatch {
+			continue
+		}
+		found = true
+		if diagnostic.Details["role_output"] != "defect.json" || diagnostic.Details["artifact_digest"] != roleOutput.ArtifactDigest || diagnostic.Details["expected"] != snapshotDigest {
+			t.Fatalf("mismatch diagnostic details = %#v", diagnostic.Details)
+		}
+	}
+	if !found {
+		t.Fatalf("missing %s diagnostic: %#v", CodeSnapshotArtifactMismatch, result.Plan.Diagnostics)
+	}
+}
+
 func planningTestRoleOutput(frozen *charter.FrozenCharter, role string, findings []contracts.Finding) contracts.RoleOutputDocument {
 	return contracts.RoleOutputDocument{
 		SchemaVersion:  contracts.RoleOutputV3,

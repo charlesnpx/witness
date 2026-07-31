@@ -61,6 +61,7 @@ const (
 	CodeReceiptUnavailable          = "harness_receipt_unavailable"
 	CodeArtifactNotLocatable        = "harness_artifact_not_locatable"
 	CodeWorkspaceOutputConflict     = "harness_workspace_output_conflict"
+	CodeWorkspaceCWDEscape          = "harness_workspace_cwd_escape"
 )
 
 var (
@@ -286,6 +287,19 @@ func Run(ctx context.Context, options RunOptions) (*RunResult, error) {
 		return nil, err
 	}
 	cwdAbs := filepath.Join(workspaceDir, filepath.FromSlash(cwdRel))
+	cwdResolved, err := filepath.EvalSymlinks(cwdAbs)
+	if err != nil || !outputInsideWorkspace(workspaceDir, cwdResolved) {
+		details := map[string]any{"workspace_dir": workspaceDir, "cwd": cwdAbs, "resolved": cwdResolved}
+		if err != nil {
+			details["error"] = err.Error()
+		}
+		return nil, &Error{Diagnostics: []diag.Diagnostic{newDiagnostic(
+			CodeWorkspaceCWDEscape,
+			"command.cwd must resolve inside the ephemeral workspace.",
+			"/command/cwd",
+			details,
+		)}}
+	}
 	outcome := runStructuredCommand(ctx, request.Command.Argv, cwdAbs, request.Environment, time.Duration(request.TimeoutMS)*time.Millisecond)
 
 	workspaceAfter, err := InventoryWorkspace(workspaceDir)
