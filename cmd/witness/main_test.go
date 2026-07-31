@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -501,6 +502,27 @@ func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
 	}
 	if document.DeltaComparison.PairedFindings != 1 || document.DeltaComparison.Production.Equal != 1 || document.DeltaComparison.Test.Equal != 1 {
 		t.Fatalf("delta comparison = %#v, want one paired equal finding", document.DeltaComparison)
+	}
+}
+
+func TestDeltaEstimatePayloadPreservesExplicitZero(t *testing.T) {
+	// A known, explicit zero delta must survive into the finding ledger payload as
+	// lines:0, distinct from an omitted component. Dropping it (the pre-fix != 0 test)
+	// makes metrics treat the finding as estimate-missing instead of comparing zero.
+	var estimate contracts.DeltaEstimate
+	if err := json.Unmarshal([]byte(`{"status":"known","lines":0}`), &estimate); err != nil {
+		t.Fatalf("unmarshal explicit-zero delta: %v", err)
+	}
+	payload := deltaEstimatePayload(estimate)
+	lines, ok := payload["lines"]
+	if !ok {
+		t.Fatalf("explicit-zero lines dropped from ledger payload: %#v", payload)
+	}
+	if lines != 0 {
+		t.Fatalf("lines = %v, want explicit 0", lines)
+	}
+	if _, ok := payload["files"]; ok {
+		t.Fatalf("omitted files must stay omitted (distinct from explicit zero): %#v", payload)
 	}
 }
 

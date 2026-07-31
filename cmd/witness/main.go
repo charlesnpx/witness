@@ -652,10 +652,14 @@ func findingPayloadForLedger(finding adjudicate.FindingVerdict) map[string]any {
 
 func deltaEstimatePayload(estimate contracts.DeltaEstimate) map[string]any {
 	payload := map[string]any{"status": estimate.Status}
-	if estimate.Lines != 0 {
+	// Emit based on presence, not non-zero: an explicit zero (status=known, lines:0)
+	// is a real value the metrics consumer must compare, distinct from an omitted
+	// component. Using != 0 here would drop explicit zeros and cause metrics to treat
+	// the finding as estimate-missing instead of a zero delta.
+	if estimate.LinesPresent() {
 		payload["lines"] = estimate.Lines
 	}
-	if estimate.Files != 0 {
+	if estimate.FilesPresent() {
 		payload["files"] = estimate.Files
 	}
 	return payload

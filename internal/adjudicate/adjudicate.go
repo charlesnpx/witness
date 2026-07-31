@@ -116,15 +116,22 @@ type Summary struct {
 }
 
 type FindingVerdict struct {
-	FindingID          string                       `json:"finding_id"`
-	FindingKey         string                       `json:"finding_key"`
+	FindingID string `json:"finding_id"`
+	// FindingKey and EstimatedDelta are in-memory transport only (populated in
+	// adjudicateFinding, consumed by cmd/witness when emitting `finding` ledger
+	// events). They are json:"-" so they do NOT enter the witness-adjudication-run-
+	// result-v1 wire schema or the result SemanticDigest: adding them would break
+	// strict decoding by older binaries and change the run digest (ContainsRunDigest
+	// duplicate detection). finding_digest already binds the source finding (incl.
+	// recurrence and estimated delta).
+	FindingKey         string                       `json:"-"`
 	Role               string                       `json:"role"`
 	Kind               string                       `json:"kind"`
 	Title              string                       `json:"title"`
 	SourceRoleOutput   string                       `json:"source_role_output,omitempty"`
 	FindingDigest      string                       `json:"finding_digest,omitempty"`
 	WitnessDigest      string                       `json:"witness_digest,omitempty"`
-	EstimatedDelta     contracts.SplitDeltaEstimate `json:"estimated_delta"`
+	EstimatedDelta     contracts.SplitDeltaEstimate `json:"-"`
 	ClaimedSeverity    string                       `json:"claimed_severity"`
 	EffectiveSeverity  string                       `json:"effective_severity,omitempty"`
 	SeverityCap        string                       `json:"severity_cap,omitempty"`
