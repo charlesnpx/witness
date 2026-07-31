@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -510,7 +511,7 @@ func runMetrics(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, document)
+	return writeJSONOutput(*out, document)
 }
 
 func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) ([]ledger.Record, error) {
@@ -554,6 +555,17 @@ func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 		},
 	}}
 	for _, finding := range result.Findings {
+		events = append(events, ledger.EventToAppend{
+			Kind: ledger.EventKindFinding,
+			Payload: ledger.FindingEvent{
+				FindingID:      finding.FindingID,
+				FindingKey:     finding.FindingKey,
+				WitnessDigest:  finding.WitnessDigest,
+				CharterHash:    result.CharterHash,
+				ArtifactDigest: result.ArtifactDigest,
+				Finding:        findingPayloadForLedger(finding),
+			},
+		})
 		events = append(events, ledger.EventToAppend{
 			Kind: ledger.EventKindVerdict,
 			Payload: ledger.VerdictEvent{
@@ -627,6 +639,26 @@ func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 		})
 	}
 	return events
+}
+
+func findingPayloadForLedger(finding adjudicate.FindingVerdict) map[string]any {
+	return map[string]any{
+		"estimated_delta": map[string]any{
+			"production": deltaEstimatePayload(finding.EstimatedDelta.Production),
+			"test":       deltaEstimatePayload(finding.EstimatedDelta.Test),
+		},
+	}
+}
+
+func deltaEstimatePayload(estimate contracts.DeltaEstimate) map[string]any {
+	payload := map[string]any{"status": estimate.Status}
+	if estimate.Lines != 0 {
+		payload["lines"] = estimate.Lines
+	}
+	if estimate.Files != 0 {
+		payload["files"] = estimate.Files
+	}
+	return payload
 }
 
 type adjudicationQuestion struct {
@@ -728,7 +760,7 @@ func runLedgerShow(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, document)
+	return writeJSONOutput(*out, document)
 }
 
 func runLedgerPromote(args []string) error {
@@ -1957,6 +1989,36 @@ func writeCanonical(path string, value any) error {
 	}
 	defer file.Close()
 	return diag.WriteCanonical(file, value)
+}
+
+// writeJSONOutput renders report documents (metrics, ledger show) as standard
+// JSON with integer-valued counts intact. These are consumer-facing reports, not
+// digest inputs, so they must NOT go through canonical JSON: canonjson canonicalizes
+// integers >= 10 into exponent form (e.g. 11 -> "1.1e1"), which cannot be decoded
+// back into integer fields. Digest-bound documents keep using writeCanonical.
+func writeJSONOutput(path string, value any) error {
+	if path == "" {
+		return writeJSON(os.Stdout, value)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return diag.Wrap(
+			err,
+			charter.CodeFileIO,
+			"file operation failed.",
+			diag.WithDetail("action", "write output"),
+			diag.WithDetail("path", path),
+			diag.WithDetail("error", err.Error()),
+		)
+	}
+	defer file.Close()
+	return writeJSON(file, value)
+}
+
+func writeJSON(writer io.Writer, value any) error {
+	encoder := json.NewEncoder(writer)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(value)
 }
 
 type protectedInput struct {
