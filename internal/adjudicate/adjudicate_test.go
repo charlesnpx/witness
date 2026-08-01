@@ -184,6 +184,37 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonExecutionReceiptContradicted)
 	})
 
+	t.Run("contradicted manifest status remains contradicted when receipt is missing", func(t *testing.T) {
+		frozen := testFrozenCharter(t)
+		command := executableCommand("stdout_contains=missing")
+		receipt := signedReceipt(t, frozen.CharterHash, "finding-exec-contradicted-missing", command)
+		if receipt.record.Status != contracts.ExecutionStatusContradicted {
+			t.Fatalf("receipt status = %s, want contradicted", receipt.record.Status)
+		}
+		if err := os.Remove(filepath.Join(receipt.outputDir, "receipts", receipt.record.ReceiptRef.ID+".json")); err != nil {
+			t.Fatal(err)
+		}
+		finding := defectExecutableFinding("finding-exec-contradicted-missing", contracts.SeverityCritical, command)
+		roleOutput := roleOutputFor(frozen, contracts.RoleDefect, receipt.artifactDigest, []contracts.Finding{finding})
+		result := runAdjudication(t, runInput{
+			frozen:      frozen,
+			roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+			manifest:    manifestWithVerdicts(t, frozen, receipt.artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, []contracts.ExecutionReceiptManifestRecord{receipt.record}),
+			receiptDir:  receipt.outputDir,
+			receiptKey:  receipt.key,
+		})
+		got := onlyFinding(t, result)
+		assertDisposition(t, got, contracts.DispositionAdvisory)
+		assertApplicationClass(t, got, contracts.ApplicationClassNone)
+		assertHasReason(t, got, ReasonExecutionReceiptContradicted)
+		if got.Execution == nil || got.Execution.Reason != ReasonExecutionReceiptContradicted || got.Execution.VerificationClassification != harness.ClassificationContradictory {
+			t.Fatalf("execution metadata = %#v, want sticky contradicted classification", got.Execution)
+		}
+		if len(got.Execution.Diagnostics) == 0 {
+			t.Fatal("execution diagnostics missing receipt load failure")
+		}
+	})
+
 	t.Run("strength cap application", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
@@ -282,7 +313,7 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonRelayBroken)
 	})
 
-	t.Run("duplicate relay batches select smallest batch and diagnose", func(t *testing.T) {
+	t.Run("duplicate relay batches hold finding pending", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
 		finding := defectFinding("finding-duplicate-batches", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
@@ -293,10 +324,10 @@ func TestAdjudicationBranchTable(t *testing.T) {
 			manifest:    manifestWithDuplicateRelayBatches(t, frozen, artifactDigest, finding),
 		})
 		got := onlyFinding(t, result)
-		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertHasReason(t, got, ReasonRelayBroken)
-		if got.Relay == nil || got.Relay.BatchID != "batch-a" || got.Relay.Backend != "codex" {
-			t.Fatalf("relay metadata = %#v, want selected batch-a/codex", got.Relay)
+		assertDisposition(t, got, contracts.DispositionPendingVerification)
+		assertHasReason(t, got, ReasonRelayVerificationInvalid)
+		if got.Relay == nil || got.Relay.Status != contracts.RecordStatusFailed || got.Relay.FailureReason != "relay_verdict_finding_id_collision" {
+			t.Fatalf("relay metadata = %#v, want failed collision", got.Relay)
 		}
 		assertResultHasDiagnostic(t, result, CodeDuplicateRelayBatch, "/manifest/batches")
 	})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -440,6 +441,88 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	}
 	if len(result.Findings) != 1 || result.Findings[0].Disposition != contracts.DispositionAdmitted {
 		t.Fatalf("adjudication findings = %#v", result.Findings)
+	}
+}
+
+func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	roleOutput := validCLIRoleOutput(frozen)
+	inputs := []adjudicate.RoleOutputInput{{Path: "role-output.json", Document: roleOutput}}
+	result, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter: &frozen,
+		RoleOutputs:   inputs,
+		Manifest:      validCLIAdjudicationManifest(t, frozen, roleOutput),
+	})
+	if err != nil {
+		t.Fatalf("adjudicate Run: %v", err)
+	}
+	events := adjudicationLedgerEvents(result, inputs, frozen)
+	var findingEvents []ledger.FindingEvent
+	for _, event := range events {
+		if event.Kind != ledger.EventKindFinding {
+			continue
+		}
+		payload, ok := event.Payload.(ledger.FindingEvent)
+		if !ok {
+			t.Fatalf("finding payload type = %T, want ledger.FindingEvent", event.Payload)
+		}
+		findingEvents = append(findingEvents, payload)
+	}
+	if len(findingEvents) != len(result.Findings) {
+		t.Fatalf("finding events = %d, want %d", len(findingEvents), len(result.Findings))
+	}
+	for _, event := range findingEvents {
+		if event.FindingID == "" || event.FindingKey == "" || event.WitnessDigest == "" || event.CharterHash == "" || event.ArtifactDigest == "" {
+			t.Fatalf("finding event missing required lineage: %#v", event)
+		}
+		if event.FindingKey != roleOutput.Findings[0].ID {
+			t.Fatalf("finding key = %q, want %q", event.FindingKey, roleOutput.Findings[0].ID)
+		}
+		if _, ok := event.Finding["estimated_delta"]; !ok {
+			t.Fatalf("finding payload = %#v, missing estimated_delta", event.Finding)
+		}
+	}
+	events = append(events, ledger.EventToAppend{
+		Kind: ledger.EventKindMeasuredDelta,
+		Payload: ledger.MeasuredDeltaEvent{
+			FindingID:  result.Findings[0].FindingID,
+			Production: ledger.IntPtr(1),
+			Test:       ledger.IntPtr(1),
+			Unit:       ledger.UnitLines,
+		},
+	})
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	if _, err := ledger.AppendEvents(ledgerPath, events); err != nil {
+		t.Fatalf("append ledger events: %v", err)
+	}
+	document, err := metrics.Run(metrics.Options{LedgerPath: ledgerPath})
+	if err != nil {
+		t.Fatalf("metrics Run: %v", err)
+	}
+	if document.DeltaComparison.PairedFindings != 1 || document.DeltaComparison.Production.Equal != 1 || document.DeltaComparison.Test.Equal != 1 {
+		t.Fatalf("delta comparison = %#v, want one paired equal finding", document.DeltaComparison)
+	}
+}
+
+func TestDeltaEstimatePayloadPreservesExplicitZero(t *testing.T) {
+	// A known, explicit zero delta must survive into the finding ledger payload as
+	// lines:0, distinct from an omitted component. Dropping it (the pre-fix != 0 test)
+	// makes metrics treat the finding as estimate-missing instead of comparing zero.
+	var estimate contracts.DeltaEstimate
+	if err := json.Unmarshal([]byte(`{"status":"known","lines":0}`), &estimate); err != nil {
+		t.Fatalf("unmarshal explicit-zero delta: %v", err)
+	}
+	payload := deltaEstimatePayload(estimate)
+	lines, ok := payload["lines"]
+	if !ok {
+		t.Fatalf("explicit-zero lines dropped from ledger payload: %#v", payload)
+	}
+	if lines != 0 {
+		t.Fatalf("lines = %v, want explicit 0", lines)
+	}
+	if _, ok := payload["files"]; ok {
+		t.Fatalf("omitted files must stay omitted (distinct from explicit zero): %#v", payload)
 	}
 }
 

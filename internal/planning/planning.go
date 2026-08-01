@@ -650,7 +650,7 @@ func recipeFamilyForTask(taskShape string) string {
 
 func firstConsumerIdentity(inputs []RoleOutputInput, preflightSnapshotDigest string) map[string]any {
 	for _, input := range inputs {
-		if preflightSnapshotDigest != "" && input.Document.ArtifactDigest != "" && input.Document.ArtifactDigest != preflightSnapshotDigest {
+		if preflightSnapshotDigest != "" && input.Document.ArtifactDigest != preflightSnapshotDigest {
 			continue
 		}
 		if len(input.Document.ConsumerIdentity) > 0 {

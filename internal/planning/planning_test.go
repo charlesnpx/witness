@@ -190,6 +190,10 @@ func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
 	mismatched.ArtifactDigest = digest.RawBytes([]byte("role output artifact"))
 	mismatched.ConsumerIdentity = map[string]any{"kind": "test", "id": "consumer-a"}
 
+	emptyDigest := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	emptyDigest.ArtifactDigest = ""
+	emptyDigest.ConsumerIdentity = map[string]any{"kind": "test", "id": "consumer-empty"}
+
 	matching := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
 		planningTestFinding("finding-b", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
 	})
@@ -199,6 +203,7 @@ func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
 	result, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs: []RoleOutputInput{
+			{Path: "defect-empty.json", Document: emptyDigest},
 			{Path: "defect-a.json", Document: mismatched},
 			{Path: "defect-b.json", Document: matching},
 		},

@@ -258,6 +258,9 @@ func ValidateRecords(records []Record) error {
 	return nil
 }
 
+// AppendEvent performs an un-serialized read-modify-append and requires a
+// single writer per ledger path. Witness is a single-pass CLI; concurrent
+// writers are unsupported and would corrupt the hash chain.
 func AppendEvent(path string, kind string, payload any) (Record, error) {
 	records, err := AppendEvents(path, []EventToAppend{{Kind: kind, Payload: payload}})
 	if err != nil {
@@ -266,6 +269,9 @@ func AppendEvent(path string, kind string, payload any) (Record, error) {
 	return records[0], nil
 }
 
+// AppendEvents performs an un-serialized read-modify-append and requires a
+// single writer per ledger path. Witness is a single-pass CLI; concurrent
+// writers are unsupported and would corrupt the hash chain.
 func AppendEvents(path string, events []EventToAppend) ([]Record, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, diag.New(CodeInvalidLedger, "ledger path is required.")
