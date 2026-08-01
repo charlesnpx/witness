@@ -116,24 +116,33 @@ type Summary struct {
 }
 
 type FindingVerdict struct {
-	FindingID          string             `json:"finding_id"`
-	Role               string             `json:"role"`
-	Kind               string             `json:"kind"`
-	Title              string             `json:"title"`
-	SourceRoleOutput   string             `json:"source_role_output,omitempty"`
-	FindingDigest      string             `json:"finding_digest,omitempty"`
-	WitnessDigest      string             `json:"witness_digest,omitempty"`
-	ClaimedSeverity    string             `json:"claimed_severity"`
-	EffectiveSeverity  string             `json:"effective_severity,omitempty"`
-	SeverityCap        string             `json:"severity_cap,omitempty"`
-	Disposition        string             `json:"disposition"`
-	ApplicationClass   string             `json:"application_class"`
-	Reasons            []string           `json:"reasons,omitempty"`
-	StrengthTrajectory []StrengthStep     `json:"strength_trajectory,omitempty"`
-	Execution          *ExecutionMetadata `json:"execution,omitempty"`
-	Relay              *RelayMetadata     `json:"relay,omitempty"`
-	VerdictClass       *string            `json:"verdict_class"`
-	Diagnostics        []diag.Diagnostic  `json:"diagnostics,omitempty"`
+	FindingID string `json:"finding_id"`
+	// FindingKey and EstimatedDelta are in-memory transport only (populated in
+	// adjudicateFinding, consumed by cmd/witness when emitting `finding` ledger
+	// events). They are json:"-" so they do NOT enter the witness-adjudication-run-
+	// result-v1 wire schema or the result SemanticDigest: adding them would break
+	// strict decoding by older binaries and change the run digest (ContainsRunDigest
+	// duplicate detection). finding_digest already binds the source finding (incl.
+	// recurrence and estimated delta).
+	FindingKey         string                       `json:"-"`
+	Role               string                       `json:"role"`
+	Kind               string                       `json:"kind"`
+	Title              string                       `json:"title"`
+	SourceRoleOutput   string                       `json:"source_role_output,omitempty"`
+	FindingDigest      string                       `json:"finding_digest,omitempty"`
+	WitnessDigest      string                       `json:"witness_digest,omitempty"`
+	EstimatedDelta     contracts.SplitDeltaEstimate `json:"-"`
+	ClaimedSeverity    string                       `json:"claimed_severity"`
+	EffectiveSeverity  string                       `json:"effective_severity,omitempty"`
+	SeverityCap        string                       `json:"severity_cap,omitempty"`
+	Disposition        string                       `json:"disposition"`
+	ApplicationClass   string                       `json:"application_class"`
+	Reasons            []string                     `json:"reasons,omitempty"`
+	StrengthTrajectory []StrengthStep               `json:"strength_trajectory,omitempty"`
+	Execution          *ExecutionMetadata           `json:"execution,omitempty"`
+	Relay              *RelayMetadata               `json:"relay,omitempty"`
+	VerdictClass       *string                      `json:"verdict_class"`
+	Diagnostics        []diag.Diagnostic            `json:"diagnostics,omitempty"`
 }
 
 type StrengthStep struct {
@@ -692,12 +701,14 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 	finding := item.finding
 	verdict := FindingVerdict{
 		FindingID:        finding.ID,
+		FindingKey:       findingKey(finding),
 		Role:             item.role,
 		Kind:             finding.Kind,
 		Title:            finding.Title,
 		SourceRoleOutput: item.sourceRoleOutput,
 		FindingDigest:    item.findingDigest,
 		WitnessDigest:    item.witnessDigest,
+		EstimatedDelta:   finding.EstimatedDelta,
 		ClaimedSeverity:  finding.ClaimedSeverity,
 		VerdictClass:     nil,
 		Diagnostics:      append([]diag.Diagnostic(nil), item.diagnostics...),
@@ -832,6 +843,11 @@ func evaluateExecutionReceipt(finding contracts.Finding, witnessDigest string, r
 	receipt, diagnostics := loadReceipt(record.record, options.ReceiptOutputDir)
 	if len(diagnostics) > 0 {
 		metadata.Diagnostics = diagnostics
+		if record.record.Status == contracts.ExecutionStatusContradicted {
+			metadata.VerificationClassification = harness.ClassificationContradictory
+			metadata.Reason = ReasonExecutionReceiptContradicted
+			return executionEvaluation{classification: "contradicted", reason: ReasonExecutionReceiptContradicted, metadata: metadata}
+		}
 		metadata.VerificationClassification = harness.ClassificationUnavailable
 		metadata.Reason = ReasonExecutionReceiptUnavailable
 		return executionEvaluation{classification: "unavailable", reason: ReasonExecutionReceiptUnavailable, metadata: metadata}
@@ -889,9 +905,19 @@ func evaluateExecutionReceipt(finding contracts.Finding, witnessDigest string, r
 		metadata.Reason = ReasonExecutionReceiptContradicted
 		return executionEvaluation{classification: "contradicted", reason: ReasonExecutionReceiptContradicted, metadata: metadata}
 	case harness.ClassificationUnavailable:
+		if record.record.Status == contracts.ExecutionStatusContradicted {
+			metadata.VerificationClassification = harness.ClassificationContradictory
+			metadata.Reason = ReasonExecutionReceiptContradicted
+			return executionEvaluation{classification: "contradicted", reason: ReasonExecutionReceiptContradicted, metadata: metadata}
+		}
 		metadata.Reason = ReasonExecutionReceiptUnavailable
 		return executionEvaluation{classification: "unavailable", reason: ReasonExecutionReceiptUnavailable, metadata: metadata}
 	default:
+		if record.record.Status == contracts.ExecutionStatusContradicted {
+			metadata.VerificationClassification = harness.ClassificationContradictory
+			metadata.Reason = ReasonExecutionReceiptContradicted
+			return executionEvaluation{classification: "contradicted", reason: ReasonExecutionReceiptContradicted, metadata: metadata}
+		}
 		metadata.Reason = ReasonExecutionReceiptInvalid
 		return executionEvaluation{classification: "invalid", reason: ReasonExecutionReceiptInvalid, metadata: metadata}
 	}
@@ -941,6 +967,11 @@ func evaluateRelay(findingID string, witnessDigest string, index relayIndex) rel
 			Status:       contracts.RecordStatusValid,
 			Verdict:      record.verdict.Verdict,
 			VerdictClass: record.verdict.VerdictClass,
+		}
+		if len(index.duplicateBatches[findingID]) > 1 {
+			metadata.Status = contracts.RecordStatusFailed
+			metadata.FailureReason = "relay_verdict_finding_id_collision"
+			return relayEvaluation{pending: true, reason: ReasonRelayVerificationInvalid, metadata: metadata, diagnostics: diagnostics}
 		}
 		if record.verdict.WitnessDigest != witnessDigest {
 			metadata.Status = contracts.RecordStatusFailed
@@ -1270,6 +1301,13 @@ func nonEmpty(value string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func findingKey(finding contracts.Finding) string {
+	if finding.Recurrence != nil && strings.TrimSpace(finding.Recurrence.FindingKey) != "" {
+		return finding.Recurrence.FindingKey
+	}
+	return finding.ID
 }
 
 func severityRank(severity string) int {
