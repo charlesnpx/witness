@@ -379,6 +379,59 @@ func TestResumeRejectsForgedRelayBatchActionFields(t *testing.T) {
 	assertValidationCode(t, err, CodeStateInvalid)
 }
 
+func TestResumeRejectsSurplusVerificationBatchOutput(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	writeRoleOutputsForState(t, options.StateDir, true)
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	plan := readJSONForTest[planning.PlanDocument](t, state.Config.Outputs.PlanPath)
+	if len(plan.Batches) == 0 {
+		t.Fatal("plan produced no verification batches")
+	}
+	sourcePath := filepath.Join(state.Config.StateDir, "verification", "batches", plan.Batches[0].BatchID+".json")
+	forged := readJSONForTest[contracts.VerificationBatchDocument](t, sourcePath)
+	forged.BatchID = "forged"
+	forgedPath := filepath.Join(state.Config.StateDir, "verification", "batches", "forged.json")
+	writeCanonicalForTest(t, forgedPath, forged)
+	forgedDigest, err := computeArtifactDigest(forgedPath, digest.ClassRawBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added := false
+	for index := range state.Stages {
+		if state.Stages[index].Name != stagePlan {
+			continue
+		}
+		state.Stages[index].Outputs = append(state.Stages[index].Outputs, ArtifactRecord{
+			Role:        "verification-batch:forged",
+			Path:        forgedPath,
+			Digest:      forgedDigest,
+			DigestClass: digest.ClassRawBytes,
+		})
+		added = true
+	}
+	if !added {
+		t.Fatal("plan stage not found")
+	}
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted a surplus forged verification batch output")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
 func TestBeginRejectsConfiguredInputInsideStateDirBeforeWrite(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "pass")

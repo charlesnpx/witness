@@ -317,11 +317,7 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 	case artifact.Role == "change-surface":
 		err = validatePlanStageOutputs(state)
 	case strings.HasPrefix(artifact.Role, "verification-batch:"):
-		var batch contracts.VerificationBatchDocument
-		batch, err = contracts.ReadVerificationBatchBytes(data)
-		if err == nil {
-			err = contracts.ErrorFromDiagnostics(contracts.ValidateVerificationBatch(batch, nil))
-		}
+		err = validatePlanVerificationBatchOutput(state, artifact, data)
 	case artifact.Role == "verification-manifest":
 		err = validateAssembleStageOutputs(state, artifact.Role)
 	case artifact.Role == "assemble-result":
@@ -1242,6 +1238,46 @@ func validatePlanStageOutputs(state *State) error {
 		}
 	}
 	return nil
+}
+
+func validatePlanVerificationBatchOutput(state *State, artifact ArtifactRecord, data []byte) error {
+	expected, err := expectedPlanningResult(state)
+	if err != nil {
+		return err
+	}
+	for _, expectedBatch := range expected.Batches {
+		expectedRole := "verification-batch:" + expectedBatch.Plan.BatchID
+		expectedPath := filepath.Join(state.Config.StateDir, "verification", "batches", expectedBatch.Plan.BatchID+".json")
+		if artifact.Role != expectedRole {
+			continue
+		}
+		if !recordedPathsEqual(artifact.Path, expectedPath) {
+			return diag.New(
+				CodeStateInvalid,
+				"verification batch output path does not match the derived batch.",
+				diag.WithDetail("role", artifact.Role),
+				diag.WithDetail("actual_path", artifact.Path),
+				diag.WithDetail("expected_path", expectedPath),
+			)
+		}
+		actualBatch, err := contracts.ReadVerificationBatchBytes(data)
+		if err != nil {
+			return err
+		}
+		if err := contracts.ErrorFromDiagnostics(contracts.ValidateVerificationBatch(actualBatch, nil)); err != nil {
+			return err
+		}
+		if actualDigest := digest.RawBytes(data); actualDigest != expectedBatch.Plan.BatchDigest {
+			return diag.New(CodeStateInvalid, "verification batch raw digest does not match the verification plan.", diag.WithDetail("batch_id", expectedBatch.Plan.BatchID), diag.WithDetail("actual_digest", actualDigest), diag.WithDetail("expected_digest", expectedBatch.Plan.BatchDigest))
+		}
+		return requireSemanticMatch("verification batch "+expectedBatch.Plan.BatchID, actualBatch, expectedBatch.Document)
+	}
+	return diag.New(
+		CodeStateInvalid,
+		"verification batch output is not part of the derived batch set.",
+		diag.WithDetail("role", artifact.Role),
+		diag.WithDetail("path", artifact.Path),
+	)
 }
 
 func validatePlanDigest(plan planning.PlanDocument) error {
