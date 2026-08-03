@@ -488,8 +488,9 @@ func validCounterWitness() *CounterWitness {
 
 func validAutoApplyPolicy(productionCap int, testCap int) ReviewPolicy {
 	return ReviewPolicy{
-		SchemaVersion:                  ReviewPolicyV2,
+		SchemaVersion:                  ReviewPolicyV3,
 		PolicyID:                       "policy-1",
+		ScopePolicy:                    ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -563,7 +564,7 @@ func validVerificationManifest(t *testing.T, batch VerificationBatchDocument, ve
 	portableExportDigest := testDigest("portable-export")
 	portableExportRef := testArtifactRef("portable-export", "portable-export-1", portableExportDigest)
 	return VerificationManifest{
-		SchemaVersion:         VerificationManifestV3,
+		SchemaVersion:         VerificationManifestV4,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           batch.CharterHash,
 		ArtifactDigest:        batch.ArtifactDigest,

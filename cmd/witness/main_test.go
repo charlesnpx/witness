@@ -233,6 +233,21 @@ func TestVerificationPlanRequiresPreflight(t *testing.T) {
 	}
 }
 
+func TestVerificationPlanDoesNotAcceptCallerChangedPathList(t *testing.T) {
+	err := route([]string{
+		"verification", "plan",
+		"-changed-path", "internal/changed.go",
+	})
+	if err == nil {
+		t.Fatal("verification plan accepted a caller-supplied changed path")
+	}
+	diagnostic := diag.FromError(err)
+	errorText, _ := diagnostic.Details["error"].(string)
+	if diagnostic.Code != diag.CodeInvalidCommand || !strings.Contains(errorText, "flag provided but not defined: -changed-path") {
+		t.Fatalf("diagnostic = %#v, want invalid unknown changed-path flag", diagnostic)
+	}
+}
+
 func TestVerificationPlanRejectsFailedPreflightResult(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
@@ -542,8 +557,9 @@ func TestPolicyAndLedgerCLI(t *testing.T) {
 	productionCap := 5
 	testCap := 5
 	document := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -836,8 +852,9 @@ func TestAdjudicateCLIIgnoresEmbeddedCapReleaseWithoutLedger(t *testing.T) {
 	productionCap := 5
 	testCap := 5
 	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -986,8 +1003,9 @@ func TestAdjudicateCLILedgerBackedPolicyAppendsLineageAndRefusesDuplicate(t *tes
 	productionCap := 5
 	testCap := 5
 	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -2210,8 +2228,9 @@ func writeCLIAutoPolicy(t *testing.T, frozen charter.FrozenCharter, frozenPath s
 	productionCap := 5
 	testCap := 5
 	document := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -2276,7 +2295,7 @@ func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, ro
 	batchRef := artifactRef("verification-batch", "batch-1", digest.RawBytes([]byte("batch")))
 	exportRef := artifactRef("relay-root-portable-export", "batch-1", digest.RawBytes([]byte("export")))
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV3,
+		SchemaVersion:         contracts.VerificationManifestV4,
 		PlanDigest:            digest.RawBytes([]byte("plan")),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        roleOutput.ArtifactDigest,

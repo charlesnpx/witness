@@ -3,6 +3,7 @@ package contracts
 import (
 	"io"
 
+	"witness/internal/changesurface"
 	"witness/internal/diag"
 	"witness/internal/digest"
 	"witness/internal/strictjson"
@@ -13,6 +14,10 @@ type VerificationManifest struct {
 	PlanDigest            string                           `json:"plan_digest"`
 	CharterHash           string                           `json:"charter_hash"`
 	ArtifactDigest        string                           `json:"artifact_digest"`
+	ScopePolicy           string                           `json:"scope_policy,omitempty"`
+	ChangeSurface         *changesurface.Document          `json:"change_surface,omitempty"`
+	ChangeSurfaceDigest   string                           `json:"change_surface_digest,omitempty"`
+	BaselinePass          *changesurface.BaselinePass      `json:"baseline_pass,omitempty"`
 	CompatibilityManifest ArtifactRef                      `json:"compatibility_manifest"`
 	RelayCapabilities     ArtifactRef                      `json:"relay_capabilities"`
 	IntegrationBundle     ArtifactRef                      `json:"integration_bundle"`
@@ -122,12 +127,13 @@ func RequireValidVerificationManifest(document VerificationManifest) error {
 
 func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != VerificationManifestV3 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v3.", "/schema_version", map[string]any{"expected": VerificationManifestV3, "actual": document.SchemaVersion}))
+	if document.SchemaVersion != VerificationManifestV4 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v4.", "/schema_version", map[string]any{"expected": VerificationManifestV4, "actual": document.SchemaVersion}))
 	}
 	requireDigest(&diagnostics, "/plan_digest", "plan_digest", document.PlanDigest)
 	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
 	requireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
+	diagnostics = append(diagnostics, validateManifestChangeSurface(document)...)
 	diagnostics = append(diagnostics, prefixDiagnostics("/compatibility_manifest", validateArtifactRef(document.CompatibilityManifest, ""))...)
 	diagnostics = append(diagnostics, prefixDiagnostics("/relay_capabilities", validateArtifactRef(document.RelayCapabilities, ""))...)
 	diagnostics = append(diagnostics, prefixDiagnostics("/integration_bundle", validateArtifactRef(document.IntegrationBundle, ""))...)
@@ -142,6 +148,47 @@ func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnost
 	}
 	for index, receipt := range document.ExecutionReceipts {
 		diagnostics = append(diagnostics, validateExecutionReceiptRecord(receipt, "/execution_receipts/"+itoa(index))...)
+	}
+	return diagnostics
+}
+
+func validateManifestChangeSurface(document VerificationManifest) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	scopePolicy := EffectiveScopePolicy(ReviewPolicy{ScopePolicy: document.ScopePolicy})
+	if document.ScopePolicy != "" && document.ScopePolicy != ScopePolicyDeltaObligating && document.ScopePolicy != ScopePolicyWholeTree {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "scope_policy must be delta_obligating or whole_tree when set.", "/scope_policy", map[string]any{"value": document.ScopePolicy}))
+	}
+	if document.ChangeSurface != nil {
+		surfaceDiagnostics := changesurface.Validate(*document.ChangeSurface)
+		for _, item := range surfaceDiagnostics {
+			item.Code = CodeInvalidManifest
+			diagnostics = append(diagnostics, prefixDiagnostics("/change_surface", []diag.Diagnostic{item})...)
+		}
+		if len(surfaceDiagnostics) == 0 {
+			surfaceDigest, err := changesurface.Digest(*document.ChangeSurface)
+			if err != nil {
+				diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "change surface digest could not be computed.", "/change_surface_digest", map[string]any{"error": err.Error()}))
+			} else {
+				compareDigest(&diagnostics, "/change_surface_digest", "change surface", document.ChangeSurfaceDigest, surfaceDigest)
+				compareDigest(&diagnostics, "/change_surface/head_artifact_digest", "change surface head artifact", document.ChangeSurface.HeadArtifactDigest, document.ArtifactDigest)
+			}
+		}
+	} else if document.ChangeSurfaceDigest != "" {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "change_surface_digest requires an embedded change_surface document.", "/change_surface_digest", nil))
+	}
+	if document.BaselinePass != nil {
+		if !document.BaselinePass.Declared {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass marker must be declared when present.", "/baseline_pass/declared", nil))
+		}
+		if document.BaselinePass.Reason == "" {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass reason is required.", "/baseline_pass/reason", nil))
+		}
+		if document.ChangeSurface != nil {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass and change_surface are mutually exclusive.", "/baseline_pass", nil))
+		}
+	}
+	if scopePolicy == ScopePolicyDeltaObligating && document.ChangeSurface == nil && document.BaselinePass == nil {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating manifests require a change_surface or explicit baseline_pass.", "/change_surface", map[string]any{"scope_policy": scopePolicy}))
 	}
 	return diagnostics
 }

@@ -84,10 +84,14 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	result := &AssembleResult{}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV3,
+		SchemaVersion:         contracts.VerificationManifestV4,
 		PlanDigest:            options.Plan.PlanDigest,
 		CharterHash:           options.Plan.CharterHash,
 		ArtifactDigest:        options.Plan.ArtifactDigest,
+		ScopePolicy:           options.Plan.ScopePolicy,
+		ChangeSurface:         options.Plan.ChangeSurface,
+		ChangeSurfaceDigest:   options.Plan.ChangeSurfaceDigest,
+		BaselinePass:          options.Plan.BaselinePass,
 		CompatibilityManifest: options.EvidenceRefs.CompatibilityManifest,
 		RelayCapabilities:     options.EvidenceRefs.RelayCapabilities,
 		IntegrationBundle:     options.EvidenceRefs.IntegrationBundle,

@@ -45,6 +45,7 @@ const (
 	ReasonRelayWeakened                = "relay_weakened"
 	ReasonRelayBroken                  = "relay_broken"
 	ReasonWitnessWeakenedBelowFloor    = "witness_weakened_below_floor"
+	ReasonOutOfDelta                   = contracts.ReasonOutOfDelta
 )
 
 type Options struct {
@@ -202,6 +203,15 @@ func Run(options Options) (*Result, error) {
 	if !options.PolicyCapReleaseLedgerBacked {
 		policy.CapRelease = nil
 	}
+	scopePolicy := contracts.EffectiveScopePolicy(policy)
+	if scopePolicy == contracts.ScopePolicyDeltaObligating {
+		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
+			return nil, validationError(CodeInvalidPolicy, []diag.Diagnostic{diagnostic(contracts.CodeInvalidPolicy, "delta_obligating scope policy requires review-policy-v3.", "/schema_version", map[string]any{"actual": policy.SchemaVersion, "expected": contracts.ReviewPolicyV3})})
+		}
+		if rules.SchemaVersion != contracts.ReviewRulesV3 {
+			return nil, validationError(CodeInvalidRules, []diag.Diagnostic{diagnostic(contracts.CodeInvalidRules, "delta_obligating scope policy requires review-rules-v3.", "/schema_version", map[string]any{"actual": rules.SchemaVersion, "expected": contracts.ReviewRulesV3})})
+		}
+	}
 	validationContext := policyContext(rules, policy, options.FrozenCharter)
 	policyValidation := contracts.ValidateReviewPolicy(policy, validationContext)
 	if len(policyValidation.Diagnostics) > 0 {
@@ -225,6 +235,7 @@ func Run(options Options) (*Result, error) {
 		global = append(global, ValidatePriorLineage(options.PriorLineage)...)
 	}
 	global = append(global, validateManifestEnvelope(options.Manifest, options.FrozenCharter)...)
+	global = append(global, validateManifestScopePolicy(options.Manifest, scopePolicy)...)
 	if len(global) > 0 {
 		return nil, &ValidationError{Diagnostics: global}
 	}
@@ -241,9 +252,9 @@ func Run(options Options) (*Result, error) {
 	result := &Result{
 		SchemaVersion:             ResultSchemaVersion,
 		DigestProfile:             digest.Profile,
-		RulesVersion:              contracts.ReviewRulesV2,
+		RulesVersion:              rules.SchemaVersion,
 		RulesID:                   rules.RulesID,
-		PolicyVersion:             contracts.ReviewPolicyV2,
+		PolicyVersion:             policy.SchemaVersion,
 		PolicyID:                  policy.PolicyID,
 		PolicyDigest:              validationContext.PolicyDigest,
 		RulesDigest:               validationContext.RulesDigest,
@@ -255,7 +266,7 @@ func Run(options Options) (*Result, error) {
 		Diagnostics:               append([]diag.Diagnostic(nil), documentDiagnostics...),
 	}
 	for _, finding := range loadedFindings {
-		verdict := adjudicateFinding(finding, receipts, relay, options, rules, policy)
+		verdict := adjudicateFinding(finding, receipts, relay, options, rules, policy, scopePolicy)
 		result.Findings = append(result.Findings, verdict)
 		result.Diagnostics = append(result.Diagnostics, verdict.Diagnostics...)
 	}
@@ -405,6 +416,21 @@ func validateManifestEnvelope(manifest contracts.VerificationManifest, frozen *c
 	diagnostics := prefixDiagnostics("/manifest", contracts.ValidateVerificationManifest(manifest))
 	if frozen != nil && manifest.CharterHash != "" && manifest.CharterHash != frozen.CharterHash {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest charter_hash does not match the frozen Charter.", "/manifest/charter_hash", map[string]any{"actual": manifest.CharterHash, "expected": frozen.CharterHash}))
+	}
+	return diagnostics
+}
+
+func validateManifestScopePolicy(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	manifestScopePolicy := contracts.EffectiveScopePolicy(contracts.ReviewPolicy{ScopePolicy: manifest.ScopePolicy})
+	if manifest.ScopePolicy != "" && manifestScopePolicy != scopePolicy {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest scope_policy does not match the loaded review policy.", "/manifest/scope_policy", map[string]any{"actual": manifestScopePolicy, "expected": scopePolicy}))
+	}
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ScopePolicy == "" {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires the verification manifest to declare scope_policy.", "/manifest/scope_policy", map[string]any{"expected": scopePolicy}))
+	}
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface == nil && manifest.BaselinePass == nil {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires a verification manifest with a change_surface or explicit baseline_pass.", "/manifest/change_surface", map[string]any{"scope_policy": scopePolicy}))
 	}
 	return diagnostics
 }
@@ -697,7 +723,7 @@ func stringMapValue(object map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, rules contracts.ReviewRules, policy contracts.ReviewPolicy) FindingVerdict {
+func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, rules contracts.ReviewRules, policy contracts.ReviewPolicy, scopePolicy string) FindingVerdict {
 	finding := item.finding
 	verdict := FindingVerdict{
 		FindingID:        finding.ID,
@@ -720,6 +746,13 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		verdict.Disposition = contracts.DispositionAdvisory
 		verdict.ApplicationClass = contracts.ApplicationClassNone
 		verdict.Reasons = appendValidationReasons(verdict.Reasons, item.diagnostics)
+		return verdict
+	}
+
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && options.Manifest.ChangeSurface != nil && !contracts.FindingInChangeSurface(finding, *options.Manifest.ChangeSurface) {
+		verdict.Disposition = contracts.DispositionAdvisory
+		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
+		verdict.Reasons = appendReason(verdict.Reasons, ReasonOutOfDelta)
 		return verdict
 	}
 

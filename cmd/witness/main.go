@@ -19,6 +19,7 @@ import (
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/ledger"
 	"witness/internal/metrics"
 	"witness/internal/planning"
@@ -182,6 +183,10 @@ func runVerificationPlan(args []string) error {
 	flags := newFlagSet("witness verification plan")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	preflightPath := flags.String("preflight", "", "verification preflight result path")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface derivation")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface derivation")
+	baselinePass := flags.Bool("baseline-pass", false, "record an explicit whole-tree baseline pass under delta_obligating scope")
 	stateDir := flags.String("state-dir", "", "verification state directory")
 	out := flags.String("out", "", "verification plan output path")
 	var roleOutputPaths repeatedStrings
@@ -204,7 +209,14 @@ func runVerificationPlan(args []string) error {
 	if *preflightPath == "" {
 		return diag.New(verificationPlanMissingPreflight, "witness verification plan requires -preflight.")
 	}
-	protected := []protectedInput{{role: "charter-freeze", path: *frozenPath}, {role: "preflight", path: *preflightPath}, {role: "state-dir", path: *stateDir}}
+	protected := []protectedInput{
+		{role: "charter-freeze", path: *frozenPath},
+		{role: "preflight", path: *preflightPath},
+		{role: "policy", path: *policyPath},
+		{role: "base-manifest", path: *baseManifestPath},
+		{role: "head-manifest", path: *headManifestPath},
+		{role: "state-dir", path: *stateDir},
+	}
 	protected = append(protected, protectedInputsForPaths("role-output", roleOutputPaths)...)
 	if err := rejectOutputPathAliases(*out, protected...); err != nil {
 		return err
@@ -224,6 +236,17 @@ func runVerificationPlan(args []string) error {
 	if err := validatePlanningPreflightBinding(preflightBinding); err != nil {
 		return err
 	}
+	policyDocument := contracts.DefaultReviewPolicy()
+	if *policyPath != "" {
+		policyDocument, err = readReviewPolicyFile(*policyPath)
+		if err != nil {
+			return err
+		}
+	}
+	changeSurfaceInput, err := readPlanningChangeSurfaceInput(*baseManifestPath, *headManifestPath, *baselinePass)
+	if err != nil {
+		return err
+	}
 	inputs := make([]planning.RoleOutputInput, 0, len(roleOutputPaths))
 	for _, path := range roleOutputPaths {
 		document, err := readRoleOutputFile(path)
@@ -241,7 +264,9 @@ func runVerificationPlan(args []string) error {
 		CharterDigest: digest.RawBytes(frozenBytes),
 		RoleOutputs:   inputs,
 		StateDir:      *stateDir,
+		Policy:        policyDocument,
 		Preflight:     preflightBinding,
+		ChangeSurface: changeSurfaceInput,
 	})
 	if err != nil {
 		return err
@@ -392,8 +417,8 @@ func runAdjudicate(args []string) error {
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	out := flags.String("out", "", "adjudication run-result output path")
 	var roleOutputPaths repeatedStrings
@@ -846,8 +871,8 @@ func runPolicy(command string, args []string) error {
 
 func runPolicyShow(args []string) error {
 	flags := newFlagSet("witness policy show")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
@@ -877,7 +902,7 @@ func runPolicyReleaseCaps(args []string) error {
 	flags := newFlagSet("witness policy release-caps")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	unit := flags.String("unit", "lines", "cap unit")
@@ -948,8 +973,8 @@ func runPolicyReleaseCaps(args []string) error {
 func runPolicyCheckApplication(args []string) error {
 	flags := newFlagSet("witness policy check-application")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	role := flags.String("role", contracts.RoleDefect, "application role")
@@ -1318,6 +1343,33 @@ func readReviewPolicyFile(path string) (contracts.ReviewPolicy, error) {
 		return contracts.ReviewPolicy{}, fileReadError(err, path, "open review policy")
 	}
 	return contracts.ReadReviewPolicyBytes(data)
+}
+
+func readPlanningChangeSurfaceInput(baseManifestPath string, headManifestPath string, baselinePass bool) (planning.ChangeSurfaceInput, error) {
+	input := planning.ChangeSurfaceInput{BaselinePass: baselinePass}
+	if baseManifestPath != "" {
+		manifest, err := readFreezeManifestFile(baseManifestPath)
+		if err != nil {
+			return planning.ChangeSurfaceInput{}, err
+		}
+		input.BaseManifest = &manifest
+	}
+	if headManifestPath != "" {
+		manifest, err := readFreezeManifestFile(headManifestPath)
+		if err != nil {
+			return planning.ChangeSurfaceInput{}, err
+		}
+		input.HeadManifest = &manifest
+	}
+	return input, nil
+}
+
+func readFreezeManifestFile(path string) (freeze.Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return freeze.Manifest{}, fileReadError(err, path, "open freeze manifest")
+	}
+	return strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*4)
 }
 
 func readPreflightFile(path string) (preflight.Result, error) {

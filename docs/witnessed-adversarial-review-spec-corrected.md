@@ -985,3 +985,40 @@ without evidence of interaction.
   Witness.
 - Existing hidden files, IDE state, `.DS_Store`, and unrelated dirty worktree
   changes remain untouched.
+
+---
+
+## 19. Delta Change-Surface Addendum
+
+Witness change-surface review is a first-class pass input, not a Charter
+amendment. A delta-scoped pass records a `witness-change-surface-v1` document
+with `base_artifact_digest`, `head_artifact_digest`, and a sorted
+`changed_paths` set. Each changed path carries one or more change kinds from
+`added`, `modified`, `removed`, and `mode_changed`. Witness derives this
+document only by comparing two `witness-source-snapshot-v1` freeze manifests;
+caller-supplied changed-path lists are not valid input. The derived change
+surface is canonical JSON under the normal digest profile and is stored in pass
+state under its own digest.
+
+`witness-verification-plan-v2` records the standing scope policy, the derived
+change surface, its digest, or an explicit `baseline_pass` marker. Assembly
+promotes those fields into `review-verification-manifest-v4`, so adjudication
+uses the same pass input that planning used. The head freeze manifest digest
+must equal the authoritative preflight snapshot digest for the pass; mismatch
+fails closed before a plan is produced.
+
+Standing scope policy lives in `review-policy-v3` as `scope_policy`, with
+values `delta_obligating` and `whole_tree`. Omitted scope policy and
+`whole_tree` preserve existing whole-tree behavior. `delta_obligating` requires
+either a derived change surface or an explicit `baseline_pass` marker. The
+marker records a whole-tree baseline pass on purpose and is visible in plan and
+manifest outputs; there is no silent fallback from delta scope to whole-tree
+scope.
+
+`review-rules-v3` adds the `change_surface_scope` adjudication step and
+declares `out_of_delta` as an advisory reason. A finding is in delta iff at
+least one scope anchor or witness artifact reference resolves exactly to a
+changed path; removed paths count as changed. Findings with global/component
+loci or no overlap are routed, not erased: planning records them as advisory
+excluded findings with `application_class: caller_decision`, and adjudication
+emits them as advisory/caller-decision verdicts with reason `out_of_delta`.

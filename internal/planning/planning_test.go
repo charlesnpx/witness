@@ -1,14 +1,19 @@
 package planning
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/contracts"
+	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 )
 
 func TestPlanningBatchesDeterministicallyByRoleSeverityAndID(t *testing.T) {
@@ -181,6 +186,186 @@ func TestPlanningRejectsRoleOutputArtifactDigestDifferentFromPreflightSnapshot(t
 	}
 }
 
+func TestPlanningDeltaChangeSurfacePartitionsFindings(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	inDelta := planningTestFinding("in-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	inDelta.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/changed.go"}}
+	outOfDelta := planningTestFinding("out-of-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	outOfDelta.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/unchanged.go"}}
+	deleted := planningTestFinding("deleted", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	deleted.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/deleted.go"}}
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{inDelta, outOfDelta, deleted})
+	roleOutput.ArtifactDigest = headDigest
+
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Plan.ScopePolicy != contracts.ScopePolicyDeltaObligating || result.Plan.ChangeSurface == nil || result.Plan.ChangeSurfaceDigest == "" {
+		t.Fatalf("plan change surface fields = %#v", result.Plan)
+	}
+	if len(result.Plan.Batches) != 1 || fmt.Sprint(result.Plan.Batches[0].FindingIDs) != fmt.Sprint([]string{"deleted", "in-delta"}) {
+		t.Fatalf("planned batches = %#v, want deleted and in-delta", result.Plan.Batches)
+	}
+	if len(result.Plan.ExcludedFindings) != 1 {
+		t.Fatalf("excluded findings = %#v, want one out-of-delta", result.Plan.ExcludedFindings)
+	}
+	excluded := result.Plan.ExcludedFindings[0]
+	if excluded.FindingID != "out-of-delta" || excluded.Disposition != DispositionAdvisory || excluded.ApplicationClass != contracts.ApplicationClassCallerDecision || excluded.Reason != contracts.ReasonOutOfDelta {
+		t.Fatalf("excluded finding = %#v, want out_of_delta advisory caller decision", excluded)
+	}
+	if result.ManifestSkeleton.ChangeSurfaceDigest != result.Plan.ChangeSurfaceDigest || len(result.ManifestSkeleton.ExcludedFindings) != 1 {
+		t.Fatalf("manifest skeleton = %#v, want change surface digest and excluded finding", result.ManifestSkeleton)
+	}
+}
+
+func TestPlanningDeltaFailsClosedWithoutDerivedSurfaceOrBaseline(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+	})
+	if planningErrorCode(err) != CodeMissingChangeSurface {
+		t.Fatalf("err = %v, want %s", err, CodeMissingChangeSurface)
+	}
+}
+
+func TestPlanningDeltaBaselinePassProceedsWholeTreeWithVisibleMarker(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		ChangeSurface: ChangeSurfaceInput{BaselinePass: true},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Plan.Batches) != 1 || len(result.Plan.ExcludedFindings) != 0 {
+		t.Fatalf("plan = %#v, want whole-tree baseline planning", result.Plan)
+	}
+	if result.Plan.BaselinePass == nil || !result.Plan.BaselinePass.Declared || result.Plan.BaselinePass.Reason != changesurface.BaselinePassReasonExplicit {
+		t.Fatalf("baseline marker = %#v, want explicit marker", result.Plan.BaselinePass)
+	}
+	if result.ManifestSkeleton.BaselinePass == nil || !result.ManifestSkeleton.BaselinePass.Declared {
+		t.Fatalf("skeleton baseline marker = %#v, want visible marker", result.ManifestSkeleton.BaselinePass)
+	}
+}
+
+func TestPlanningChangeSurfaceRejectsPartialManifestInput(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	_, headManifest, _ := planningDeltaManifests(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		ChangeSurface: ChangeSurfaceInput{HeadManifest: &headManifest},
+	})
+	if planningErrorCode(err) != CodeMissingChangeSurface {
+		t.Fatalf("err = %v, want %s", err, CodeMissingChangeSurface)
+	}
+}
+
+func TestPlanningChangeSurfaceHeadMustMatchPreflightArtifact(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	roleOutput.ArtifactDigest = headDigest
+	wrongDigest := digest.RawBytes([]byte("wrong head"))
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     PreflightBinding{SnapshotDigest: wrongDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if result != nil {
+		t.Fatalf("result = %#v, want no plan", result)
+	}
+	if planningErrorCode(err) != changesurface.CodeHeadArtifactMismatch {
+		t.Fatalf("err = %v, want %s", err, changesurface.CodeHeadArtifactMismatch)
+	}
+}
+
+func TestPlanningWholeTreeAndAbsentPolicyRemainUnchanged(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Plan.Batches) != 1 || result.Plan.ChangeSurface != nil || result.Plan.BaselinePass != nil || result.Plan.ScopePolicy != contracts.ScopePolicyWholeTree {
+		t.Fatalf("plan = %#v, want existing whole-tree behavior", result.Plan)
+	}
+}
+
+func TestVersionStampsForPlanManifestRulesPolicyAndChangeSurface(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+	})
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Plan.SchemaVersion != SchemaVersion {
+		t.Fatalf("plan schema_version = %s, want %s", result.Plan.SchemaVersion, SchemaVersion)
+	}
+	if SchemaVersion != "witness-verification-plan-v2" {
+		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v2", SchemaVersion)
+	}
+	rules := contracts.DefaultReviewRules()
+	if rules.SchemaVersion != contracts.ReviewRulesV3 || rules.RulesID != "default-review-rules-v3" {
+		t.Fatalf("default rules = %#v, want review-rules-v3/default-review-rules-v3", rules)
+	}
+	policy := contracts.DefaultReviewPolicy()
+	if policy.SchemaVersion != contracts.ReviewPolicyV3 || policy.PolicyID != "bootstrap-review-policy-v3" || policy.ScopePolicy != contracts.ScopePolicyWholeTree {
+		t.Fatalf("default policy = %#v, want review-policy-v3 whole_tree", policy)
+	}
+	if changesurface.SchemaVersion != "witness-change-surface-v1" {
+		t.Fatalf("change surface schema = %s, want witness-change-surface-v1", changesurface.SchemaVersion)
+	}
+	assembled, err := Assemble(AssembleOptions{
+		Plan:         result.Plan,
+		Batches:      []BatchEvidence{{BatchID: result.Batches[0].Plan.BatchID, Document: result.Batches[0].Document}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if assembled.Manifest.SchemaVersion != contracts.VerificationManifestV4 {
+		t.Fatalf("manifest schema_version = %s, want %s", assembled.Manifest.SchemaVersion, contracts.VerificationManifestV4)
+	}
+}
+
 func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	snapshotDigest := digest.RawBytes([]byte("preflight snapshot"))
@@ -231,6 +416,65 @@ func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
 	if !found {
 		t.Fatalf("missing %s diagnostic: %#v", CodeSnapshotArtifactMismatch, result.Plan.Diagnostics)
 	}
+}
+
+func planningDeltaPolicy() contracts.ReviewPolicy {
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "delta-policy"
+	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	return policy
+}
+
+func planningDeltaManifests(t *testing.T) (freeze.Manifest, freeze.Manifest, string) {
+	t.Helper()
+	baseManifest := freeze.Manifest{
+		SchemaVersion: freeze.SchemaVersion,
+		DigestProfile: digest.Profile,
+		Files: []freeze.FileEntry{
+			planningManifestFile("internal/changed.go", "100644", "old"),
+			planningManifestFile("internal/deleted.go", "100644", "deleted"),
+			planningManifestFile("internal/unchanged.go", "100644", "same"),
+		},
+	}
+	headManifest := freeze.Manifest{
+		SchemaVersion: freeze.SchemaVersion,
+		DigestProfile: digest.Profile,
+		Files: []freeze.FileEntry{
+			planningManifestFile("internal/changed.go", "100644", "new"),
+			planningManifestFile("internal/unchanged.go", "100644", "same"),
+		},
+	}
+	headDigest, err := freeze.ManifestDigest(headManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return baseManifest, headManifest, headDigest
+}
+
+func planningManifestFile(path string, mode string, content string) freeze.FileEntry {
+	sum := digest.RawBytes([]byte(content))
+	return freeze.FileEntry{
+		Path:   path,
+		Mode:   mode,
+		Size:   int64(len(content)),
+		Digest: sum,
+		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
+	}
+}
+
+func planningErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var diagnostic *diag.Error
+	if errors.As(err, &diagnostic) {
+		return diagnostic.Diagnostic.Code
+	}
+	var validation *ValidationError
+	if errors.As(err, &validation) && len(validation.Diagnostics) > 0 {
+		return validation.Diagnostics[0].Code
+	}
+	return ""
 }
 
 func planningTestRoleOutput(frozen *charter.FrozenCharter, role string, findings []contracts.Finding) contracts.RoleOutputDocument {
