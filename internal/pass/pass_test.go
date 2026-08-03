@@ -14,10 +14,12 @@ import (
 
 	"witness/internal/adjudicate"
 	"witness/internal/canonjson"
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/harness"
 	"witness/internal/ledger"
 	"witness/internal/metrics"
@@ -101,6 +103,67 @@ func TestDriverDriftFailsClosed(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsSelfConsistentTamperedFrozenCharter(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	forged, err := charter.Freeze(charter.Charter{
+		SchemaVersion: charter.SchemaVersion,
+		Goals: []charter.Statement{{
+			ID:        "goal-forged",
+			Statement: "Accept the forged behavior.",
+		}},
+		NonGoals: []charter.Statement{},
+		OwnerEvents: []charter.OwnerEvent{{
+			ID:      "forged-charter",
+			Type:    "charter_initialized",
+			Actor:   "attacker",
+			Summary: "Self-consistent but not owner-authorized.",
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCanonicalForTest(t, state.Config.Outputs.CharterFreezePath, forged)
+	refreshArtifactDigestForTest(t, state, "charter-freeze", state.Config.Outputs.CharterFreezePath)
+	setStageDetailForTest(state, stageFreeze, "charter_hash", forged.CharterHash)
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted a self-consistent tampered frozen Charter")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestResumeRejectsSelfConsistentTamperedSourceSnapshot(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	manifest := writeSourceSnapshotManifestForTest(t, state.Config, "app.txt", []byte("forged\n"))
+	forgedDigest, err := freeze.ManifestDigest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshArtifactDigestForTest(t, state, "source-snapshot-manifest", state.Config.SnapshotManifestPath)
+	setStageDetailForTest(state, stageFreeze, "snapshot_digest", forgedDigest)
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted a self-consistent tampered source snapshot")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
 func TestResumeRejectsFabricatedCompleteState(t *testing.T) {
 	options := newBeginOptions(t)
 	config, err := normalizeBeginOptions(options)
@@ -125,6 +188,115 @@ func TestResumeRejectsFabricatedCompleteState(t *testing.T) {
 	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 	if err == nil {
 		t.Fatal("resume accepted fabricated complete state")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestResumeRejectsPreflightWaitStateBackendStrataTampering(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	result := writeReadyPreflightForTest(t, state.Config)
+	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
+		{role: "integration-bundle", path: state.Config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
+		{role: "source-snapshot-manifest", path: state.Config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, err := artifactRecordsForExistingFiles(preflightOutputSpecs(state.Config, &result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markStageComplete(state, StageRecord{
+		Name:    stagePreflight,
+		Status:  statusComplete,
+		Inputs:  inputs,
+		Outputs: outputs,
+		Details: map[string]any{
+			"relay_absent":   false,
+			"backend_strata": cloneStringMap(result.BackendStrata),
+		},
+	})
+	setNextAction(state)
+	if state.NextAction.Type != actionCallerRoleOutputs {
+		t.Fatalf("next action = %s, want role-output wait state", state.NextAction.Type)
+	}
+
+	result.BackendStrata = map[string]string{
+		"claude": contracts.RelayLaunchStatusAbsent,
+		"codex":  contracts.RelayLaunchStatusAbsent,
+	}
+	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, result)
+	refreshArtifactDigestForTest(t, state, "preflight", state.Config.Outputs.PreflightPath)
+	setStageDetailForTest(state, stagePreflight, "relay_absent", true)
+	setStageDetailForTest(state, stagePreflight, "backend_strata", cloneStringMap(result.BackendStrata))
+	state.NextAction.Degraded = true
+	state.NextAction.BackendStrata = cloneStringMap(result.BackendStrata)
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted tampered preflight backend strata in the role-output wait state")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {
+	options := newBeginOptions(t)
+	root := filepath.Dir(options.StateDir)
+	basePath := filepath.Join(root, "base-manifest.json")
+	headPath := filepath.Join(root, "head-manifest.json")
+	policyPath := filepath.Join(root, "policy.json")
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "delta-policy"
+	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	writeCanonicalForTest(t, policyPath, policy)
+	options.BaseManifestPath = basePath
+	options.HeadManifestPath = headPath
+	options.PolicyPath = policyPath
+
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	headManifest := readJSONForTest[freeze.Manifest](t, state.Config.SnapshotManifestPath)
+	baseManifest := headManifest
+	baseManifest.Files = append([]freeze.FileEntry(nil), headManifest.Files...)
+	if len(baseManifest.Files) != 1 {
+		t.Fatalf("test source files = %#v, want one file", baseManifest.Files)
+	}
+	baseManifest.Files[0] = freezeFileEntryForTest("app.txt", "100644", []byte("before\n"))
+	restampFreezeManifestForTest(t, &baseManifest)
+	writeCanonicalForTest(t, basePath, baseManifest)
+	writeCanonicalForTest(t, headPath, headManifest)
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	writeRoleOutputsForStateWithScopeAnchor(t, options.StateDir, "app.txt")
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	state = readPassStateForTest(t, options.StateDir)
+	surfacePath := filepath.Join(state.Config.StateDir, "verification", "change-surface.json")
+	surface := readJSONForTest[changesurface.Document](t, surfacePath)
+	if len(surface.ChangedPaths) == 0 {
+		t.Fatal("plan produced no changed paths")
+	}
+	surface.ChangedPaths[0].Path = "forged.go"
+	writeCanonicalForTest(t, surfacePath, surface)
+	refreshArtifactDigestForTest(t, state, "change-surface", surfacePath)
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted a self-consistent tampered change surface")
 	}
 	assertValidationCode(t, err, CodeStateInvalid)
 }
@@ -750,6 +922,240 @@ func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {
 	}
 }
 
+func writeRoleOutputsForStateWithScopeAnchor(t *testing.T, stateDir string, path string) {
+	t.Helper()
+	state := readPassStateForTest(t, stateDir)
+	frozen := readJSONForTest[charter.FrozenCharter](t, state.Config.Outputs.CharterFreezePath)
+	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
+	for _, request := range state.Config.RoleOutputs {
+		document := contracts.RoleOutputDocument{
+			SchemaVersion:    contracts.RoleOutputV3,
+			Role:             request.Role,
+			CharterHash:      frozen.CharterHash,
+			ArtifactDigest:   preflightResult.SnapshotDigest,
+			SourceIdentity:   map[string]any{"kind": "test", "id": "source"},
+			ConsumerIdentity: map[string]any{"kind": "test", "id": "pass-test"},
+			Findings:         []contracts.Finding{},
+		}
+		if request.Role == contracts.RoleDefect {
+			document.Findings = []contracts.Finding{{
+				ID:              "defect-1",
+				Kind:            contracts.FindingKindDefect,
+				Title:           "Defect in changed file",
+				CharterGoalIDs:  []string{"goal-1"},
+				ClaimedSeverity: contracts.SeverityMedium,
+				ScopeAnchors: []contracts.ScopeAnchor{{
+					Dimension: charter.DimensionInputSurface,
+					Value:     path,
+				}},
+				Witness: contracts.Witness{
+					Kind:     contracts.WitnessKindDefect,
+					Strength: contracts.WitnessStrengthArgued,
+					Content:  "The changed file can return the wrong value.",
+				},
+				EstimatedDelta: contracts.SplitDeltaEstimate{
+					Production: contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 1},
+					Test:       contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 1},
+				},
+				SmallestSufficientRemedy: contracts.SmallestSufficientRemedy{
+					Direction:          contracts.RemedyDirectionChange,
+					Summary:            "Correct the changed file.",
+					MinimalityArgument: "One targeted change is sufficient.",
+				},
+			}}
+		}
+		writeCanonicalForTest(t, request.Path, document)
+	}
+}
+
+func writeSourceSnapshotManifestForTest(t *testing.T, config Config, path string, content []byte) freeze.Manifest {
+	t.Helper()
+	entry := freezeFileEntryForTest(path, "100644", content)
+	blobPath := filepath.Join(config.SnapshotDir, filepath.FromSlash(entry.Blob))
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blobPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := freeze.Manifest{
+		SchemaVersion: freeze.SchemaVersion,
+		DigestProfile: digest.Profile,
+		Source: freeze.SourceIdentity{
+			Path:           config.SourceDir,
+			GitTrackedOnly: false,
+		},
+		Workspace: freeze.WorkspaceIdentity{
+			Path:          config.SnapshotDir,
+			Format:        freeze.Format,
+			BlobDirectory: filepath.Join(config.SnapshotDir, "blobs"),
+			ManifestPath:  config.SnapshotManifestPath,
+		},
+		Files: []freeze.FileEntry{entry},
+	}
+	restampFreezeManifestForTest(t, &manifest)
+	writeCanonicalForTest(t, config.SnapshotManifestPath, manifest)
+	return manifest
+}
+
+func freezeFileEntryForTest(path string, mode string, content []byte) freeze.FileEntry {
+	sum := digest.RawBytes(content)
+	return freeze.FileEntry{
+		Path:   path,
+		Mode:   mode,
+		Size:   int64(len(content)),
+		Digest: sum,
+		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
+	}
+}
+
+func restampFreezeManifestForTest(t *testing.T, manifest *freeze.Manifest) {
+	t.Helper()
+	manifest.Source.ManifestDigest = ""
+	manifest.Workspace.ManifestDigest = ""
+	manifestDigest, err := freeze.ManifestDigest(*manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Source.ManifestDigest = manifestDigest
+	manifest.Workspace.ManifestDigest = manifestDigest
+}
+
+func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
+	t.Helper()
+	snapshotDigest, err := computeArtifactDigest(config.SnapshotManifestPath, digestClassFreezeManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundlePayload, bundleDigest, err := configuredIntegrationBundle(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedDigests, err := selectedContractDigestsFromBundle(bundlePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := preflight.Result{
+		SchemaVersion:        preflight.SchemaVersion,
+		OK:                   true,
+		StateDir:             config.StateDir,
+		RelayVersion:         "v1.4.0",
+		ArtifactDigests:      map[string]string{"source-snapshot-manifest": snapshotDigest},
+		CompileReportDigests: map[string]string{},
+		RecipePlanDigests:    map[string]string{},
+		ContractDigests:      map[string]string{"integration_bundle": bundleDigest},
+		BackendStrata:        map[string]string{"claude": "ready", "codex": "ready"},
+		ConsumerIdentity:     map[string]any{"kind": "witness", "id": "pass-driver"},
+	}
+	for _, key := range sortedStringMapKeys(selectedDigests) {
+		result.ContractDigests[key] = selectedDigests[key]
+	}
+	result.ArtifactDigests["relay-capabilities.json"] = retainPreflightPayloadForTest(t, config.StateDir, "relay-capabilities.json", readyCapabilitiesPayloadForTest())
+	result.ArtifactDigests["backend-status.json"] = retainPreflightPayloadForTest(t, config.StateDir, "backend-status.json", map[string]any{
+		"scope":      "backends",
+		"probe_auth": false,
+		"backends": []any{
+			map[string]any{"backend": "claude", "status": "ready"},
+			map[string]any{"backend": "codex", "status": "ready"},
+		},
+	})
+	result.ArtifactDigests["recipes-list.json"] = retainPreflightPayloadForTest(t, config.StateDir, "recipes-list.json", readyRecipesPayloadForTest())
+	result.ArtifactDigests["integration-bundle.json"] = retainPreflightPayloadForTest(t, config.StateDir, "integration-bundle.json", bundlePayload)
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		plan := map[string]any{
+			"schema_version":               "test-root-recipe-plan-v1",
+			"recipe_id":                    requirement.RecipeID,
+			"integration_contract_id":      requirement.ContractID,
+			"integration_contract_digest":  selectedDigests[requirement.ContractID],
+			"deterministic_test_fixture":   true,
+			"required_input_binding_count": 4,
+		}
+		report := map[string]any{
+			"recipe_id":            requirement.RecipeID,
+			"status":               "usable",
+			"integration_contract": requirement.ContractID,
+			"compiled_plan":        plan,
+			"contract_digests": map[string]any{
+				requirement.ContractID: selectedDigests[requirement.ContractID],
+			},
+		}
+		reportRelative := filepath.ToSlash(filepath.Join("compile-reports", requirement.RecipeID+".json"))
+		planRelative := filepath.ToSlash(filepath.Join("recipe-plans", requirement.RecipeID+".json"))
+		result.ArtifactDigests[reportRelative] = retainPreflightPayloadForTest(t, config.StateDir, reportRelative, report)
+		result.CompileReportDigests[requirement.RecipeID] = result.ArtifactDigests[reportRelative]
+		result.ArtifactDigests[planRelative] = retainPreflightPayloadForTest(t, config.StateDir, planRelative, plan)
+		result.RecipePlanDigests[requirement.RecipeID] = result.ArtifactDigests[planRelative]
+	}
+	contractDigestDoc := map[string]any{
+		"schema_version":   "witness-preflight-contract-digests-v1",
+		"digest_profile":   digest.Profile,
+		"contract_digests": result.ContractDigests,
+	}
+	result.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, config.StateDir, "contract-digests.json", contractDigestDoc)
+	result.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(result))
+	writeCanonicalForTest(t, config.Outputs.PreflightPath, result)
+	return result
+}
+
+func readyCapabilitiesPayloadForTest() map[string]any {
+	payload := map[string]any{
+		"schema_version":      "relay-capabilities-v1",
+		"convo_relay_version": "v1.4.0",
+		"build_platform":      map[string]any{"goarch": "test", "goos": "test"},
+		"contracts":           map[string]any{},
+	}
+	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+		if strings.HasPrefix(requirement.Family, "contracts.") {
+			contractsPayload := payload["contracts"].(map[string]any)
+			key := strings.TrimPrefix(requirement.Family, "contracts.")
+			contractsPayload[key] = append(capabilityListForTest(contractsPayload[key]), requirement.Capability)
+			continue
+		}
+		payload[requirement.Family] = append(capabilityListForTest(payload[requirement.Family]), requirement.Capability)
+	}
+	return payload
+}
+
+func capabilityListForTest(value any) []any {
+	if values, ok := value.([]any); ok {
+		return values
+	}
+	return nil
+}
+
+func readyRecipesPayloadForTest() map[string]any {
+	recipes := make([]any, 0, len(preflight.RequiredRecipes))
+	for _, requirement := range preflight.RequiredRecipes {
+		recipes = append(recipes, map[string]any{
+			"id":       requirement.ID,
+			"status":   "usable",
+			"declared": map[string]any{"integration_contract": requirement.ContractID},
+		})
+	}
+	return map[string]any{
+		"scope":   "recipes",
+		"status":  "ok",
+		"recipes": recipes,
+	}
+}
+
+func retainPreflightPayloadForTest(t *testing.T, stateDir string, relativePath string, payload any) string {
+	t.Helper()
+	payloadBytes, err := canonjson.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadDigest := digest.RawBytes(payloadBytes)
+	envelope := map[string]any{
+		"schema_version": "witness-retained-artifact-v1",
+		"digest_profile": digest.Profile,
+		"payload_digest": payloadDigest,
+		"payload":        payload,
+	}
+	writeCanonicalForTest(t, filepath.Join(stateDir, filepath.FromSlash(relativePath)), envelope)
+	return payloadDigest
+}
+
 func runPassToCompletion(t *testing.T, options BeginOptions, withFinding bool) *Invocation {
 	t.Helper()
 	invocation, err := Begin(context.Background(), options)
@@ -803,21 +1209,44 @@ func adjudicationSummaryForTest(findings []adjudicate.FindingVerdict) adjudicate
 
 func refreshArtifactDigestForTest(t *testing.T, state *State, role string, path string) {
 	t.Helper()
-	value, err := computeArtifactDigest(path, digest.ClassRawBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
+	refreshed := false
 	for stageIndex := range state.Stages {
 		for inputIndex := range state.Stages[stageIndex].Inputs {
 			if state.Stages[stageIndex].Inputs[inputIndex].Role == role && recordedPathsEqual(state.Stages[stageIndex].Inputs[inputIndex].Path, path) {
+				value, err := computeArtifactDigest(path, state.Stages[stageIndex].Inputs[inputIndex].DigestClass)
+				if err != nil {
+					t.Fatal(err)
+				}
 				state.Stages[stageIndex].Inputs[inputIndex].Digest = value
+				refreshed = true
 			}
 		}
 		for outputIndex := range state.Stages[stageIndex].Outputs {
 			if state.Stages[stageIndex].Outputs[outputIndex].Role == role && recordedPathsEqual(state.Stages[stageIndex].Outputs[outputIndex].Path, path) {
+				value, err := computeArtifactDigest(path, state.Stages[stageIndex].Outputs[outputIndex].DigestClass)
+				if err != nil {
+					t.Fatal(err)
+				}
 				state.Stages[stageIndex].Outputs[outputIndex].Digest = value
+				refreshed = true
 			}
 		}
+	}
+	if !refreshed {
+		t.Fatalf("artifact record %s at %s not found", role, path)
+	}
+}
+
+func setStageDetailForTest(state *State, stageName string, key string, value any) {
+	for index := range state.Stages {
+		if state.Stages[index].Name != stageName {
+			continue
+		}
+		if state.Stages[index].Details == nil {
+			state.Stages[index].Details = map[string]any{}
+		}
+		state.Stages[index].Details[key] = value
+		return
 	}
 }
 

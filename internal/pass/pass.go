@@ -444,12 +444,7 @@ func runPreflight(ctx context.Context, state *State) error {
 	if err != nil {
 		return err
 	}
-	outputs, err := artifactRecordsForExistingFiles([]artifactInput{
-		{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes},
-		{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
-		{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
-		{role: "integration-bundle-retained", path: filepath.Join(config.StateDir, "integration-bundle.json"), digestClass: digest.ClassRawBytes},
-	})
+	outputs, err := artifactRecordsForExistingFiles(preflightOutputSpecs(config, result))
 	if err != nil {
 		return err
 	}

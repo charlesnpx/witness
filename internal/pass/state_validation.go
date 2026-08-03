@@ -1,6 +1,7 @@
 package pass
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -112,15 +113,14 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
 		}
 	case stagePreflight:
+		var result *preflight.Result
+		if decoded, err := readPreflightResult(config.Outputs.PreflightPath); err == nil {
+			result = &decoded
+		}
 		return []artifactInput{
-				{role: "integration-bundle", path: config.IntegrationBundlePath, digestClass: digestClassRaw()},
-				{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
-			}, []artifactInput{
-				{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
-				{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digestClassRaw()},
-				{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digestClassRaw()},
-				{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config), digestClass: digestClassRaw()},
-			}
+			{role: "integration-bundle", path: config.IntegrationBundlePath, digestClass: digestClassRaw()},
+			{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
+		}, preflightOutputSpecs(config, result)
 	case stagePlan:
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
@@ -170,7 +170,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			}
 		}
 		outputs := []artifactInput{{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digestClassRaw()}}
-		if stageDetailInt(stage, "unverified_relationship_count") > 0 {
+		if expected, err := expectedAssembleResult(state); err == nil && hasSupplementaryAssembleContent(expected) {
 			outputs = append(outputs, artifactInput{role: "assemble-result", path: assembleResultPath(config), digestClass: digestClassRaw()})
 		}
 		return inputs, outputs
@@ -296,7 +296,7 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 		var frozen charter.FrozenCharter
 		frozen, err = strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
 		if err == nil {
-			err = validateFrozenCharterOutput(frozen)
+			err = validateFrozenCharterOutput(state.Config, frozen)
 		}
 	case artifact.Role == "source-snapshot-manifest":
 		var manifest freeze.Manifest
@@ -310,7 +310,11 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 		if err == nil {
 			err = validatePreflightOutput(state.Config, result)
 		}
+	case isPreflightRetainedOutputRole(artifact.Role):
+		err = validatePreflightRetainedOutput(state.Config, artifact)
 	case artifact.Role == "verification-plan":
+		err = validatePlanStageOutputs(state)
+	case artifact.Role == "change-surface":
 		err = validatePlanStageOutputs(state)
 	case strings.HasPrefix(artifact.Role, "verification-batch:"):
 		var batch contracts.VerificationBatchDocument
@@ -327,7 +331,7 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 	case artifact.Role == "metrics":
 		err = validateMetricsOutput(state)
 	default:
-		_, err = strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
+		err = diag.New(CodeStateInvalid, "recorded pass stage output has no authoritative validator.", diag.WithDetail("role", artifact.Role))
 	}
 	return err
 }
@@ -434,52 +438,43 @@ func relayBatchStatusCompatible(recorded string, derived string) bool {
 	return recorded == statusPending && derived == statusComplete
 }
 
-func validateFrozenCharterOutput(frozen charter.FrozenCharter) error {
-	if frozen.SchemaVersion != charter.FrozenSchemaVersion {
-		return diag.New(CodeStateInvalid, "frozen Charter schema_version is unsupported.", diag.WithDetail("actual", frozen.SchemaVersion), diag.WithDetail("expected", charter.FrozenSchemaVersion))
-	}
-	if frozen.DigestProfile != digest.Profile {
-		return diag.New(CodeStateInvalid, "frozen Charter digest_profile is unsupported.", diag.WithDetail("actual", frozen.DigestProfile), diag.WithDetail("expected", digest.Profile))
-	}
-	input := charter.Charter{
-		SchemaVersion:       frozen.Charter.SchemaVersion,
-		Goals:               frozen.Charter.Goals,
-		NonGoals:            frozen.Charter.NonGoals,
-		OwnerEvents:         frozen.Charter.OwnerEvents,
-		OperationalEnvelope: frozen.Charter.OperationalEnvelope,
-	}
-	if diagnostics := charter.Validate(input, nil); len(diagnostics) > 0 {
-		return diag.New(CodeStateInvalid, "embedded frozen Charter failed validation.", diag.WithDetail("diagnostic", diagnostics[0]))
-	}
-	hash, err := charter.Hash(frozen.Charter)
+func validateFrozenCharterOutput(config Config, frozen charter.FrozenCharter) error {
+	input, err := charter.ReadFile(config.CharterPath)
 	if err != nil {
-		return diag.Wrap(err, CodeStateInvalid, "frozen Charter hash could not be recomputed.")
+		return err
 	}
-	if hash != frozen.CharterHash {
-		return diag.New(CodeStateInvalid, "frozen Charter hash does not match embedded Charter.", diag.WithDetail("actual_digest", hash), diag.WithDetail("expected_digest", frozen.CharterHash))
+	var amendments []charter.OwnerEvent
+	if config.AmendmentsPath != "" {
+		amendments, err = charter.ReadAmendmentsFile(config.AmendmentsPath)
+		if err != nil {
+			return err
+		}
 	}
-	return nil
+	expected, err := charter.Freeze(input, amendments)
+	if err != nil {
+		return err
+	}
+	return requireSemanticMatch("frozen Charter", frozen, expected)
 }
 
 func validateFreezeManifestOutput(config Config, manifest freeze.Manifest) (string, error) {
-	if manifest.SchemaVersion != freeze.SchemaVersion {
-		return "", diag.New(CodeStateInvalid, "snapshot manifest schema_version is unsupported.", diag.WithDetail("actual", manifest.SchemaVersion), diag.WithDetail("expected", freeze.SchemaVersion))
+	expected, err := freeze.DeriveManifest(context.Background(), freeze.Options{
+		SourceDir:   config.SourceDir,
+		OutputDir:   config.SnapshotDir,
+		AllowNonGit: config.AllowNonGitSource,
+	})
+	if err != nil {
+		return "", err
 	}
-	if manifest.DigestProfile != digest.Profile {
-		return "", diag.New(CodeStateInvalid, "snapshot manifest digest_profile is unsupported.", diag.WithDetail("actual", manifest.DigestProfile), diag.WithDetail("expected", digest.Profile))
-	}
-	if config.SourceDir != "" && !recordedPathsEqual(manifest.Source.Path, config.SourceDir) {
-		return "", diag.New(CodeStateInvalid, "snapshot manifest source path does not match pass config.", diag.WithDetail("actual", manifest.Source.Path), diag.WithDetail("expected", config.SourceDir))
-	}
-	if config.SnapshotDir != "" && !recordedPathsEqual(manifest.Workspace.Path, config.SnapshotDir) {
-		return "", diag.New(CodeStateInvalid, "snapshot manifest workspace path does not match pass config.", diag.WithDetail("actual", manifest.Workspace.Path), diag.WithDetail("expected", config.SnapshotDir))
-	}
-	if config.SnapshotManifestPath != "" && !recordedPathsEqual(manifest.Workspace.ManifestPath, config.SnapshotManifestPath) {
-		return "", diag.New(CodeStateInvalid, "snapshot manifest path does not match pass config.", diag.WithDetail("actual", manifest.Workspace.ManifestPath), diag.WithDetail("expected", config.SnapshotManifestPath))
+	if err := requireSemanticMatch("source snapshot manifest", manifest, expected.Manifest); err != nil {
+		return "", err
 	}
 	actualDigest, err := freeze.ManifestDigest(manifest)
 	if err != nil {
 		return "", diag.Wrap(err, CodeStateInvalid, "snapshot manifest digest could not be recomputed.")
+	}
+	if actualDigest != expected.ManifestDigest {
+		return "", diag.New(CodeStateInvalid, "snapshot manifest digest does not match the source inventory.", diag.WithDetail("actual_digest", actualDigest), diag.WithDetail("expected_digest", expected.ManifestDigest))
 	}
 	for label, embedded := range map[string]string{
 		"source":    manifest.Source.ManifestDigest,
@@ -549,57 +544,168 @@ func safeSlashRelativePath(value string) bool {
 }
 
 func validatePreflightOutput(config Config, result preflight.Result) error {
-	if result.SchemaVersion != preflight.SchemaVersion {
-		return diag.New(CodeStateInvalid, "preflight result schema_version is unsupported.", diag.WithDetail("actual", result.SchemaVersion), diag.WithDetail("expected", preflight.SchemaVersion))
+	expected, err := expectedPreflightResult(config)
+	if err != nil {
+		return err
 	}
-	if !result.OK || len(result.Diagnostics) > 0 {
-		return diag.New(CodeStateInvalid, "completed preflight output contains blocking diagnostics.", diag.WithDetail("ok", result.OK), diag.WithDetail("diagnostic_count", len(result.Diagnostics)))
+	return requireSemanticMatch("preflight", result, expected)
+}
+
+func expectedPreflightResult(config Config) (preflight.Result, error) {
+	result := preflight.Result{
+		SchemaVersion:        preflight.SchemaVersion,
+		OK:                   true,
+		StateDir:             config.StateDir,
+		ArtifactDigests:      map[string]string{},
+		CompileReportDigests: map[string]string{},
+		RecipePlanDigests:    map[string]string{},
+		ContractDigests:      map[string]string{},
+		BackendStrata:        map[string]string{},
+		ConsumerIdentity:     map[string]any{"kind": "witness", "id": "pass-driver"},
 	}
 	manifest, err := readFreezeManifest(config.SnapshotManifestPath)
 	if err != nil {
-		return err
+		return result, err
 	}
 	snapshotDigest, err := validateFreezeManifestOutput(config, manifest)
 	if err != nil {
-		return err
+		return result, err
 	}
-	if result.SnapshotDigest != snapshotDigest {
-		return diag.New(CodeStateInvalid, "preflight snapshot digest does not match the validated snapshot manifest.", diag.WithDetail("actual_digest", result.SnapshotDigest), diag.WithDetail("expected_digest", snapshotDigest))
+	result.SnapshotDigest = snapshotDigest
+	result.ArtifactDigests["source-snapshot-manifest"] = snapshotDigest
+
+	capabilities, capabilitiesDigest, err := readRetainedPreflightArtifact(config, "relay-capabilities.json")
+	if err != nil {
+		return result, err
 	}
-	if recorded := result.ArtifactDigests["source-snapshot-manifest"]; recorded != snapshotDigest {
-		return diag.New(CodeStateInvalid, "preflight artifact digest for source snapshot manifest is invalid.", diag.WithDetail("actual_digest", recorded), diag.WithDetail("expected_digest", snapshotDigest))
+	result.ArtifactDigests["relay-capabilities.json"] = capabilitiesDigest
+	backendStatus, backendStatusDigest, err := readRetainedPreflightArtifact(config, "backend-status.json")
+	if err != nil {
+		return result, err
 	}
-	for relativePath, expectedDigest := range result.ArtifactDigests {
-		if relativePath == "source-snapshot-manifest" {
+	result.ArtifactDigests["backend-status.json"] = backendStatusDigest
+	strata, err := derivePreflightBackendStrata(backendStatus)
+	if err != nil {
+		return result, err
+	}
+	result.BackendStrata = strata
+	relayAbsent := preflight.RelayAbsent(result)
+	if err := validatePreflightCapabilities(capabilities, relayAbsent); err != nil {
+		return result, err
+	}
+	result.RelayVersion = preflightRelayVersion(capabilities, relayAbsent)
+
+	recipes, recipesDigest, err := readRetainedPreflightArtifact(config, "recipes-list.json")
+	if err != nil {
+		return result, err
+	}
+	result.ArtifactDigests["recipes-list.json"] = recipesDigest
+	if err := validatePreflightRecipes(recipes, relayAbsent); err != nil {
+		return result, err
+	}
+
+	configuredBundle, bundleDigest, err := configuredIntegrationBundle(config)
+	if err != nil {
+		return result, err
+	}
+	retainedBundle, retainedBundleDigest, err := readRetainedPreflightArtifact(config, "integration-bundle.json")
+	if err != nil {
+		return result, err
+	}
+	if err := requireSemanticMatch("preflight retained integration bundle", retainedBundle, configuredBundle); err != nil {
+		return result, err
+	}
+	if retainedBundleDigest != bundleDigest {
+		return result, diag.New(CodeStateInvalid, "preflight retained integration bundle digest does not match the configured bundle.", diag.WithDetail("actual_digest", retainedBundleDigest), diag.WithDetail("expected_digest", bundleDigest))
+	}
+	result.ArtifactDigests["integration-bundle.json"] = retainedBundleDigest
+	result.ContractDigests["integration_bundle"] = bundleDigest
+	selectedDigests, err := selectedContractDigestsFromBundle(configuredBundle)
+	if err != nil {
+		return result, err
+	}
+	for _, key := range sortedStringMapKeys(selectedDigests) {
+		result.ContractDigests[key] = selectedDigests[key]
+	}
+
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		relativePath := filepath.ToSlash(filepath.Join("compile-reports", requirement.RecipeID+".json"))
+		compileReport, compileReportDigest, err := readRetainedPreflightArtifact(config, relativePath)
+		if err != nil {
+			return result, err
+		}
+		result.ArtifactDigests[relativePath] = compileReportDigest
+		result.CompileReportDigests[requirement.RecipeID] = compileReportDigest
+		recipePlan, err := validatePreflightCompileReport(compileReport, requirement, relayAbsent, selectedDigests)
+		if err != nil {
+			return result, err
+		}
+		if relayAbsent {
 			continue
 		}
-		path, err := preflightRetainedArtifactPath(config.StateDir, relativePath)
+		planRelativePath := filepath.ToSlash(filepath.Join("recipe-plans", requirement.RecipeID+".json"))
+		retainedPlan, retainedPlanDigest, err := readRetainedPreflightArtifact(config, planRelativePath)
 		if err != nil {
-			return err
+			return result, err
 		}
-		actualDigest, err := retainedArtifactPayloadDigest(path)
-		if err != nil {
-			return err
+		if err := requireSemanticMatch("preflight recipe plan "+requirement.RecipeID, retainedPlan, recipePlan); err != nil {
+			return result, err
 		}
-		if actualDigest != expectedDigest {
-			return diag.New(CodeStateInvalid, "preflight retained artifact digest does not match retained payload.", diag.WithDetail("path", path), diag.WithDetail("actual_digest", actualDigest), diag.WithDetail("expected_digest", expectedDigest))
+		result.ArtifactDigests[planRelativePath] = retainedPlanDigest
+		result.RecipePlanDigests[requirement.RecipeID] = retainedPlanDigest
+	}
+
+	contractDigestDoc := map[string]any{
+		"schema_version":   "witness-preflight-contract-digests-v1",
+		"digest_profile":   digest.Profile,
+		"contract_digests": result.ContractDigests,
+	}
+	retainedContractDigests, contractDigestArtifactDigest, err := readRetainedPreflightArtifact(config, "contract-digests.json")
+	if err != nil {
+		return result, err
+	}
+	if err := requireSemanticMatch("preflight contract digests", retainedContractDigests, contractDigestDoc); err != nil {
+		return result, err
+	}
+	result.ArtifactDigests["contract-digests.json"] = contractDigestArtifactDigest
+
+	compatibility := expectedPreflightCompatibility(result)
+	if err := contracts.RequireValidRelayCompatibility(compatibility); err != nil {
+		return result, err
+	}
+	retainedCompatibility, compatibilityDigest, err := readRetainedPreflightArtifact(config, "compatibility-manifest.json")
+	if err != nil {
+		return result, err
+	}
+	if err := requireSemanticMatch("preflight compatibility manifest", retainedCompatibility, compatibility); err != nil {
+		return result, err
+	}
+	result.ArtifactDigests["compatibility-manifest.json"] = compatibilityDigest
+	return result, nil
+}
+
+func isPreflightRetainedOutputRole(role string) bool {
+	switch role {
+	case "compatibility-manifest", "relay-capabilities", "integration-bundle-retained", "backend-status", "recipes-list", "contract-digests":
+		return true
+	default:
+		return strings.HasPrefix(role, "compile-report:") ||
+			strings.HasPrefix(role, "recipe-plan:") ||
+			strings.HasPrefix(role, "preflight-retained:")
+	}
+}
+
+func validatePreflightRetainedOutput(config Config, artifact ArtifactRecord) error {
+	expected, err := expectedPreflightResult(config)
+	if err != nil {
+		return err
+	}
+	for _, spec := range preflightOutputSpecs(config, &expected) {
+		if spec.role == artifact.Role && recordedPathsEqual(spec.path, artifact.Path) {
+			return nil
 		}
 	}
-	if expectedDigest := result.ContractDigests["integration_bundle"]; expectedDigest != "" {
-		actualDigest, err := retainedArtifactPayloadDigest(retainedIntegrationBundlePath(config))
-		if err != nil {
-			return err
-		}
-		if actualDigest != expectedDigest {
-			return diag.New(CodeStateInvalid, "preflight integration bundle digest does not match retained payload.", diag.WithDetail("actual_digest", actualDigest), diag.WithDetail("expected_digest", expectedDigest))
-		}
-	}
-	if compatibilityPath := filepath.Join(config.StateDir, "compatibility-manifest.json"); result.ArtifactDigests["compatibility-manifest.json"] != "" {
-		if _, err := relayCompatibilityFromArtifactFile(compatibilityPath); err != nil {
-			return err
-		}
-	}
-	return nil
+	return diag.New(CodeStateInvalid, "preflight retained output is not part of the derived artifact set.", diag.WithDetail("role", artifact.Role), diag.WithDetail("path", artifact.Path))
 }
 
 func preflightRetainedArtifactPath(stateDir string, relativePath string) (string, error) {
@@ -615,18 +721,475 @@ func preflightRetainedArtifactPath(stateDir string, relativePath string) (string
 }
 
 func retainedArtifactPayloadDigest(path string) (string, error) {
+	_, digest, err := readRetainedPayloadFile(path)
+	return digest, err
+}
+
+func readRetainedPreflightArtifact(config Config, relativePath string) (any, string, error) {
+	path, err := preflightRetainedArtifactPath(config.StateDir, relativePath)
+	if err != nil {
+		return nil, "", err
+	}
+	payload, payloadDigest, err := readRetainedPayloadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, payloadDigest, nil
+}
+
+func readRetainedPayloadFile(path string) (any, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	payloadBytes, err := retainedPayloadCanonicalBytes(data)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if len(payloadBytes) == 0 {
-		return "", diag.New(CodeStateInvalid, "preflight retained artifact is missing its payload envelope.", diag.WithDetail("path", path))
+		return nil, "", diag.New(CodeStateInvalid, "preflight retained artifact is missing its payload envelope.", diag.WithDetail("path", path))
 	}
-	return digest.RawBytes(payloadBytes), nil
+	payload, err := strictjson.DecodeAnyBytes(payloadBytes, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, digest.RawBytes(payloadBytes), nil
+}
+
+func configuredIntegrationBundle(config Config) (any, string, error) {
+	data, err := os.ReadFile(config.IntegrationBundlePath)
+	if err != nil {
+		return nil, "", err
+	}
+	payload, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return nil, "", err
+	}
+	payloadDigest, err := digest.SemanticJSON(payload)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, payloadDigest, nil
+}
+
+func derivePreflightBackendStrata(payload any) (map[string]string, error) {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return nil, diag.New(CodeStateInvalid, "preflight backend-status retained payload must be an object.")
+	}
+	rawBackends, ok := object["backends"].([]any)
+	if !ok {
+		return nil, diag.New(CodeStateInvalid, "preflight backend-status retained payload is missing backends.")
+	}
+	records := map[string]string{}
+	for index, raw := range rawBackends {
+		backend, ok := raw.(map[string]any)
+		if !ok {
+			return nil, diag.New(CodeStateInvalid, "preflight backend-status entry must be an object.", diag.WithDetail("index", index))
+		}
+		name, _ := backend["backend"].(string)
+		status, _ := backend["status"].(string)
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(status) == "" {
+			return nil, diag.New(CodeStateInvalid, "preflight backend-status entry is incomplete.", diag.WithDetail("index", index))
+		}
+		records[name] = status
+	}
+	strata := map[string]string{}
+	for _, backend := range preflightRequiredBackends() {
+		status := strings.TrimSpace(records[backend])
+		if status == "" {
+			return nil, diag.New(CodeStateInvalid, "preflight backend-status is missing a required backend.", diag.WithDetail("backend", backend))
+		}
+		if status != contracts.RelayLaunchStatusAbsent && !preflightBackendAttemptable(status) {
+			return nil, diag.New(CodeStateInvalid, "preflight backend-status is not attemptable.", diag.WithDetail("backend", backend), diag.WithDetail("status", status))
+		}
+		strata[backend] = status
+	}
+	return strata, nil
+}
+
+func preflightRequiredBackends() []string {
+	return []string{"claude", "codex"}
+}
+
+func preflightBackendAttemptable(status string) bool {
+	switch status {
+	case "ready", "installed", "installed_auth_unknown", "auth_unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func validatePreflightCapabilities(payload any, relayAbsent bool) error {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return diag.New(CodeStateInvalid, "preflight relay-capabilities retained payload must be an object.")
+	}
+	if relayAbsent {
+		capabilities, _ := object["capabilities"].(map[string]any)
+		for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+			value, exists := capabilities[requirement.Key]
+			if !exists {
+				return diag.New(CodeStateInvalid, "relay-absent capabilities are missing a required capability entry.", diag.WithDetail("capability", requirement.Key))
+			}
+			available, ok := value.(bool)
+			if !ok || available {
+				return diag.New(CodeStateInvalid, "relay-absent capabilities must record required capabilities as unavailable.", diag.WithDetail("capability", requirement.Key))
+			}
+		}
+		return nil
+	}
+	if version := preflightRelayVersion(payload, false); version != "v1.4.0" {
+		return diag.New(CodeStateInvalid, "preflight relay capabilities version does not match the supported baseline.", diag.WithDetail("actual", version), diag.WithDetail("expected", "v1.4.0"))
+	}
+	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+		if !preflightCapabilityPresent(object, requirement) {
+			return diag.New(CodeStateInvalid, "preflight relay capabilities are missing a required capability.", diag.WithDetail("family", requirement.Family), diag.WithDetail("capability", requirement.Capability))
+		}
+	}
+	return nil
+}
+
+func preflightRelayVersion(payload any, relayAbsent bool) string {
+	if relayAbsent {
+		return ""
+	}
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	version, _ := object["convo_relay_version"].(string)
+	return strings.TrimSpace(version)
+}
+
+func preflightCapabilityPresent(capabilities map[string]any, requirement contracts.RelayCapabilityRequirementV3) bool {
+	if strings.HasPrefix(requirement.Family, "contracts.") {
+		contractsObject, _ := capabilities["contracts"].(map[string]any)
+		values, _ := contractsObject[strings.TrimPrefix(requirement.Family, "contracts.")].([]any)
+		return preflightAnySliceContains(values, requirement.Capability)
+	}
+	values, _ := capabilities[requirement.Family].([]any)
+	return preflightAnySliceContains(values, requirement.Capability)
+}
+
+func preflightAnySliceContains(values []any, want string) bool {
+	for _, value := range values {
+		switch typed := value.(type) {
+		case string:
+			if typed == want {
+				return true
+			}
+		case json.Number:
+			if typed.String() == want {
+				return true
+			}
+		default:
+			if fmt.Sprint(typed) == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validatePreflightRecipes(payload any, relayAbsent bool) error {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return diag.New(CodeStateInvalid, "preflight recipes-list retained payload must be an object.")
+	}
+	rawRecipes, ok := object["recipes"].([]any)
+	if !ok {
+		return diag.New(CodeStateInvalid, "preflight recipes-list retained payload is missing recipes.")
+	}
+	if relayAbsent {
+		if len(rawRecipes) != 0 {
+			return diag.New(CodeStateInvalid, "relay-absent recipes-list must not claim available recipes.")
+		}
+		return nil
+	}
+	recipes := map[string]map[string]any{}
+	for index, raw := range rawRecipes {
+		recipe, ok := raw.(map[string]any)
+		if !ok {
+			return diag.New(CodeStateInvalid, "preflight recipe entry must be an object.", diag.WithDetail("index", index))
+		}
+		id, _ := recipe["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return diag.New(CodeStateInvalid, "preflight recipe entry is missing id.", diag.WithDetail("index", index))
+		}
+		recipes[id] = recipe
+	}
+	for _, requirement := range preflight.RequiredRecipes {
+		recipe, ok := recipes[requirement.ID]
+		if !ok {
+			return diag.New(CodeStateInvalid, "preflight recipes-list is missing a required recipe.", diag.WithDetail("recipe_id", requirement.ID))
+		}
+		status, _ := recipe["status"].(string)
+		if status != "usable" && status != "requires_integration" {
+			return diag.New(CodeStateInvalid, "preflight recipe is not usable.", diag.WithDetail("recipe_id", requirement.ID), diag.WithDetail("status", status))
+		}
+		declared, _ := recipe["declared"].(map[string]any)
+		contractID, _ := declared["integration_contract"].(string)
+		if contractID != requirement.ContractID {
+			return diag.New(CodeStateInvalid, "preflight recipe is bound to the wrong integration contract.", diag.WithDetail("recipe_id", requirement.ID), diag.WithDetail("actual", contractID), diag.WithDetail("expected", requirement.ContractID))
+		}
+	}
+	return nil
+}
+
+func validatePreflightCompileReport(payload any, requirement contracts.RecipePlanDigest, relayAbsent bool, selectedDigests map[string]string) (any, error) {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report retained payload must be an object.", diag.WithDetail("recipe_id", requirement.RecipeID))
+	}
+	if relayAbsent {
+		recipeID, _ := object["recipe_id"].(string)
+		contractID, _ := object["contract_id"].(string)
+		status, _ := object["status"].(string)
+		if recipeID != requirement.RecipeID || contractID != requirement.ContractID || status != contracts.RelayLaunchStatusAbsent {
+			return nil, diag.New(CodeStateInvalid, "relay-absent compile-report retained payload does not match the required recipe.", diag.WithDetail("recipe_id", requirement.RecipeID))
+		}
+		return nil, nil
+	}
+	if recipeID, _ := object["recipe_id"].(string); recipeID != "" && recipeID != requirement.RecipeID {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report recipe_id does not match the retained artifact path.", diag.WithDetail("actual", recipeID), diag.WithDetail("expected", requirement.RecipeID))
+	}
+	status, _ := object["status"].(string)
+	switch status {
+	case "", "usable", "ok":
+	default:
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report status is not successful.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("status", status))
+	}
+	if contractID, _ := object["integration_contract"].(string); contractID != "" && contractID != requirement.ContractID {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report integration contract does not match the required recipe.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("actual", contractID), diag.WithDetail("expected", requirement.ContractID))
+	}
+	if diagnostics, _ := object["diagnostics"].([]any); len(diagnostics) > 0 {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report contains diagnostics.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("diagnostic_count", len(diagnostics)))
+	}
+	plan, err := preflightCompileReportPlan(payload)
+	if err != nil {
+		return nil, err
+	}
+	planObject, ok := plan.(map[string]any)
+	if !ok {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report recipe plan must be an object.", diag.WithDetail("recipe_id", requirement.RecipeID))
+	}
+	contractDigest, _ := planObject["integration_contract_digest"].(string)
+	if strings.TrimSpace(contractDigest) == "" {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report recipe plan is missing integration_contract_digest.", diag.WithDetail("recipe_id", requirement.RecipeID))
+	}
+	if expected := selectedDigests[requirement.ContractID]; contractDigest != expected {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report integration contract digest does not match the configured bundle.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("actual_digest", contractDigest), diag.WithDetail("expected_digest", expected))
+	}
+	return plan, nil
+}
+
+func preflightCompileReportPlan(payload any) (any, error) {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report retained payload must be an object.")
+	}
+	for _, key := range []string{"compiled_plan", "root_recipe_plan", "recipe_plan", "plan"} {
+		value, ok := object[key]
+		if !ok || value == nil {
+			continue
+		}
+		if _, ok := value.(map[string]any); !ok {
+			return nil, diag.New(CodeStateInvalid, "preflight compile-report recipe plan must be an object.", diag.WithDetail("field", key))
+		}
+		return value, nil
+	}
+	return nil, diag.New(CodeStateInvalid, "preflight compile-report is missing its retained recipe plan.")
+}
+
+func selectedContractDigestsFromBundle(bundle any) (map[string]string, error) {
+	wanted := map[string]bool{}
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		wanted[requirement.ContractID] = true
+	}
+	digests := map[string]string{}
+	var scan func(any) error
+	scan = func(value any) error {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				if err := scan(item); err != nil {
+					return err
+				}
+			}
+		case map[string]any:
+			if contractsMap, ok := typed["contracts"].(map[string]any); ok {
+				keys := make([]string, 0, len(contractsMap))
+				for key := range contractsMap {
+					keys = append(keys, key)
+				}
+				sortStrings(keys)
+				for _, contractID := range keys {
+					contractPayload := contractsMap[contractID]
+					if wanted[contractID] {
+						if err := recordSelectedContractDigest(digests, contractID, contractPayload); err != nil {
+							return err
+						}
+					}
+					if err := scan(contractPayload); err != nil {
+						return err
+					}
+				}
+			}
+			if id := contractIDValue(typed); wanted[id] {
+				if err := recordSelectedContractDigest(digests, id, typed); err != nil {
+					return err
+				}
+			}
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				if key == "contracts" {
+					continue
+				}
+				keys = append(keys, key)
+			}
+			sortStrings(keys)
+			for _, key := range keys {
+				if err := scan(typed[key]); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := scan(bundle); err != nil {
+		return nil, err
+	}
+	for contractID := range wanted {
+		if digests[contractID] == "" {
+			return nil, diag.New(CodeStateInvalid, "configured integration bundle is missing a required Witness contract.", diag.WithDetail("contract_id", contractID))
+		}
+	}
+	return digests, nil
+}
+
+func recordSelectedContractDigest(digests map[string]string, contractID string, payload any) error {
+	if digests[contractID] != "" {
+		return nil
+	}
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return diag.New(CodeStateInvalid, "configured integration bundle contract must be an object.", diag.WithDetail("contract_id", contractID))
+	}
+	if bodyID := contractIDValue(object); bodyID != "" && bodyID != contractID {
+		return diag.New(CodeStateInvalid, "configured integration bundle contract body id does not match the contract map key.", diag.WithDetail("contract_id", contractID), diag.WithDetail("body_id", bodyID))
+	}
+	contractDigest, err := digest.SemanticJSON(object)
+	if err != nil {
+		return diag.Wrap(err, CodeStateInvalid, "configured integration bundle contract digest could not be computed.", diag.WithDetail("contract_id", contractID))
+	}
+	digests[contractID] = contractDigest
+	return nil
+}
+
+func contractIDValue(object map[string]any) string {
+	for _, key := range []string{"id", "contract_id"} {
+		if value, ok := object[key].(string); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
+}
+
+func expectedPreflightCompatibility(result preflight.Result) contracts.RelayCompatibility {
+	relayAbsent := preflight.RelayAbsent(result)
+	capabilities := make(map[string]bool, len(contracts.RequiredRelayCapabilityClosureV3))
+	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+		capabilities[requirement.Key] = !relayAbsent
+	}
+	return contracts.RelayCompatibility{
+		SchemaVersion:           contracts.RelayCompatibilityV3,
+		ConvoRelayVersion:       result.RelayVersion,
+		DigestProfile:           digest.Profile,
+		Capabilities:            capabilities,
+		CapabilitiesDigest:      result.ArtifactDigests["relay-capabilities.json"],
+		IntegrationBundleDigest: result.ContractDigests["integration_bundle"],
+		SelectedContracts:       expectedPreflightSelectedContracts(result.ContractDigests),
+		RecipePlans:             expectedPreflightRecipePlans(result.RecipePlanDigests, relayAbsent),
+		CompileReports:          expectedPreflightCompileReports(result.CompileReportDigests, relayAbsent),
+		BackendStatus:           expectedPreflightBackendStatus(result.BackendStrata),
+		ConsumerIdentity:        cloneMap(result.ConsumerIdentity),
+	}
+}
+
+func expectedPreflightSelectedContracts(contractDigests map[string]string) []contracts.ContractDigest {
+	seen := map[string]bool{}
+	selected := make([]contracts.ContractDigest, 0, len(contracts.RequiredWitnessRecipeContractsV2))
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		if seen[requirement.ContractID] {
+			continue
+		}
+		seen[requirement.ContractID] = true
+		selected = append(selected, contracts.ContractDigest{
+			ContractID: requirement.ContractID,
+			Digest:     contractDigests[requirement.ContractID],
+		})
+	}
+	return selected
+}
+
+func expectedPreflightRecipePlans(recipePlanDigests map[string]string, relayAbsent bool) []contracts.RecipePlanDigest {
+	if relayAbsent {
+		return nil
+	}
+	plans := make([]contracts.RecipePlanDigest, 0, len(contracts.RequiredWitnessRecipeContractsV2))
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		plans = append(plans, contracts.RecipePlanDigest{
+			RecipeID:   requirement.RecipeID,
+			ContractID: requirement.ContractID,
+			Digest:     recipePlanDigests[requirement.RecipeID],
+		})
+	}
+	return plans
+}
+
+func expectedPreflightCompileReports(compileReportDigests map[string]string, relayAbsent bool) []contracts.CompileReportRef {
+	reports := make([]contracts.CompileReportRef, 0, len(contracts.RequiredWitnessRecipeContractsV2))
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		reportDigest := compileReportDigests[requirement.RecipeID]
+		status := "retained"
+		if relayAbsent {
+			status = contracts.RelayLaunchStatusAbsent
+		}
+		reports = append(reports, contracts.CompileReportRef{
+			RecipeID: requirement.RecipeID,
+			Status:   status,
+			Ref: contracts.ArtifactRef{
+				Kind:          "compile-report",
+				ID:            requirement.RecipeID,
+				Digest:        reportDigest,
+				DigestProfile: digest.Profile,
+				MediaType:     "application/json",
+			},
+			Digest: reportDigest,
+		})
+	}
+	return reports
+}
+
+func expectedPreflightBackendStatus(strata map[string]string) []contracts.BackendStatus {
+	status := make([]contracts.BackendStatus, 0, len(preflightRequiredBackends()))
+	for _, backend := range preflightRequiredBackends() {
+		status = append(status, contracts.BackendStatus{
+			Backend: backend,
+			Status:  strata[backend],
+		})
+	}
+	return status
 }
 
 func validatePlanStageOutputs(state *State) error {
@@ -709,7 +1272,7 @@ func expectedPlanningResult(state *State) (*planning.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateFrozenCharterOutput(frozen); err != nil {
+	if err := validateFrozenCharterOutput(config, frozen); err != nil {
 		return nil, err
 	}
 	preflightResult, err := readPreflightResult(config.Outputs.PreflightPath)

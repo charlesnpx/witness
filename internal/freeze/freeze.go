@@ -83,6 +83,86 @@ type sourceFile struct {
 	mode string
 }
 
+// DeriveManifest re-inventories the source and derives the manifest Create would
+// write, without creating directories or writing blobs.
+func DeriveManifest(ctx context.Context, options Options) (Result, error) {
+	var zero Result
+	if options.SourceDir == "" {
+		return zero, diag.New(CodeMissingSource, "source directory is required.")
+	}
+	if options.OutputDir == "" {
+		return zero, diag.New(CodeMissingOutput, "output directory is required.")
+	}
+	sourceAbs, err := canonicalPath(options.SourceDir)
+	if err != nil {
+		return zero, err
+	}
+	outputAbs, err := canonicalPath(options.OutputDir)
+	if err != nil {
+		return zero, err
+	}
+	containmentRoot := sourceAbs
+	if gitRoot, err := gitRepositoryRoot(ctx, sourceAbs); err == nil {
+		containmentRoot = gitRoot
+	}
+	if err := ensureOutputOutsideSource(containmentRoot, outputAbs); err != nil {
+		return zero, err
+	}
+
+	source := SourceIdentity{Path: sourceAbs}
+	files, gitSource, err := collectGitFiles(ctx, sourceAbs)
+	if err != nil {
+		if !options.AllowNonGit || !isNonGitError(err) {
+			return zero, err
+		}
+		files, err = collectFilesystemFiles(sourceAbs)
+		if err != nil {
+			return zero, err
+		}
+		source.GitTrackedOnly = false
+	} else {
+		source = gitSource
+	}
+
+	entries := make([]FileEntry, 0, len(files))
+	for _, item := range files {
+		data, size, err := readSnapshotBytes(sourceAbs, item)
+		if err != nil {
+			return zero, err
+		}
+		sum := digest.RawBytes(data)
+		blobName := strings.TrimPrefix(sum, digest.Prefix)
+		entries = append(entries, FileEntry{
+			Path:   item.path,
+			Mode:   item.mode,
+			Size:   size,
+			Digest: sum,
+			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
+		})
+	}
+
+	manifestPath := filepath.Join(outputAbs, "manifest.json")
+	manifest := Manifest{
+		SchemaVersion: SchemaVersion,
+		DigestProfile: digest.Profile,
+		Source:        source,
+		Workspace: WorkspaceIdentity{
+			Path:          outputAbs,
+			Format:        Format,
+			BlobDirectory: filepath.Join(outputAbs, "blobs"),
+			ManifestPath:  manifestPath,
+		},
+		Files: entries,
+	}
+	manifestDigest, err := unsignedManifestDigest(manifest)
+	if err != nil {
+		return zero, err
+	}
+	manifest.Source.ManifestDigest = manifestDigest
+	manifest.Workspace.ManifestDigest = manifestDigest
+	return Result{Manifest: manifest, ManifestPath: manifestPath, ManifestDigest: manifestDigest}, nil
+}
+
 func Create(ctx context.Context, options Options) (Result, error) {
 	var zero Result
 	if options.SourceDir == "" {

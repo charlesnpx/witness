@@ -3,12 +3,14 @@ package pass
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"witness/internal/contracts"
 	"witness/internal/digest"
 	"witness/internal/harness"
 	"witness/internal/planning"
+	"witness/internal/preflight"
 )
 
 func applyOutputDefaults(config *Config) {
@@ -81,6 +83,64 @@ func assembleOutputSpecs(config Config, result *planning.AssembleResult) []artif
 		specs = append(specs, artifactInput{role: "assemble-result", path: assembleResultPath(config), digestClass: digest.ClassRawBytes})
 	}
 	return specs
+}
+
+func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInput {
+	specs := []artifactInput{{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes}}
+	if result == nil {
+		return append(specs,
+			artifactInput{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
+			artifactInput{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
+			artifactInput{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config), digestClass: digest.ClassRawBytes},
+		)
+	}
+	for _, relativePath := range sortedStringMapKeys(result.ArtifactDigests) {
+		if relativePath == "source-snapshot-manifest" {
+			continue
+		}
+		specs = append(specs, artifactInput{
+			role:        preflightRetainedArtifactRole(relativePath),
+			path:        filepath.Join(config.StateDir, filepath.FromSlash(relativePath)),
+			digestClass: digest.ClassRawBytes,
+		})
+	}
+	return specs
+}
+
+func preflightRetainedArtifactRole(relativePath string) string {
+	switch relativePath {
+	case "compatibility-manifest.json":
+		return "compatibility-manifest"
+	case "relay-capabilities.json":
+		return "relay-capabilities"
+	case "integration-bundle.json":
+		return "integration-bundle-retained"
+	case "backend-status.json":
+		return "backend-status"
+	case "recipes-list.json":
+		return "recipes-list"
+	case "contract-digests.json":
+		return "contract-digests"
+	default:
+		if strings.HasPrefix(relativePath, "compile-reports/") && strings.HasSuffix(relativePath, ".json") {
+			name := strings.TrimSuffix(strings.TrimPrefix(relativePath, "compile-reports/"), ".json")
+			return "compile-report:" + name
+		}
+		if strings.HasPrefix(relativePath, "recipe-plans/") && strings.HasSuffix(relativePath, ".json") {
+			name := strings.TrimSuffix(strings.TrimPrefix(relativePath, "recipe-plans/"), ".json")
+			return "recipe-plan:" + name
+		}
+		return "preflight-retained:" + artifactIDFromText(relativePath)
+	}
+}
+
+func sortedStringMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func hasSupplementaryAssembleContent(result *planning.AssembleResult) bool {
