@@ -1,6 +1,8 @@
 package pass
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -11,6 +13,7 @@ import (
 	"witness/internal/digest"
 	"witness/internal/freeze"
 	"witness/internal/ledger"
+	"witness/internal/strictjson"
 )
 
 type AdjudicationOptions struct {
@@ -27,6 +30,7 @@ type AdjudicationOptions struct {
 	PolicyCapReleaseLedgerBacked bool
 	PriorLineage                 []adjudicate.PriorLineageRecord
 	PriorLineageProvided         bool
+	DriverResumeMode             bool
 }
 
 type AdjudicationServiceResult struct {
@@ -55,7 +59,7 @@ func RunAdjudicationService(options AdjudicationOptions) (AdjudicationServiceRes
 		return service, nil
 	}
 	if options.LedgerPath != "" {
-		appended, err := AppendAdjudicationLineage(options.LedgerPath, result, options.RoleOutputs, options.FrozenCharter)
+		appended, err := appendAdjudicationLineage(options.LedgerPath, result, options.RoleOutputs, options.FrozenCharter, options.DriverResumeMode)
 		if err != nil {
 			return service, err
 		}
@@ -65,9 +69,14 @@ func RunAdjudicationService(options AdjudicationOptions) (AdjudicationServiceRes
 }
 
 func AppendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) ([]ledger.Record, error) {
+	return appendAdjudicationLineage(path, result, inputs, frozen, false)
+}
+
+func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter, driverResumeMode bool) ([]ledger.Record, error) {
 	if result == nil || result.ResultDigest == "" {
 		return nil, diag.New(diag.CodeInvalidCommand, "adjudication result is missing a run digest.")
 	}
+	events := AdjudicationLedgerEvents(result, inputs, frozen)
 	records, err := ledger.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -77,9 +86,110 @@ func AppendAdjudicationLineage(path string, result *adjudicate.Result, inputs []
 		return nil, err
 	}
 	if duplicate {
+		if driverResumeMode {
+			if existing, ok, err := completeIdenticalLineage(records, result.ResultDigest, events); err != nil {
+				return nil, err
+			} else if ok {
+				return existing, nil
+			}
+		}
 		return nil, ledger.DuplicateRunDigestError(result.ResultDigest)
 	}
-	return ledger.AppendEvents(path, AdjudicationLedgerEvents(result, inputs, frozen))
+	return ledger.AppendEvents(path, events)
+}
+
+func completeIdenticalLineage(records []ledger.Record, runDigest string, events []ledger.EventToAppend) ([]ledger.Record, bool, error) {
+	expected, err := canonicalLineage(events)
+	if err != nil {
+		return nil, false, err
+	}
+	for start := 0; start+len(expected) <= len(records); start++ {
+		if !ledgerRecordMatchesExpected(records[start], expected[0]) {
+			continue
+		}
+		matched := true
+		for offset := 1; offset < len(expected); offset++ {
+			if !ledgerRecordMatchesExpected(records[start+offset], expected[offset]) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		for index, record := range records {
+			if index >= start && index < start+len(expected) {
+				continue
+			}
+			recordRunDigest, err := lineageRecordRunDigest(record)
+			if err != nil {
+				return nil, false, err
+			}
+			if recordRunDigest == runDigest {
+				return nil, false, nil
+			}
+		}
+		return append([]ledger.Record(nil), records[start:start+len(expected)]...), true, nil
+	}
+	return nil, false, nil
+}
+
+type expectedLedgerRecord struct {
+	kind  string
+	event json.RawMessage
+}
+
+func canonicalLineage(events []ledger.EventToAppend) ([]expectedLedgerRecord, error) {
+	expected := make([]expectedLedgerRecord, 0, len(events))
+	for _, event := range events {
+		raw, err := diag.CanonicalBytes(event.Payload)
+		if err != nil {
+			return nil, err
+		}
+		expected = append(expected, expectedLedgerRecord{kind: event.Kind, event: append(json.RawMessage(nil), raw...)})
+	}
+	return expected, nil
+}
+
+func ledgerRecordMatchesExpected(record ledger.Record, expected expectedLedgerRecord) bool {
+	return record.EventKind == expected.kind && bytes.Equal(record.Event, expected.event)
+}
+
+func lineageRecordRunDigest(record ledger.Record) (string, error) {
+	switch record.EventKind {
+	case ledger.EventKindAdjudicationRun:
+		event, err := strictjson.DecodeBytes[ledger.AdjudicationRunEvent](record.Event, strictjson.DefaultMaxBytes*8)
+		if err != nil {
+			return "", err
+		}
+		return event.RunDigest, nil
+	case ledger.EventKindVerdict:
+		event, err := strictjson.DecodeBytes[ledger.VerdictEvent](record.Event, strictjson.DefaultMaxBytes*8)
+		if err != nil {
+			return "", err
+		}
+		return event.RunDigest, nil
+	case ledger.EventKindQuestion:
+		event, err := strictjson.DecodeBytes[ledger.QuestionEvent](record.Event, strictjson.DefaultMaxBytes*8)
+		if err != nil {
+			return "", err
+		}
+		return event.RunDigest, nil
+	case ledger.EventKindPendingVerification:
+		event, err := strictjson.DecodeBytes[ledger.PendingVerificationEvent](record.Event, strictjson.DefaultMaxBytes*8)
+		if err != nil {
+			return "", err
+		}
+		return event.RunDigest, nil
+	case ledger.EventKindPolicyDecision:
+		event, err := strictjson.DecodeBytes[ledger.PolicyDecisionEvent](record.Event, strictjson.DefaultMaxBytes*8)
+		if err != nil {
+			return "", err
+		}
+		return event.RunDigest, nil
+	default:
+		return "", nil
+	}
 }
 
 func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) []ledger.EventToAppend {

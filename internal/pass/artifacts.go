@@ -58,6 +58,10 @@ func retainedIntegrationBundlePath(config Config) string {
 	return filepath.Join(config.StateDir, "integration-bundle.json")
 }
 
+func roleOutputDir(config Config) string {
+	return filepath.Join(config.StateDir, "role-outputs")
+}
+
 func writeAssembleArtifacts(config Config, result *planning.AssembleResult) error {
 	if result == nil {
 		return nil

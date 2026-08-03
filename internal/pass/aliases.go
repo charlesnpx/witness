@@ -18,7 +18,7 @@ type driverGeneratedOutput struct {
 type driverConfiguredInput struct {
 	role                   string
 	path                   string
-	allowInsideGenerated   bool
+	roleOutput             bool
 	rejectsContainedOutput bool
 }
 
@@ -44,6 +44,21 @@ func rejectDriverOutputAliases(config Config) error {
 		if err != nil {
 			return err
 		}
+		var resolvedRoleOutputDir comparablePathInfo
+		if input.roleOutput {
+			resolvedRoleOutputDir, err = comparablePath(roleOutputDir(config))
+			if err != nil {
+				return err
+			}
+			if !resolvedInput.isInside(resolvedRoleOutputDir) {
+				return outputPathConflict(
+					driverGeneratedOutput{role: "role-output-dir", path: roleOutputDir(config), dir: true},
+					input,
+					resolvedRoleOutputDir,
+					"role-output path must be inside the dedicated role-output directory.",
+				)
+			}
+		}
 		for index, output := range outputs {
 			if strings.TrimSpace(output.path) == "" {
 				continue
@@ -52,7 +67,7 @@ func rejectDriverOutputAliases(config Config) error {
 			if resolvedOutput.conflictsWith(resolvedInput) {
 				return outputPathConflict(output, input, resolvedOutput, "output path must not overwrite required inputs.")
 			}
-			if output.dir && !input.allowInsideGenerated && resolvedInput.isInside(resolvedOutput) {
+			if output.dir && !inputAllowedInsideGenerated(input, output, resolvedInput, resolvedRoleOutputDir) && resolvedInput.isInside(resolvedOutput) {
 				return outputPathConflict(output, input, resolvedOutput, "configured input path must not be inside driver-generated output directories.")
 			}
 			if input.rejectsContainedOutput && resolvedOutput.isInside(resolvedInput) {
@@ -63,15 +78,28 @@ func rejectDriverOutputAliases(config Config) error {
 	return nil
 }
 
+func inputAllowedInsideGenerated(input driverConfiguredInput, output driverGeneratedOutput, resolvedInput comparablePathInfo, resolvedRoleOutputDir comparablePathInfo) bool {
+	if !input.roleOutput {
+		return false
+	}
+	if !resolvedInput.isInside(resolvedRoleOutputDir) {
+		return false
+	}
+	return output.role == "state-dir" || output.role == "role-output-dir"
+}
+
 func driverGeneratedOutputs(config Config) []driverGeneratedOutput {
 	return []driverGeneratedOutput{
 		{role: "state-dir", path: config.StateDir, dir: true},
 		{role: "snapshot-dir", path: config.SnapshotDir, dir: true},
+		{role: "role-output-dir", path: roleOutputDir(config), dir: true},
 		{role: "pass-state", path: config.Outputs.StatePath},
 		{role: "charter-freeze", path: config.Outputs.CharterFreezePath},
+		{role: "source-snapshot-manifest", path: config.SnapshotManifestPath},
 		{role: "preflight", path: config.Outputs.PreflightPath},
 		{role: "verification-plan", path: config.Outputs.PlanPath},
 		{role: "verification-manifest", path: config.Outputs.ManifestPath},
+		{role: "verification-index-skeleton", path: filepath.Join(config.StateDir, "verification", "index.skeleton.json")},
 		{role: "assemble-result", path: assembleResultPath(config)},
 		{role: "run-result", path: config.Outputs.RunResultPath},
 		{role: "metrics", path: config.Outputs.MetricsPath},
@@ -81,6 +109,12 @@ func driverGeneratedOutputs(config Config) []driverGeneratedOutput {
 		{role: "recipes-list", path: filepath.Join(config.StateDir, "recipes-list.json")},
 		{role: "contract-digests", path: filepath.Join(config.StateDir, "contract-digests.json")},
 		{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config)},
+		{role: "compile-reports", path: filepath.Join(config.StateDir, "compile-reports"), dir: true},
+		{role: "recipe-plans", path: filepath.Join(config.StateDir, "recipe-plans"), dir: true},
+		{role: "verification-dir", path: filepath.Join(config.StateDir, "verification"), dir: true},
+		{role: "verification-batches", path: filepath.Join(config.StateDir, "verification", "batches"), dir: true},
+		{role: "verification-sessions", path: filepath.Join(config.StateDir, "verification", "sessions"), dir: true},
+		{role: "change-surface", path: filepath.Join(config.StateDir, "verification", "change-surface.json")},
 	}
 }
 
@@ -100,7 +134,7 @@ func driverConfiguredInputs(config Config) []driverConfiguredInput {
 		{role: "receipt-hmac-key-file", path: config.ReceiptHMACKeyFile},
 	}
 	for _, item := range config.RoleOutputs {
-		inputs = append(inputs, driverConfiguredInput{role: "role-output:" + item.Role, path: item.Path, allowInsideGenerated: true})
+		inputs = append(inputs, driverConfiguredInput{role: "role-output:" + item.Role, path: item.Path, roleOutput: true})
 	}
 	for _, path := range config.ReceiptPaths {
 		inputs = append(inputs, driverConfiguredInput{role: "receipt", path: path})

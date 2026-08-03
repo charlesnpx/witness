@@ -20,6 +20,7 @@ import (
 	"witness/internal/digest"
 	"witness/internal/harness"
 	"witness/internal/ledger"
+	"witness/internal/metrics"
 	"witness/internal/planning"
 	"witness/internal/preflight"
 	"witness/internal/strictjson"
@@ -128,6 +129,84 @@ func TestResumeRejectsFabricatedCompleteState(t *testing.T) {
 	assertValidationCode(t, err, CodeStateInvalid)
 }
 
+func TestResumeRejectsSelfConsistentTamperedAdjudicationResult(t *testing.T) {
+	options := newBeginOptions(t)
+	runPassToCompletion(t, options, true)
+	state := readPassStateForTest(t, options.StateDir)
+	resultPath := state.Config.Outputs.RunResultPath
+	result := readJSONForTest[adjudicate.Result](t, resultPath)
+	if len(result.Findings) == 0 {
+		t.Fatal("test pass produced no adjudication findings")
+	}
+	result.Findings[0].Disposition = contracts.DispositionAdvisory
+	result.Findings[0].ApplicationClass = contracts.ApplicationClassCallerDecision
+	result.Findings[0].Reasons = []string{"tampered"}
+	result.Summary = adjudicationSummaryForTest(result.Findings)
+	result.ResultDigest = ""
+	resultDigest, err := adjudicationResultDigest(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.ResultDigest = resultDigest
+	writeCanonicalForTest(t, resultPath, result)
+
+	metricsDocument, err := metrics.Run(metrics.Options{
+		LedgerPath:     state.Config.LedgerPath,
+		PreflightPath:  state.Config.Outputs.PreflightPath,
+		RunResultPaths: []string{resultPath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONFile(state.Config.Outputs.MetricsPath, metricsDocument); err != nil {
+		t.Fatal(err)
+	}
+	refreshArtifactDigestForTest(t, state, "run-result", state.Config.Outputs.RunResultPath)
+	refreshArtifactDigestForTest(t, state, "metrics", state.Config.Outputs.MetricsPath)
+	for index := range state.Stages {
+		if state.Stages[index].Name == stageAdjudicate {
+			state.Stages[index].Details["result_digest"] = result.ResultDigest
+		}
+	}
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted a self-consistent tampered adjudication result")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestResumeRejectsForgedRelayBatchActionFields(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	writeRoleOutputsForState(t, options.StateDir, true)
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	if len(state.RelayBatches) == 0 {
+		t.Fatal("plan produced no relay batches")
+	}
+	state.RelayBatches[0].RecipeID = "attacker-recipe"
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted forged relay batch action fields")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
 func TestBeginRejectsConfiguredInputInsideStateDirBeforeWrite(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "pass")
@@ -187,6 +266,57 @@ func TestBeginRejectsConfiguredInputInsideStateDirBeforeWrite(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("driver wrote %s before alias rejection: %v", path, err)
 		}
+	}
+}
+
+func TestBeginRejectsReservedRoleOutputAliases(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "pass")
+	sourceDir := filepath.Join(root, "source")
+	if err := os.MkdirAll(filepath.Join(stateDir, "source-snapshot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "role-outputs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(stateDir, "source-snapshot", "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(stateDir, "role-outputs", "symlink.json")
+	if err := os.Symlink(filepath.Join("..", "source-snapshot", "manifest.json"), symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	hardlinkPath := filepath.Join(stateDir, "role-outputs", "hardlink.json")
+	if err := os.Link(manifestPath, hardlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "direct", path: manifestPath},
+		{name: "symlink", path: symlinkPath},
+		{name: "hardlink", path: hardlinkPath},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := normalizeBeginOptions(BeginOptions{
+				StateDir:              stateDir,
+				CharterPath:           filepath.Join(root, "charter.json"),
+				SourceDir:             sourceDir,
+				AllowNonGitSource:     true,
+				RelayPath:             filepath.Join(root, "missing-convo-relay"),
+				IntegrationBundlePath: filepath.Join(root, "bundle.json"),
+				RoleOutputs:           []RoleOutputSpec{{Role: contracts.RoleDefect, Path: test.path}},
+			})
+			if err == nil {
+				t.Fatalf("normalizeBeginOptions accepted reserved role-output alias %s", test.path)
+			}
+			if got := diagCode(err); got != charter.CodeOutputPathConflict {
+				t.Fatalf("diagnostic code = %s, want %s; err=%v", got, charter.CodeOutputPathConflict, err)
+			}
+		})
 	}
 }
 
@@ -262,7 +392,51 @@ func TestDriverLedgerAppendsSameLineageKindsAsSharedAdjudicationService(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertLedgerKindsEqual(t, driverRecords, serviceRecords)
+	assertLedgerLineageEqual(t, driverRecords, serviceRecords)
+}
+
+func TestDriverResumeAfterDurableLedgerAppendIsIdempotent(t *testing.T) {
+	options := newBeginOptions(t)
+	root := filepath.Dir(options.StateDir)
+	options.LedgerPath = filepath.Join(root, "ledger.jsonl")
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	writeRoleOutputsForState(t, options.StateDir, true)
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume assemble: %v", err)
+	}
+	stateBeforeAdjudicate := readPassStateForTest(t, options.StateDir)
+	service, err := runAdjudicationServiceForState(t, stateBeforeAdjudicate, options.LedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.RunErr != nil {
+		t.Fatal(service.RunErr)
+	}
+	recordsBefore, err := ledger.ReadFile(options.LedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume adjudicate after durable append: %v", err)
+	}
+	if invocation.StageRun != stageAdjudicate {
+		t.Fatalf("stage_run = %s, want %s", invocation.StageRun, stageAdjudicate)
+	}
+	recordsAfter, err := ledger.ReadFile(options.LedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLedgerLineageEqual(t, recordsAfter, recordsBefore)
 }
 
 func TestAssembleSupplementaryRelationshipsPersistFullResultOutput(t *testing.T) {
@@ -383,15 +557,15 @@ func TestRelayBatchActionCarriesBoundDigestsAndRetainedBundle(t *testing.T) {
 			{Name: stagePreflight, Status: statusComplete},
 			{Name: stagePlan, Status: statusComplete},
 		},
-		RelayBatches: []RelayBatchRecord{{
-			BatchID:           "batch-1",
-			RecipeFamily:      "witness-falsify-v2",
-			RecipeID:          "witness-falsify-v2-codex",
-			BatchPath:         filepath.Join(stateDir, "verification", "batches", "batch-1.json"),
-			BatchDigest:       batchDigest,
-			PortableExportDir: filepath.Join(stateDir, "verification", "sessions", "batch-1"),
-		}},
 	}
+	writeCanonicalForTest(t, config.Outputs.PlanPath, planning.PlanDocument{
+		Batches: []planning.BatchPlan{{
+			BatchID:      "batch-1",
+			TaskShape:    contracts.BatchTaskDefect,
+			RecipeFamily: "witness-falsify-v2",
+			BatchDigest:  batchDigest,
+		}},
+	})
 	action := nextRelayBatchAction(state)
 	if action == nil {
 		t.Fatal("nextRelayBatchAction returned nil")
@@ -576,6 +750,116 @@ func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {
 	}
 }
 
+func runPassToCompletion(t *testing.T, options BeginOptions, withFinding bool) *Invocation {
+	t.Helper()
+	invocation, err := Begin(context.Background(), options)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	writeRoleOutputsForState(t, options.StateDir, withFinding)
+	for _, stage := range []string{stagePlan, stageAssemble, stageAdjudicate, stageMetrics} {
+		invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+		if err != nil {
+			t.Fatalf("resume %s: %v", stage, err)
+		}
+	}
+	if !invocation.Complete {
+		t.Fatalf("pass did not complete: %#v", invocation)
+	}
+	return invocation
+}
+
+func adjudicationSummaryForTest(findings []adjudicate.FindingVerdict) adjudicate.Summary {
+	var summary adjudicate.Summary
+	for _, finding := range findings {
+		switch finding.Disposition {
+		case contracts.DispositionAdmitted:
+			summary.Admitted++
+		case contracts.DispositionAdvisory:
+			summary.Advisory++
+		case contracts.DispositionPendingVerification:
+			summary.PendingVerification++
+		}
+		switch finding.ApplicationClass {
+		case contracts.ApplicationClassAutomaticCandidate:
+			summary.AutomaticCandidate++
+		case contracts.ApplicationClassCallerDecision:
+			summary.CallerDecision++
+		case contracts.ApplicationClassNone:
+			summary.None++
+		}
+	}
+	summary.FixpointEligible = summary.Admitted == 0 &&
+		summary.Advisory == 0 &&
+		summary.PendingVerification == 0 &&
+		summary.AutomaticCandidate == 0 &&
+		summary.CallerDecision == 0
+	return summary
+}
+
+func refreshArtifactDigestForTest(t *testing.T, state *State, role string, path string) {
+	t.Helper()
+	value, err := computeArtifactDigest(path, digest.ClassRawBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for stageIndex := range state.Stages {
+		for inputIndex := range state.Stages[stageIndex].Inputs {
+			if state.Stages[stageIndex].Inputs[inputIndex].Role == role && recordedPathsEqual(state.Stages[stageIndex].Inputs[inputIndex].Path, path) {
+				state.Stages[stageIndex].Inputs[inputIndex].Digest = value
+			}
+		}
+		for outputIndex := range state.Stages[stageIndex].Outputs {
+			if state.Stages[stageIndex].Outputs[outputIndex].Role == role && recordedPathsEqual(state.Stages[stageIndex].Outputs[outputIndex].Path, path) {
+				state.Stages[stageIndex].Outputs[outputIndex].Digest = value
+			}
+		}
+	}
+}
+
+func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath string) (AdjudicationServiceResult, error) {
+	t.Helper()
+	frozen, _, err := readFrozenCharter(state.Config.Outputs.CharterFreezePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readVerificationManifest(state.Config.Outputs.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changeSurface, err := readChangeSurfaceInput(state.Config.BaseManifestPath, state.Config.HeadManifestPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := loadEffectivePolicy(state.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roleOutputs := make([]adjudicate.RoleOutputInput, 0, len(state.Config.RoleOutputs))
+	for _, item := range state.Config.RoleOutputs {
+		document, err := readRoleOutput(item.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roleOutputs = append(roleOutputs, adjudicate.RoleOutputInput{Path: item.Path, Document: document})
+	}
+	return RunAdjudicationService(AdjudicationOptions{
+		FrozenCharter:                frozen,
+		RoleOutputs:                  roleOutputs,
+		Manifest:                     manifest,
+		BaseManifest:                 changeSurface.BaseManifest,
+		HeadManifest:                 changeSurface.HeadManifest,
+		LedgerPath:                   ledgerPath,
+		Rules:                        effective.Rules,
+		Policy:                       effective.Policy,
+		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
+	})
+}
+
 func assertInvocation(t *testing.T, invocation *Invocation, stage string, action string, complete bool) {
 	t.Helper()
 	if invocation.StageRun != stage {
@@ -610,26 +894,16 @@ func diagCode(err error) string {
 	return diag.FromError(err).Code
 }
 
-func assertLedgerKindsEqual(t *testing.T, left []ledger.Record, right []ledger.Record) {
+func assertLedgerLineageEqual(t *testing.T, left []ledger.Record, right []ledger.Record) {
 	t.Helper()
-	leftKinds := ledgerKinds(left)
-	rightKinds := ledgerKinds(right)
-	if len(leftKinds) != len(rightKinds) {
-		t.Fatalf("ledger kinds length = %d, want %d; left=%#v right=%#v", len(leftKinds), len(rightKinds), leftKinds, rightKinds)
+	if len(left) != len(right) {
+		t.Fatalf("ledger record length = %d, want %d", len(left), len(right))
 	}
-	for index := range leftKinds {
-		if leftKinds[index] != rightKinds[index] {
-			t.Fatalf("ledger kinds = %#v, want %#v", leftKinds, rightKinds)
+	for index := range left {
+		if left[index].EventKind != right[index].EventKind || !bytes.Equal(left[index].Event, right[index].Event) {
+			t.Fatalf("ledger record %d = kind %s event %s, want kind %s event %s", index, left[index].EventKind, left[index].Event, right[index].EventKind, right[index].Event)
 		}
 	}
-}
-
-func ledgerKinds(records []ledger.Record) []string {
-	kinds := make([]string, 0, len(records))
-	for _, record := range records {
-		kinds = append(kinds, record.EventKind)
-	}
-	return kinds
 }
 
 func stageRecordForTest(t *testing.T, state *State, name string) StageRecord {

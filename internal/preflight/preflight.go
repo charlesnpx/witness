@@ -352,7 +352,13 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 		"workspace": manifest.Workspace.ManifestDigest,
 	} {
 		if strings.TrimSpace(embedded) == "" {
-			continue
+			return "", diag.New(
+				CodeSnapshotDigestMismatch,
+				"existing snapshot manifest is missing an embedded digest.",
+				diag.WithDetail("path", path),
+				diag.WithDetail("location", label),
+				diag.WithDetail("expected_digest", actualDigest),
+			)
 		}
 		if embedded != actualDigest {
 			return "", diag.New(

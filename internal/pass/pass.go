@@ -428,7 +428,7 @@ func runPreflight(ctx context.Context, state *State) error {
 		IntegrationBundlePath:  config.IntegrationBundlePath,
 		StateDir:               config.StateDir,
 		SnapshotManifestPath:   config.SnapshotManifestPath,
-		ExpectedSnapshotDigest: stageDetailString(state, stageFreeze, "snapshot_digest"),
+		ExpectedSnapshotDigest: stageOutputDigest(state, "source-snapshot-manifest"),
 		ConsumerIdentity:       map[string]any{"kind": "witness", "id": "pass-driver"},
 	})
 	if err != nil {
@@ -565,11 +565,16 @@ func runAssemble(state *State) error {
 	if err != nil {
 		return err
 	}
-	batches, err := readBatchEvidence(state.RelayBatches)
+	relayRecords, err := relayBatchRecordsFromValidatedPlan(state)
 	if err != nil {
 		return err
 	}
-	relayEvidence := relayEvidenceFromReadyBatches(state)
+	state.RelayBatches = relayRecords
+	batches, err := readBatchEvidence(relayRecords)
+	if err != nil {
+		return err
+	}
+	relayEvidence := relayEvidenceFromReadyBatches(state, relayRecords)
 	receipts, err := readReceipts(config.ReceiptPaths)
 	if err != nil {
 		return err
@@ -605,7 +610,7 @@ func runAssemble(state *State) error {
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
 		{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest},
 	}
-	for _, batch := range state.RelayBatches {
+	for _, batch := range relayRecords {
 		inputSpecs = append(inputSpecs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digest.ClassRawBytes})
 		if portableExportReady(batch.PortableExportDir) {
 			inputSpecs = append(inputSpecs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(batch.PortableExportDir, "manifest.json"), digestClass: digest.ClassRawBytes})
@@ -693,6 +698,7 @@ func runAdjudicate(state *State) error {
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 		PriorLineage:                 priorLineage,
 		PriorLineageProvided:         priorProvided,
+		DriverResumeMode:             true,
 	})
 	if err != nil {
 		return err
@@ -879,8 +885,8 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 func normalizeRoleOutputs(inputs []RoleOutputSpec, stateDir string) ([]RoleOutputSpec, error) {
 	if len(inputs) == 0 {
 		inputs = []RoleOutputSpec{
-			{Role: contracts.RoleDefect, Path: filepath.Join(stateDir, "defect-output.json")},
-			{Role: contracts.RoleEconomy, Path: filepath.Join(stateDir, "economy-output.json")},
+			{Role: contracts.RoleDefect},
+			{Role: contracts.RoleEconomy},
 		}
 	}
 	seen := map[string]bool{}
@@ -897,7 +903,7 @@ func normalizeRoleOutputs(inputs []RoleOutputSpec, stateDir string) ([]RoleOutpu
 		}
 		path := strings.TrimSpace(input.Path)
 		if path == "" {
-			path = filepath.Join(stateDir, role+"-output.json")
+			path = filepath.Join(roleOutputDir(Config{StateDir: stateDir}), role+"-output.json")
 		}
 		absolute, err := absPath(path)
 		if err != nil {
@@ -973,8 +979,8 @@ func setRoleOutputAction(state *State, missing []RoleOutputSpec) {
 	for _, item := range missing {
 		requests = append(requests, RoleOutputRequest{Role: item.Role, Path: item.Path})
 	}
-	snapshotDigest := stageDetailString(state, stageFreeze, "snapshot_digest")
-	charterHash := stageDetailString(state, stageFreeze, "charter_hash")
+	snapshotDigest := stageOutputDigest(state, "source-snapshot-manifest")
+	charterHash := currentCharterHash(state.Config)
 	state.NextAction = NextAction{
 		Type:                 actionCallerRoleOutputs,
 		Roles:                requests,
@@ -1044,9 +1050,18 @@ func nextRelayBatchAction(state *State) *RelayBatchAction {
 	}
 	preflightResult, err := readPreflightResult(state.Config.Outputs.PreflightPath)
 	if err == nil && preflight.RelayAbsent(preflightResult) {
-		markRelayBatchesNotRequired(state)
+		if records, deriveErr := relayBatchRecordsFromValidatedPlan(state); deriveErr == nil {
+			state.RelayBatches = records
+		} else {
+			markRelayBatchesNotRequired(state)
+		}
 		return nil
 	}
+	records, err := relayBatchRecordsFromValidatedPlan(state)
+	if err != nil {
+		return nil
+	}
+	state.RelayBatches = records
 	for index := range state.RelayBatches {
 		batch := &state.RelayBatches[index]
 		if batch.Status == statusNotRequired {
@@ -1058,7 +1073,7 @@ func nextRelayBatchAction(state *State) *RelayBatchAction {
 		}
 		batch.Status = statusPending
 		charterDigest := stageOutputDigest(state, "charter-freeze")
-		snapshotDigest := firstNonEmpty(stageOutputDigest(state, "source-snapshot-manifest"), stageDetailString(state, stageFreeze, "snapshot_digest"))
+		snapshotDigest := stageOutputDigest(state, "source-snapshot-manifest")
 		integrationBundlePath := retainedIntegrationBundlePath(state.Config)
 		integrationBundleDigest := preflightResult.ContractDigests["integration_bundle"]
 		return &RelayBatchAction{
@@ -1112,6 +1127,27 @@ func relayBatchRecords(plan planning.PlanDocument, config Config, relayAbsent bo
 	return records
 }
 
+func relayBatchRecordsFromValidatedPlan(state *State) ([]RelayBatchRecord, error) {
+	plan, err := readPlan(state.Config.Outputs.PlanPath)
+	if err != nil {
+		return nil, err
+	}
+	relayAbsent := false
+	if preflightResult, err := readPreflightResult(state.Config.Outputs.PreflightPath); err == nil {
+		relayAbsent = preflight.RelayAbsent(preflightResult)
+	}
+	records := relayBatchRecords(plan, state.Config, relayAbsent)
+	for index := range records {
+		if records[index].Status == statusNotRequired {
+			continue
+		}
+		if portableExportReady(records[index].PortableExportDir) {
+			records[index].Status = statusComplete
+		}
+	}
+	return records, nil
+}
+
 func recipeID(taskShape string, backend string) string {
 	base := ""
 	switch taskShape {
@@ -1140,13 +1176,13 @@ func portableExportReady(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func relayEvidenceFromReadyBatches(state *State) []planning.RelayEvidence {
+func relayEvidenceFromReadyBatches(state *State, records []RelayBatchRecord) []planning.RelayEvidence {
 	preflightResult, err := readPreflightResult(state.Config.Outputs.PreflightPath)
 	if err == nil && preflight.RelayAbsent(preflightResult) {
 		return nil
 	}
 	var evidence []planning.RelayEvidence
-	for _, batch := range state.RelayBatches {
+	for _, batch := range records {
 		if !portableExportReady(batch.PortableExportDir) {
 			continue
 		}
@@ -1228,6 +1264,14 @@ func stageDetailString(state *State, stageName string, key string) string {
 	return ""
 }
 
+func currentCharterHash(config Config) string {
+	frozen, _, err := readFrozenCharter(config.Outputs.CharterFreezePath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(frozen.CharterHash)
+}
+
 func readState(path string) (*State, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1273,45 +1317,6 @@ func writeState(state *State) error {
 func stateDigest(state State) (string, error) {
 	state.StateDigest = ""
 	return digest.SemanticJSON(state)
-}
-
-func validateRecordedArtifacts(state *State) error {
-	var diagnostics []diag.Diagnostic
-	for _, stage := range state.Stages {
-		if stage.Status != statusComplete {
-			continue
-		}
-		for _, artifact := range append(append([]ArtifactRecord(nil), stage.Inputs...), stage.Outputs...) {
-			actual, err := computeArtifactDigest(artifact.Path, artifact.DigestClass)
-			if err != nil {
-				diagnostics = append(diagnostics, diag.FromError(diag.Wrap(
-					err,
-					CodeStateDrift,
-					"recorded pass artifact could not be revalidated.",
-					diag.WithDetail("stage", stage.Name),
-					diag.WithDetail("role", artifact.Role),
-					diag.WithDetail("path", artifact.Path),
-				)))
-				continue
-			}
-			if actual != artifact.Digest {
-				diagnostics = append(diagnostics, diag.FromError(diag.New(
-					CodeStateDrift,
-					"recorded pass artifact digest changed.",
-					diag.WithDetail("stage", stage.Name),
-					diag.WithDetail("role", artifact.Role),
-					diag.WithDetail("path", artifact.Path),
-					diag.WithDetail("actual_digest", actual),
-					diag.WithDetail("expected_digest", artifact.Digest),
-				)))
-			}
-		}
-	}
-	if len(diagnostics) > 0 {
-		diag.Sort(diagnostics)
-		return &ValidationError{Diagnostics: diagnostics}
-	}
-	return nil
 }
 
 type artifactInput struct {
