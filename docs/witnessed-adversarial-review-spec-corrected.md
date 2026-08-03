@@ -1022,3 +1022,37 @@ changed path; removed paths count as changed. Findings with global/component
 loci or no overlap are routed, not erased: planning records them as advisory
 excluded findings with `application_class: caller_decision`, and adjudication
 emits them as advisory/caller-decision verdicts with reason `out_of_delta`.
+
+---
+
+## 20. Relay-Absent Degraded-Mode Addendum
+
+Relay-absent degraded mode is triggered automatically only when the configured
+relay executable cannot be launched and the relay client reports
+`relay_missing`. No CLI flag enables degraded mode, and other relay command
+failures remain normal blocking preflight diagnostics.
+
+A relay-absent preflight remains manifest-shaped. It writes retained
+capabilities, backend-status, recipes-list, compile-report, contract-digest,
+integration-bundle, and compatibility artifacts. Required backend strata are
+recorded as `relay_absent`, required capabilities are explicitly recorded as
+unavailable, compile reports use status `relay_absent`, and no recipe-plan
+digest is claimed. The integration bundle and selected contract digests remain
+strictly bound; an invalid or missing bundle still fails preflight.
+
+Assembly carries the degraded launch status into the verification manifest's
+existing consumer identity fields, including per-batch relay metadata, and
+records relay batches as `unavailable`. Adjudication still validates the
+verification manifest unconditionally. Findings that require relay evidence in
+a relay-absent pass use the existing `pending_verification` disposition and do
+not introduce a new disposition kind.
+
+Pending-verification metrics distinguish bootstrap relay absence from normal
+backend authentication strata by reporting a `relay_absent` stratum when the
+loaded preflight recorded relay absence.
+
+Version impact: `witness-adjudication-run-result-v2` adds
+`summary.fixpoint_eligible`. It is false whenever any finding remains admitted,
+advisory, pending verification, automatic candidate, or caller decision.
+Historical `witness-adjudication-run-result-v1` inputs remain accepted by the
+metrics reader.

@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"io"
+	"strings"
 
 	"witness/internal/diag"
 	"witness/internal/digest"
@@ -98,6 +99,12 @@ func ValidateRelayCompatibility(document RelayCompatibility) []diag.Diagnostic {
 	if document.SchemaVersion != RelayCompatibilityV3 {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "relay compatibility schema_version must be review-relay-compatibility-v3.", "/schema_version", map[string]any{"expected": RelayCompatibilityV3, "actual": document.SchemaVersion}))
 	}
+	if RelayCompatibilityRelayAbsent(document) {
+		return append(diagnostics, validateRelayAbsentCompatibility(document)...)
+	}
+	if relayCompatibilityHasRelayAbsentStatus(document) {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "relay_absent backend status is valid only when every required backend records relay_absent.", "/backend_status", map[string]any{"expected": RelayLaunchStatusAbsent}))
+	}
 	requireString(&diagnostics, "/convo_relay_version", "convo_relay_version", document.ConvoRelayVersion)
 	if document.DigestProfile != digest.Profile {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "digest_profile must be relay-root-digests-v1.", "/digest_profile", map[string]any{"expected": digest.Profile, "actual": document.DigestProfile}))
@@ -176,6 +183,134 @@ func ValidateRelayCompatibility(document RelayCompatibility) []diag.Diagnostic {
 		requireString(&diagnostics, path+"/status", "backend status", status.Status)
 	}
 	return diagnostics
+}
+
+func RelayCompatibilityRelayAbsent(document RelayCompatibility) bool {
+	statuses := relayBackendStatusByName(document.BackendStatus)
+	if len(statuses) == 0 {
+		return false
+	}
+	for _, backend := range []string{"codex", "claude"} {
+		if statuses[backend] != RelayLaunchStatusAbsent {
+			return false
+		}
+	}
+	return true
+}
+
+func relayCompatibilityHasRelayAbsentStatus(document RelayCompatibility) bool {
+	for _, status := range document.BackendStatus {
+		if status.Status == RelayLaunchStatusAbsent {
+			return true
+		}
+	}
+	return false
+}
+
+func validateRelayAbsentCompatibility(document RelayCompatibility) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if strings.TrimSpace(document.ConvoRelayVersion) != "" {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "convo_relay_version must be omitted when relay launch status is relay_absent.", "/convo_relay_version", map[string]any{"relay_launch_status": RelayLaunchStatusAbsent}))
+	}
+	if document.DigestProfile != digest.Profile {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "digest_profile must be relay-root-digests-v1.", "/digest_profile", map[string]any{"expected": digest.Profile, "actual": document.DigestProfile}))
+	}
+	requireDigest(&diagnostics, "/capabilities_digest", "capabilities_digest", document.CapabilitiesDigest)
+	requireDigest(&diagnostics, "/integration_bundle_digest", "integration_bundle_digest", document.IntegrationBundleDigest)
+	for _, requirement := range RequiredRelayCapabilityClosureV3 {
+		value, exists := document.Capabilities[requirement.Key]
+		if !exists {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "relay-absent compatibility must explicitly record every required capability as unavailable.", "/capabilities/"+requirement.Key, map[string]any{"capability": requirement.Key, "relay_launch_status": RelayLaunchStatusAbsent}))
+			continue
+		}
+		if value {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "relay-absent compatibility must not claim relay capabilities are available.", "/capabilities/"+requirement.Key, map[string]any{"capability": requirement.Key, "relay_launch_status": RelayLaunchStatusAbsent}))
+		}
+	}
+	validateSelectedContractCompatibility(&diagnostics, document.SelectedContracts)
+	if len(document.RecipePlans) > 0 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "relay-absent compatibility must not claim retained recipe plans.", "/recipe_plans", map[string]any{"relay_launch_status": RelayLaunchStatusAbsent}))
+	}
+	validateRelayAbsentCompileReports(&diagnostics, document.CompileReports)
+	validateRelayAbsentBackendStatus(&diagnostics, document.BackendStatus)
+	if !identityPresent(document.ConsumerIdentity) {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidCompatibility, "consumer_identity is required.", "/consumer_identity", nil))
+	}
+	return diagnostics
+}
+
+func validateSelectedContractCompatibility(diagnostics *[]diag.Diagnostic, contracts []ContractDigest) {
+	for index, contract := range contracts {
+		path := "/selected_contracts/" + itoa(index)
+		requireString(diagnostics, path+"/contract_id", "contract ID", contract.ContractID)
+		requireDigest(diagnostics, path+"/digest", "contract digest", contract.Digest)
+	}
+	requiredContracts := []string{
+		"witnessed-review/witness-falsification-v2",
+		"witnessed-review/economy-equivalence-v2",
+	}
+	presentContracts := map[string]bool{}
+	for _, contract := range contracts {
+		presentContracts[contract.ContractID] = true
+	}
+	for _, contractID := range requiredContracts {
+		if !presentContracts[contractID] {
+			*diagnostics = append(*diagnostics, diagnostic(CodeInvalidCompatibility, "relay compatibility manifest must bind the Witness v2 integration contract.", "/selected_contracts", map[string]any{"contract_id": contractID}))
+		}
+	}
+}
+
+func validateRelayAbsentCompileReports(diagnostics *[]diag.Diagnostic, reports []CompileReportRef) {
+	byRecipe := make(map[string]CompileReportRef, len(reports))
+	for index, report := range reports {
+		path := "/compile_reports/" + itoa(index)
+		requireString(diagnostics, path+"/recipe_id", "recipe ID", report.RecipeID)
+		requireString(diagnostics, path+"/status", "compile report status", report.Status)
+		if report.Status != RelayLaunchStatusAbsent {
+			*diagnostics = append(*diagnostics, diagnostic(CodeInvalidCompatibility, "relay-absent compile reports must record relay_absent status.", path+"/status", map[string]any{"actual": report.Status, "expected": RelayLaunchStatusAbsent}))
+		}
+		*diagnostics = append(*diagnostics, prefixDiagnostics(path+"/ref", validateArtifactRef(report.Ref, ""))...)
+		requireDigest(diagnostics, path+"/digest", "compile report digest", report.Digest)
+		if report.Ref.Digest != "" {
+			compareDigest(diagnostics, path+"/ref/digest", "compile report ref", report.Ref.Digest, report.Digest)
+		}
+		byRecipe[report.RecipeID] = report
+	}
+	for _, required := range RequiredWitnessRecipeContractsV2 {
+		report, exists := byRecipe[required.RecipeID]
+		if !exists {
+			*diagnostics = append(*diagnostics, diagnostic(CodeInvalidCompatibility, "relay-absent compatibility must retain a relay_absent compile report for every Witness v2 recipe.", "/compile_reports", map[string]any{"recipe_id": required.RecipeID}))
+			continue
+		}
+		if report.Status != RelayLaunchStatusAbsent {
+			continue
+		}
+	}
+}
+
+func validateRelayAbsentBackendStatus(diagnostics *[]diag.Diagnostic, statuses []BackendStatus) {
+	byBackend := relayBackendStatusByName(statuses)
+	for index, status := range statuses {
+		path := "/backend_status/" + itoa(index)
+		requireString(diagnostics, path+"/backend", "backend", status.Backend)
+		requireString(diagnostics, path+"/status", "backend status", status.Status)
+		if status.Status != RelayLaunchStatusAbsent {
+			*diagnostics = append(*diagnostics, diagnostic(CodeInvalidCompatibility, "relay-absent compatibility must record relay_absent for every backend status.", path+"/status", map[string]any{"backend": status.Backend, "actual": status.Status, "expected": RelayLaunchStatusAbsent}))
+		}
+	}
+	for _, backend := range []string{"codex", "claude"} {
+		if byBackend[backend] != RelayLaunchStatusAbsent {
+			*diagnostics = append(*diagnostics, diagnostic(CodeInvalidCompatibility, "relay-absent compatibility must record every required backend stratum.", "/backend_status", map[string]any{"backend": backend, "expected": RelayLaunchStatusAbsent}))
+		}
+	}
+}
+
+func relayBackendStatusByName(statuses []BackendStatus) map[string]string {
+	byBackend := make(map[string]string, len(statuses))
+	for _, status := range statuses {
+		byBackend[status.Backend] = status.Status
+	}
+	return byBackend
 }
 
 func RelayCompatibilityDigest(document RelayCompatibility) (string, error) {

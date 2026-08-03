@@ -112,6 +112,11 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	if len(manifest.ConsumerIdentity) == 0 {
 		manifest.ConsumerIdentity = cloneIdentity(options.Plan.ConsumerIdentity)
 	}
+	relayLaunchStatus := ""
+	if options.EvidenceRefs.RelayCompatibility != nil && contracts.RelayCompatibilityRelayAbsent(*options.EvidenceRefs.RelayCompatibility) {
+		relayLaunchStatus = contracts.RelayLaunchStatusAbsent
+		attachRelayLaunchStatus(&manifest, relayLaunchStatus)
+	}
 	if refDiagnostics := validateManifestEvidenceRefs(options.Plan, options.EvidenceRefs); len(refDiagnostics) > 0 {
 		diagnostics = append(diagnostics, refDiagnostics...)
 		for _, planned := range options.Plan.Batches {
@@ -155,7 +160,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			BatchDigest: planned.BatchDigest,
 		}
 		relay, hasRelay := relayByID[planned.BatchID]
-		attachRelayBatchMetadata(&manifest, planned, relay)
+		attachRelayBatchMetadata(&manifest, planned, relay, relayLaunchStatus)
 		batchEvidence, hasBatch := batchesByID[planned.BatchID]
 		if !hasBatch {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
@@ -395,7 +400,17 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	return result, nil
 }
 
-func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned BatchPlan, relay RelayEvidence) {
+func attachRelayLaunchStatus(manifest *contracts.VerificationManifest, status string) {
+	if strings.TrimSpace(status) == "" {
+		return
+	}
+	if manifest.ConsumerIdentity == nil {
+		manifest.ConsumerIdentity = map[string]any{}
+	}
+	manifest.ConsumerIdentity["witness_relay_launch_status"] = status
+}
+
+func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned BatchPlan, relay RelayEvidence, relayLaunchStatus string) {
 	if manifest.ConsumerIdentity == nil {
 		manifest.ConsumerIdentity = map[string]any{}
 	}
@@ -411,6 +426,9 @@ func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned 
 	entry := map[string]any{
 		"recipe_family": recipeFamily,
 		"finding_ids":   append([]string(nil), planned.FindingIDs...),
+	}
+	if strings.TrimSpace(relayLaunchStatus) != "" {
+		entry["relay_launch_status"] = relayLaunchStatus
 	}
 	if backend := strings.TrimSpace(relay.Backend); backend != "" {
 		entry["backend"] = backend

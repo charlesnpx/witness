@@ -233,20 +233,25 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonSeverityCapped)
 	})
 
-	t.Run("missing relay verification preserves capped severity as pending", func(t *testing.T) {
+	t.Run("relay absent high severity cannot forge a clean pass", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
 		finding := defectFinding("finding-pending", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
 		roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
+		manifest := manifestWithRelayStatus(frozen, artifactDigest, contracts.RecordStatusUnavailable, "relay_verification_unavailable")
+		manifest.ConsumerIdentity["witness_relay_launch_status"] = contracts.RelayLaunchStatusAbsent
 		result := runAdjudication(t, runInput{
 			frozen:      frozen,
 			roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-			manifest:    manifestWithRelayStatus(frozen, artifactDigest, contracts.RecordStatusUnavailable, "relay_verification_unavailable"),
+			manifest:    manifest,
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionPendingVerification)
 		assertSeverity(t, got, contracts.SeverityHigh)
 		assertHasReason(t, got, ReasonRelayVerificationUnavailable)
+		if result.Summary.PendingVerification != 1 || result.Summary.FixpointEligible {
+			t.Fatalf("summary = %#v, want pending_verification=1 and fixpoint_eligible=false", result.Summary)
+		}
 	})
 
 	t.Run("survived retains strength", func(t *testing.T) {

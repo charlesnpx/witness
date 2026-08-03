@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	ResultSchemaVersion = "witness-adjudication-run-result-v1"
+	ResultSchemaVersionV1 = "witness-adjudication-run-result-v1"
+	ResultSchemaVersion   = "witness-adjudication-run-result-v2"
 
 	CodeInvalidInput              = "adjudicate_invalid_input"
 	CodeInvalidFrozenCharter      = "adjudicate_invalid_frozen_charter"
@@ -112,12 +113,13 @@ type Result struct {
 }
 
 type Summary struct {
-	Admitted            int `json:"admitted"`
-	Advisory            int `json:"advisory"`
-	PendingVerification int `json:"pending_verification"`
-	AutomaticCandidate  int `json:"automatic_candidate"`
-	CallerDecision      int `json:"caller_decision"`
-	None                int `json:"none"`
+	Admitted            int  `json:"admitted"`
+	Advisory            int  `json:"advisory"`
+	PendingVerification int  `json:"pending_verification"`
+	AutomaticCandidate  int  `json:"automatic_candidate"`
+	CallerDecision      int  `json:"caller_decision"`
+	None                int  `json:"none"`
+	FixpointEligible    bool `json:"fixpoint_eligible"`
 }
 
 type FindingVerdict struct {
@@ -1271,6 +1273,11 @@ func summarize(findings []FindingVerdict) Summary {
 			summary.None++
 		}
 	}
+	summary.FixpointEligible = summary.Admitted == 0 &&
+		summary.Advisory == 0 &&
+		summary.PendingVerification == 0 &&
+		summary.AutomaticCandidate == 0 &&
+		summary.CallerDecision == 0
 	return summary
 }
 

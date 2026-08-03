@@ -1,6 +1,7 @@
 package preflight
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -292,6 +293,39 @@ func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 	}
 	if compatibilityPayloadDigest != compatibilityDigest || result.ArtifactDigests["compatibility-manifest.json"] != compatibilityDigest {
 		t.Fatalf("compatibility digest payload=%s result=%s recomputed=%s", compatibilityPayloadDigest, result.ArtifactDigests["compatibility-manifest.json"], compatibilityDigest)
+	}
+}
+
+func TestRunRelayPresentRetainsFixtureCapabilitiesByteIdentical(t *testing.T) {
+	fixtures := filepath.Join("..", "..", "testdata", "preflight")
+	stateDir := t.TempDir()
+	result, err := Run(context.Background(), Options{
+		RelayPath:             "fake-relay",
+		IntegrationBundlePath: filepath.Join(fixtures, "integration-bundle-v2.fixture.json"),
+		StateDir:              stateDir,
+		Runner:                fakeRunner{t: t, fixtures: fixtures},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
+	}
+	if RelayAbsent(*result) {
+		t.Fatalf("backend strata = %#v, unexpectedly relay_absent", result.BackendStrata)
+	}
+	retainedCapabilities, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "relay-capabilities.json"))
+	expectedCapabilities, err := canonjson.Marshal(loadFixture[any](t, "relay-capabilities-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(retainedCapabilities, expectedCapabilities) {
+		t.Fatalf("retained capabilities payload changed\nactual: %s\nwant:   %s", retainedCapabilities, expectedCapabilities)
+	}
+	compatibilityBytes, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "compatibility-manifest.json"))
+	compatibility, err := contracts.ReadRelayCompatibilityBytes(compatibilityBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contracts.RelayCompatibilityRelayAbsent(compatibility) {
+		t.Fatalf("compatibility backend status = %#v, unexpectedly relay_absent", compatibility.BackendStatus)
 	}
 }
 

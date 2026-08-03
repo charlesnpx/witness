@@ -58,6 +58,47 @@ func TestAssembleInvalidReceiptAndMissingRelayRemainPending(t *testing.T) {
 	}
 }
 
+func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	refs := relayAbsentManifestEvidenceRefs()
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBindingForRefs(t, refs),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  planResult.Batches[0].Plan.BatchID,
+			Document: planResult.Batches[0].Document,
+		}},
+		EvidenceRefs: refs,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if result.Manifest.ConsumerIdentity["witness_relay_launch_status"] != contracts.RelayLaunchStatusAbsent {
+		t.Fatalf("consumer identity = %#v, want relay_absent launch status", result.Manifest.ConsumerIdentity)
+	}
+	rawBatches, ok := result.Manifest.ConsumerIdentity["witness_relay_batches"].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", result.Manifest.ConsumerIdentity)
+	}
+	batch, ok := rawBatches[planResult.Plan.Batches[0].BatchID].(map[string]any)
+	if !ok || batch["relay_launch_status"] != contracts.RelayLaunchStatusAbsent {
+		t.Fatalf("batch metadata = %#v, want relay_absent launch status", rawBatches)
+	}
+	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("manifest batches = %#v, want unavailable relay-absent batch", result.Manifest.Batches)
+	}
+}
+
 func TestAssembleRejectsBatchEvidenceThatDoesNotMatchPlan(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
@@ -738,6 +779,11 @@ func TestAssembleRejectsSelectedContractManifestEvidenceMismatch(t *testing.T) {
 func planningTestPreflightBinding(t *testing.T) PreflightBinding {
 	t.Helper()
 	refs := validManifestEvidenceRefs()
+	return planningTestPreflightBindingForRefs(t, refs)
+}
+
+func planningTestPreflightBindingForRefs(t *testing.T, refs ManifestEvidenceRefs) PreflightBinding {
+	t.Helper()
 	return PreflightBinding{
 		SnapshotDigest:          testDigest("artifact"),
 		CompatibilityDigest:     refs.CompatibilityManifest.Digest,
@@ -838,6 +884,27 @@ func validManifestEvidenceRefs() ManifestEvidenceRefs {
 		SelectedContractEvidence: selectedContractEvidence,
 		ConsumerIdentity:         map[string]any{"kind": "test", "id": "consumer"},
 	}
+}
+
+func relayAbsentManifestEvidenceRefs() ManifestEvidenceRefs {
+	refs := validManifestEvidenceRefs()
+	compatibility := *refs.RelayCompatibility
+	compatibility.ConvoRelayVersion = ""
+	for key := range compatibility.Capabilities {
+		compatibility.Capabilities[key] = false
+	}
+	compatibility.RecipePlans = nil
+	for index := range compatibility.CompileReports {
+		compatibility.CompileReports[index].Status = contracts.RelayLaunchStatusAbsent
+	}
+	compatibility.BackendStatus = []contracts.BackendStatus{
+		{Backend: "codex", Status: contracts.RelayLaunchStatusAbsent},
+		{Backend: "claude", Status: contracts.RelayLaunchStatusAbsent},
+	}
+	compatibilityDigest, _ := contracts.RelayCompatibilityDigest(compatibility)
+	refs.CompatibilityManifest.Digest = compatibilityDigest
+	refs.RelayCompatibility = &compatibility
+	return refs
 }
 
 func removePlanningRenderedPromptRef(t *testing.T, portableDir string, kind string, id string) {
