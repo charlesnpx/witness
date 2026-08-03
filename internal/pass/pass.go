@@ -38,6 +38,7 @@ const (
 	CodeStateExistsInvalid    = "pass_state_exists_invalid"
 	CodeStateUnsupported      = "pass_state_unsupported"
 	CodeStateDigestMismatch   = "pass_state_digest_mismatch"
+	CodeStateInvalid          = "pass_state_invalid"
 	CodeStateDrift            = "pass_state_drift"
 	CodeStateDirInsideSource  = "pass_state_dir_inside_source"
 	CodeInvalidRoleOutputSpec = "pass_invalid_role_output_spec"
@@ -130,13 +131,14 @@ type Config struct {
 }
 
 type Outputs struct {
-	StatePath         string `json:"state_path"`
-	CharterFreezePath string `json:"charter_freeze_path"`
-	PreflightPath     string `json:"preflight_path"`
-	PlanPath          string `json:"plan_path"`
-	ManifestPath      string `json:"manifest_path"`
-	RunResultPath     string `json:"run_result_path"`
-	MetricsPath       string `json:"metrics_path"`
+	StatePath          string `json:"state_path"`
+	CharterFreezePath  string `json:"charter_freeze_path"`
+	PreflightPath      string `json:"preflight_path"`
+	PlanPath           string `json:"plan_path"`
+	ManifestPath       string `json:"manifest_path"`
+	AssembleResultPath string `json:"assemble_result_path,omitempty"`
+	RunResultPath      string `json:"run_result_path"`
+	MetricsPath        string `json:"metrics_path"`
 }
 
 type State struct {
@@ -198,14 +200,18 @@ type RoleOutputRequest struct {
 }
 
 type RelayBatchAction struct {
-	BatchID               string   `json:"batch_id"`
-	RecipeID              string   `json:"recipe_id"`
-	RecipeFamily          string   `json:"recipe_family"`
-	Backend               string   `json:"backend,omitempty"`
-	BatchPath             string   `json:"batch_path"`
-	PortableExportDir     string   `json:"portable_export_dir"`
-	IntegrationBundlePath string   `json:"integration_bundle_path"`
-	InputBindings         []string `json:"input_bindings"`
+	BatchID                 string   `json:"batch_id"`
+	RecipeID                string   `json:"recipe_id"`
+	RecipeFamily            string   `json:"recipe_family"`
+	Backend                 string   `json:"backend,omitempty"`
+	BatchPath               string   `json:"batch_path"`
+	BatchDigest             string   `json:"batch_digest"`
+	PortableExportDir       string   `json:"portable_export_dir"`
+	IntegrationBundlePath   string   `json:"integration_bundle_path"`
+	IntegrationBundleDigest string   `json:"integration_bundle_digest"`
+	CharterDigest           string   `json:"charter_digest"`
+	SnapshotDigest          string   `json:"snapshot_digest"`
+	InputBindings           []string `json:"input_bindings"`
 }
 
 type Invocation struct {
@@ -265,7 +271,11 @@ func Resume(ctx context.Context, options ResumeOptions) (*Invocation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateRecordedArtifacts(state); err != nil {
+	applyOutputDefaults(&state.Config)
+	if err := rejectDriverOutputAliases(state.Config); err != nil {
+		return nil, err
+	}
+	if err := validateLoadedState(state); err != nil {
 		return nil, err
 	}
 	return advance(ctx, state)
@@ -414,23 +424,16 @@ func runFreeze(ctx context.Context, state *State) error {
 func runPreflight(ctx context.Context, state *State) error {
 	config := state.Config
 	result, err := preflight.Run(ctx, preflight.Options{
-		RelayPath:             config.RelayPath,
-		IntegrationBundlePath: config.IntegrationBundlePath,
-		StateDir:              config.StateDir,
-		ConsumerIdentity:      map[string]any{"kind": "witness", "id": "pass-driver"},
+		RelayPath:              config.RelayPath,
+		IntegrationBundlePath:  config.IntegrationBundlePath,
+		StateDir:               config.StateDir,
+		SnapshotManifestPath:   config.SnapshotManifestPath,
+		ExpectedSnapshotDigest: stageDetailString(state, stageFreeze, "snapshot_digest"),
+		ConsumerIdentity:       map[string]any{"kind": "witness", "id": "pass-driver"},
 	})
 	if err != nil {
 		return err
 	}
-	snapshotDigest := stageDetailString(state, stageFreeze, "snapshot_digest")
-	if snapshotDigest == "" {
-		return diag.New(CodeInvalidState, "pass freeze stage is missing the snapshot digest.")
-	}
-	result.SnapshotDigest = snapshotDigest
-	if result.ArtifactDigests == nil {
-		result.ArtifactDigests = map[string]string{}
-	}
-	result.ArtifactDigests["source-snapshot-manifest"] = snapshotDigest
 	if err := writeCanonicalFile(config.Outputs.PreflightPath, result); err != nil {
 		return err
 	}
@@ -587,7 +590,7 @@ func runAssemble(state *State) error {
 		ReceiptHMACKeyFile: config.ReceiptHMACKeyFile,
 	})
 	if result != nil {
-		if writeErr := writeCanonicalFile(config.Outputs.ManifestPath, result.Manifest); writeErr != nil {
+		if writeErr := writeAssembleArtifacts(config, result); writeErr != nil {
 			return writeErr
 		}
 	}
@@ -611,11 +614,16 @@ func runAssemble(state *State) error {
 	for _, path := range config.ReceiptPaths {
 		inputSpecs = append(inputSpecs, artifactInput{role: "receipt", path: path, digestClass: digest.ClassRawBytes})
 	}
+	receiptInputs, err := receiptArtifactInputs(config, receipts)
+	if err != nil {
+		return err
+	}
+	inputSpecs = append(inputSpecs, receiptInputs...)
 	inputs, err := artifactRecordsForExistingFiles(inputSpecs)
 	if err != nil {
 		return err
 	}
-	outputs, err := artifactRecordsForExistingFiles([]artifactInput{{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digest.ClassRawBytes}})
+	outputs, err := artifactRecordsForExistingFiles(assembleOutputSpecs(config, result))
 	if err != nil {
 		return err
 	}
@@ -629,8 +637,9 @@ func runAssemble(state *State) error {
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"manifest_digest": manifestDigest,
-			"pending_count":   len(result.PendingVerification),
+			"manifest_digest":               manifestDigest,
+			"pending_count":                 len(result.PendingVerification),
+			"unverified_relationship_count": len(result.UnverifiedRelationships),
 		},
 	})
 	return nil
@@ -670,12 +679,13 @@ func runAdjudicate(state *State) error {
 	if err != nil {
 		return err
 	}
-	result, err := adjudicate.Run(adjudicate.Options{
-		FrozenCharter:                &frozen,
+	service, err := RunAdjudicationService(AdjudicationOptions{
+		FrozenCharter:                frozen,
 		RoleOutputs:                  roleOutputs,
 		Manifest:                     manifest,
 		BaseManifest:                 changeSurface.BaseManifest,
 		HeadManifest:                 changeSurface.HeadManifest,
+		LedgerPath:                   config.LedgerPath,
 		ReceiptOutputDir:             config.ReceiptOutputDir,
 		ReceiptHMACKeyFile:           config.ReceiptHMACKeyFile,
 		Rules:                        effective.Rules,
@@ -684,13 +694,20 @@ func runAdjudicate(state *State) error {
 		PriorLineage:                 priorLineage,
 		PriorLineageProvided:         priorProvided,
 	})
+	if err != nil {
+		return err
+	}
+	result := service.Result
 	if result != nil {
 		if writeErr := writeCanonicalFile(config.Outputs.RunResultPath, result); writeErr != nil {
 			return writeErr
 		}
 	}
-	if err != nil {
-		return err
+	if service.RunErr != nil {
+		return service.RunErr
+	}
+	if result == nil {
+		return diag.New(CodeInvalidState, "adjudication did not produce a run result.")
 	}
 	inputSpecs := []artifactInput{
 		{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digest.ClassRawBytes},
@@ -807,13 +824,14 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		Backend:              strings.TrimSpace(options.Backend),
 		BaselinePass:         options.BaselinePass,
 		Outputs: Outputs{
-			StatePath:         filepath.Join(stateDir, StateFileName),
-			CharterFreezePath: filepath.Join(stateDir, "charter.freeze.json"),
-			PreflightPath:     filepath.Join(stateDir, "preflight.json"),
-			PlanPath:          filepath.Join(stateDir, "verification-plan.json"),
-			ManifestPath:      filepath.Join(stateDir, "verification", "index.json"),
-			RunResultPath:     filepath.Join(stateDir, "verdict.json"),
-			MetricsPath:       filepath.Join(stateDir, "metrics.json"),
+			StatePath:          filepath.Join(stateDir, StateFileName),
+			CharterFreezePath:  filepath.Join(stateDir, "charter.freeze.json"),
+			PreflightPath:      filepath.Join(stateDir, "preflight.json"),
+			PlanPath:           filepath.Join(stateDir, "verification-plan.json"),
+			ManifestPath:       filepath.Join(stateDir, "verification", "index.json"),
+			AssembleResultPath: filepath.Join(stateDir, "verification", "assemble-result.json"),
+			RunResultPath:      filepath.Join(stateDir, "verdict.json"),
+			MetricsPath:        filepath.Join(stateDir, "metrics.json"),
 		},
 	}
 	for _, assign := range []struct {
@@ -851,6 +869,9 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		if absolute != "" {
 			config.ReceiptPaths = append(config.ReceiptPaths, absolute)
 		}
+	}
+	if err := rejectDriverOutputAliases(config); err != nil {
+		return Config{}, err
 	}
 	return config, nil
 }
@@ -1036,18 +1057,27 @@ func nextRelayBatchAction(state *State) *RelayBatchAction {
 			continue
 		}
 		batch.Status = statusPending
+		charterDigest := stageOutputDigest(state, "charter-freeze")
+		snapshotDigest := firstNonEmpty(stageOutputDigest(state, "source-snapshot-manifest"), stageDetailString(state, stageFreeze, "snapshot_digest"))
+		integrationBundlePath := retainedIntegrationBundlePath(state.Config)
+		integrationBundleDigest := preflightResult.ContractDigests["integration_bundle"]
 		return &RelayBatchAction{
-			BatchID:               batch.BatchID,
-			RecipeID:              batch.RecipeID,
-			RecipeFamily:          batch.RecipeFamily,
-			Backend:               state.Config.Backend,
-			BatchPath:             batch.BatchPath,
-			PortableExportDir:     batch.PortableExportDir,
-			IntegrationBundlePath: state.Config.IntegrationBundlePath,
+			BatchID:                 batch.BatchID,
+			RecipeID:                batch.RecipeID,
+			RecipeFamily:            batch.RecipeFamily,
+			Backend:                 state.Config.Backend,
+			BatchPath:               batch.BatchPath,
+			BatchDigest:             batch.BatchDigest,
+			PortableExportDir:       batch.PortableExportDir,
+			IntegrationBundlePath:   integrationBundlePath,
+			IntegrationBundleDigest: integrationBundleDigest,
+			CharterDigest:           charterDigest,
+			SnapshotDigest:          snapshotDigest,
 			InputBindings: []string{
-				"charter=" + state.Config.Outputs.CharterFreezePath,
-				"findings=" + batch.BatchPath,
-				"artifact=" + state.Config.SnapshotManifestPath,
+				boundInput("charter", state.Config.Outputs.CharterFreezePath, charterDigest),
+				boundInput("findings", batch.BatchPath, batch.BatchDigest),
+				boundInput("artifact", state.Config.SnapshotManifestPath, snapshotDigest),
+				boundInput("integration_bundle", integrationBundlePath, integrationBundleDigest),
 			},
 		}
 	}
@@ -1230,6 +1260,7 @@ func readState(path string) (*State, error) {
 func writeState(state *State) error {
 	state.SchemaVersion = StateSchemaVersion
 	state.DigestProfile = digest.Profile
+	applyOutputDefaults(&state.Config)
 	state.StateDir = state.Config.StateDir
 	value, err := stateDigest(*state)
 	if err != nil {

@@ -508,12 +508,13 @@ func runAdjudicate(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := adjudicate.Run(adjudicate.Options{
-		FrozenCharter:                &frozen,
+	service, err := passdriver.RunAdjudicationService(passdriver.AdjudicationOptions{
+		FrozenCharter:                frozen,
 		RoleOutputs:                  inputs,
 		Manifest:                     manifest,
 		BaseManifest:                 changeSurfaceInput.BaseManifest,
 		HeadManifest:                 changeSurfaceInput.HeadManifest,
+		LedgerPath:                   *ledgerPath,
 		ReceiptOutputDir:             *receiptOutputDir,
 		ReceiptHMACKeyFile:           *receiptHMACKeyFile,
 		Rules:                        effective.Rules,
@@ -522,18 +523,16 @@ func runAdjudicate(args []string) error {
 		PriorLineage:                 priorLineage,
 		PriorLineageProvided:         priorLineageProvided,
 	})
-	if result != nil {
-		if *ledgerPath != "" {
-			if _, appendErr := appendAdjudicationLineage(*ledgerPath, result, inputs, frozen); appendErr != nil {
-				return appendErr
-			}
-		}
-		if writeErr := writeCanonical(*out, result); writeErr != nil {
+	if err != nil {
+		return err
+	}
+	if service.Result != nil {
+		if writeErr := writeCanonical(*out, service.Result); writeErr != nil {
 			return writeErr
 		}
 	}
-	if err != nil {
-		return err
+	if service.RunErr != nil {
+		return service.RunErr
 	}
 	return nil
 }
@@ -568,130 +567,11 @@ func runMetrics(args []string) error {
 }
 
 func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) ([]ledger.Record, error) {
-	if result == nil || result.ResultDigest == "" {
-		return nil, diag.New(diag.CodeInvalidCommand, "adjudication result is missing a run digest.")
-	}
-	records, err := readLedgerRecordsIfSet(path)
-	if err != nil {
-		return nil, err
-	}
-	duplicate, err := ledger.ContainsRunDigest(records, result.ResultDigest)
-	if err != nil {
-		return nil, err
-	}
-	if duplicate {
-		return nil, ledger.DuplicateRunDigestError(result.ResultDigest)
-	}
-	return ledger.AppendEvents(path, adjudicationLedgerEvents(result, inputs, frozen))
+	return passdriver.AppendAdjudicationLineage(path, result, inputs, frozen)
 }
 
 func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) []ledger.EventToAppend {
-	questions := adjudicationMissingGoalQuestions(inputs)
-	events := []ledger.EventToAppend{{
-		Kind: ledger.EventKindAdjudicationRun,
-		Payload: ledger.AdjudicationRunEvent{
-			RunDigest:                 result.ResultDigest,
-			ResultSchemaVersion:       result.SchemaVersion,
-			PolicyID:                  result.PolicyID,
-			PolicyDigest:              result.PolicyDigest,
-			RulesDigest:               result.RulesDigest,
-			CharterHash:               result.CharterHash,
-			ArtifactDigest:            result.ArtifactDigest,
-			ManifestDigest:            result.ManifestDigest,
-			CapReleaseCharterMismatch: result.CapReleaseCharterMismatch,
-			FindingCount:              len(result.Findings),
-			PendingVerificationCount:  result.Summary.PendingVerification,
-			AutomaticCandidateCount:   result.Summary.AutomaticCandidate,
-			CallerDecisionCount:       result.Summary.CallerDecision,
-			PolicyDecisionRecordCount: len(result.Findings),
-			MissingGoalQuestionCount:  len(questions),
-		},
-	}}
-	for _, finding := range result.Findings {
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindFinding,
-			Payload: ledger.FindingEvent{
-				FindingID:      finding.FindingID,
-				FindingKey:     finding.FindingKey,
-				WitnessDigest:  finding.WitnessDigest,
-				CharterHash:    result.CharterHash,
-				ArtifactDigest: result.ArtifactDigest,
-				Finding:        findingPayloadForLedger(finding),
-			},
-		})
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindVerdict,
-			Payload: ledger.VerdictEvent{
-				RunDigest:         result.ResultDigest,
-				FindingID:         finding.FindingID,
-				Role:              finding.Role,
-				Kind:              finding.Kind,
-				Disposition:       finding.Disposition,
-				ApplicationClass:  finding.ApplicationClass,
-				ClaimedSeverity:   finding.ClaimedSeverity,
-				EffectiveSeverity: finding.EffectiveSeverity,
-				SeverityCap:       finding.SeverityCap,
-				Reasons:           finding.Reasons,
-				FindingDigest:     finding.FindingDigest,
-				WitnessDigest:     finding.WitnessDigest,
-				VerdictClass:      finding.VerdictClass,
-			},
-		})
-	}
-	for _, question := range questions {
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindQuestion,
-			Payload: ledger.QuestionEvent{
-				RunDigest:        result.ResultDigest,
-				QuestionID:       question.ID,
-				FindingID:        question.FindingID,
-				Dimension:        question.Dimension,
-				AnchorIndex:      ledger.IntPtr(question.AnchorIndex),
-				Property:         question.Property,
-				Value:            question.Value,
-				AffectedDecision: question.AffectedDecision,
-				CharterHash:      result.CharterHash,
-				Statement:        question.Statement,
-			},
-		})
-	}
-	for _, finding := range result.Findings {
-		if finding.Disposition != contracts.DispositionPendingVerification {
-			continue
-		}
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindPendingVerification,
-			Payload: ledger.PendingVerificationEvent{
-				RunDigest:      result.ResultDigest,
-				FindingID:      finding.FindingID,
-				VerificationID: pendingVerificationID(result.ResultDigest, finding.FindingID),
-				Status:         finding.Disposition,
-			},
-		})
-	}
-	operationalEnvelopePresent := frozen.Charter.OperationalEnvelope != nil
-	for _, finding := range result.Findings {
-		allow := finding.ApplicationClass == contracts.ApplicationClassAutomaticCandidate
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindPolicyDecision,
-			Payload: ledger.PolicyDecisionEvent{
-				RunDigest:                  result.ResultDigest,
-				Allow:                      ledger.BoolPtr(allow),
-				Reasons:                    policyDecisionReasons(finding),
-				PolicyID:                   result.PolicyID,
-				PolicyDigest:               result.PolicyDigest,
-				RulesDigest:                result.RulesDigest,
-				CharterHash:                result.CharterHash,
-				CapReleaseCharterMismatch:  result.CapReleaseCharterMismatch,
-				CapReleaseUnit:             result.CapReleaseUnit,
-				PositiveCapAllowanceUsed:   false,
-				FindingID:                  finding.FindingID,
-				ApplicationClass:           finding.ApplicationClass,
-				OperationalEnvelopePresent: operationalEnvelopePresent,
-			},
-		})
-	}
-	return events
+	return passdriver.AdjudicationLedgerEvents(result, inputs, frozen)
 }
 
 func findingPayloadForLedger(finding adjudicate.FindingVerdict) map[string]any {
