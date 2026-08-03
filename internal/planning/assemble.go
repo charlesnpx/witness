@@ -107,16 +107,13 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 		IntegrationBundle:     options.EvidenceRefs.IntegrationBundle,
 		SelectedContracts:     append([]contracts.ArtifactRef(nil), options.EvidenceRefs.SelectedContracts...),
 		ExcludedFindings:      manifestExcludedFindings(options.Plan.ExcludedFindings),
-		ConsumerIdentity:      cloneIdentity(options.EvidenceRefs.ConsumerIdentity),
+		ConsumerIdentity:      sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
 	}
 	if len(manifest.ConsumerIdentity) == 0 {
-		manifest.ConsumerIdentity = cloneIdentity(options.Plan.ConsumerIdentity)
+		manifest.ConsumerIdentity = sanitizedManifestConsumerIdentity(options.Plan.ConsumerIdentity)
 	}
-	relayLaunchStatus := ""
-	if options.EvidenceRefs.RelayCompatibility != nil && contracts.RelayCompatibilityRelayAbsent(*options.EvidenceRefs.RelayCompatibility) {
-		relayLaunchStatus = contracts.RelayLaunchStatusAbsent
-		attachRelayLaunchStatus(&manifest, relayLaunchStatus)
-	}
+	relayLaunchStatus := relayLaunchStatusForCompatibility(options.EvidenceRefs.RelayCompatibility)
+	attachRelayLaunchStatus(&manifest, relayLaunchStatus)
 	if refDiagnostics := validateManifestEvidenceRefs(options.Plan, options.EvidenceRefs); len(refDiagnostics) > 0 {
 		diagnostics = append(diagnostics, refDiagnostics...)
 		for _, planned := range options.Plan.Batches {
@@ -407,17 +404,17 @@ func attachRelayLaunchStatus(manifest *contracts.VerificationManifest, status st
 	if manifest.ConsumerIdentity == nil {
 		manifest.ConsumerIdentity = map[string]any{}
 	}
-	manifest.ConsumerIdentity["witness_relay_launch_status"] = status
+	manifest.ConsumerIdentity[contracts.VerificationManifestRelayLaunchStatusKey] = status
 }
 
 func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned BatchPlan, relay RelayEvidence, relayLaunchStatus string) {
 	if manifest.ConsumerIdentity == nil {
 		manifest.ConsumerIdentity = map[string]any{}
 	}
-	raw, _ := manifest.ConsumerIdentity["witness_relay_batches"].(map[string]any)
+	raw, _ := manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
 	if raw == nil {
 		raw = map[string]any{}
-		manifest.ConsumerIdentity["witness_relay_batches"] = raw
+		manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey] = raw
 	}
 	recipeFamily := strings.TrimSpace(relay.RecipeFamily)
 	if recipeFamily == "" {
@@ -428,12 +425,52 @@ func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned 
 		"finding_ids":   append([]string(nil), planned.FindingIDs...),
 	}
 	if strings.TrimSpace(relayLaunchStatus) != "" {
-		entry["relay_launch_status"] = relayLaunchStatus
+		entry[contracts.VerificationManifestBatchRelayLaunchStatusKey] = relayLaunchStatus
 	}
 	if backend := strings.TrimSpace(relay.Backend); backend != "" {
 		entry["backend"] = backend
 	}
 	raw[planned.BatchID] = entry
+}
+
+func relayLaunchStatusForCompatibility(compatibility *contracts.RelayCompatibility) string {
+	if compatibility == nil {
+		return ""
+	}
+	if contracts.RelayCompatibilityRelayAbsent(*compatibility) {
+		return contracts.RelayLaunchStatusAbsent
+	}
+	return contracts.RelayLaunchStatusPresent
+}
+
+func sanitizedManifestConsumerIdentity(input map[string]any) map[string]any {
+	identity := cloneIdentity(input)
+	if len(identity) == 0 {
+		return nil
+	}
+	delete(identity, contracts.VerificationManifestRelayLaunchStatusKey)
+	rawBatches, ok := identity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	if !ok {
+		return identity
+	}
+	batches := make(map[string]any, len(rawBatches))
+	for batchID, raw := range rawBatches {
+		object, ok := raw.(map[string]any)
+		if !ok {
+			batches[batchID] = raw
+			continue
+		}
+		copied := make(map[string]any, len(object))
+		for key, value := range object {
+			if key == contracts.VerificationManifestBatchRelayLaunchStatusKey {
+				continue
+			}
+			copied[key] = value
+		}
+		batches[batchID] = copied
+	}
+	identity[contracts.VerificationManifestRelayBatchesKey] = batches
+	return identity
 }
 
 func validateBatchEvidenceMatchesPlan(planned BatchPlan, evidence BatchEvidence) []diag.Diagnostic {

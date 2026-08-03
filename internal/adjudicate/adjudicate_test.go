@@ -1231,16 +1231,19 @@ func manifestWithDuplicateRelayBatches(t *testing.T, frozen charter.FrozenCharte
 		ConsumerIdentity: map[string]any{
 			"kind": "test",
 			"id":   "consumer",
+			contracts.VerificationManifestRelayLaunchStatusKey: contracts.RelayLaunchStatusPresent,
 			"witness_relay_batches": map[string]any{
 				"batch-a": map[string]any{
 					"recipe_family": "witness-falsify-v2",
 					"backend":       "codex",
 					"finding_ids":   []string{finding.ID},
+					contracts.VerificationManifestBatchRelayLaunchStatusKey: contracts.RelayLaunchStatusPresent,
 				},
 				"batch-b": map[string]any{
 					"recipe_family": "witness-falsify-v2",
 					"backend":       "claude",
 					"finding_ids":   []string{finding.ID},
+					contracts.VerificationManifestBatchRelayLaunchStatusKey: contracts.RelayLaunchStatusPresent,
 				},
 			},
 		},

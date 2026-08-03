@@ -2,11 +2,18 @@ package contracts
 
 import (
 	"io"
+	"strings"
 
 	"witness/internal/changesurface"
 	"witness/internal/diag"
 	"witness/internal/digest"
 	"witness/internal/strictjson"
+)
+
+const (
+	VerificationManifestRelayLaunchStatusKey      = "witness_relay_launch_status"
+	VerificationManifestRelayBatchesKey           = "witness_relay_batches"
+	VerificationManifestBatchRelayLaunchStatusKey = "relay_launch_status"
 )
 
 type VerificationManifest struct {
@@ -154,6 +161,7 @@ func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnost
 	if !identityPresent(document.ConsumerIdentity) {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "consumer_identity is required.", "/consumer_identity", nil))
 	}
+	diagnostics = append(diagnostics, validateManifestRelayLaunchStatus(document)...)
 	for index, batch := range document.Batches {
 		diagnostics = append(diagnostics, validateManifestBatch(batch, "/batches/"+itoa(index))...)
 	}
@@ -164,6 +172,139 @@ func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnost
 		diagnostics = append(diagnostics, validateExecutionReceiptRecord(receipt, "/execution_receipts/"+itoa(index))...)
 	}
 	return diagnostics
+}
+
+func validateManifestRelayLaunchStatus(document VerificationManifest) []diag.Diagnostic {
+	identity := document.ConsumerIdentity
+	if len(identity) == 0 {
+		return nil
+	}
+	globalValue, globalMarkerPresent := identity[VerificationManifestRelayLaunchStatusKey]
+	rawBatches, batchMetadataPresent := identity[VerificationManifestRelayBatchesKey]
+	if !globalMarkerPresent && !batchMetadataPresent {
+		return nil
+	}
+	var diagnostics []diag.Diagnostic
+	globalStatus, globalStatusOK := manifestRelayLaunchStatus(globalValue)
+	globalStatusValid := globalMarkerPresent && globalStatusOK && validRelayLaunchStatus(globalStatus)
+	if !globalMarkerPresent {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidManifest,
+			"consumer_identity witness_relay_launch_status is required when relay batch metadata is present.",
+			"/consumer_identity/"+VerificationManifestRelayLaunchStatusKey,
+			nil,
+		))
+	} else if !globalStatusOK || !validRelayLaunchStatus(globalStatus) {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidManifest,
+			"consumer_identity witness_relay_launch_status has an unsupported value.",
+			"/consumer_identity/"+VerificationManifestRelayLaunchStatusKey,
+			map[string]any{"value": globalValue},
+		))
+	}
+	if !batchMetadataPresent {
+		return diagnostics
+	}
+	batches, ok := rawBatches.(map[string]any)
+	if !ok {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidManifest,
+			"consumer_identity witness_relay_batches must be an object when present.",
+			"/consumer_identity/"+VerificationManifestRelayBatchesKey,
+			nil,
+		))
+		return diagnostics
+	}
+	knownBatchIDs := make(map[string]bool, len(document.Batches))
+	for _, batch := range document.Batches {
+		knownBatchIDs[batch.BatchID] = true
+		path := appendPointer("/consumer_identity/"+VerificationManifestRelayBatchesKey, batch.BatchID)
+		raw, exists := batches[batch.BatchID]
+		if !exists {
+			if globalMarkerPresent {
+				diagnostics = append(diagnostics, diagnostic(
+					CodeInvalidManifest,
+					"consumer_identity relay batch metadata is required when relay launch status is recorded.",
+					path,
+					map[string]any{"batch_id": batch.BatchID},
+				))
+			}
+			continue
+		}
+		diagnostics = append(diagnostics, validateManifestRelayBatchLaunchStatus(raw, path, globalStatus, globalStatusValid)...)
+	}
+	for batchID, raw := range batches {
+		if knownBatchIDs[batchID] {
+			continue
+		}
+		path := appendPointer("/consumer_identity/"+VerificationManifestRelayBatchesKey, batchID)
+		diagnostics = append(diagnostics, validateManifestExtraRelayBatchLaunchStatus(raw, path, globalStatus, globalStatusValid)...)
+	}
+	return diagnostics
+}
+
+func validateManifestRelayBatchLaunchStatus(raw any, path string, globalStatus string, globalStatusValid bool) []diag.Diagnostic {
+	object, ok := raw.(map[string]any)
+	if !ok {
+		return []diag.Diagnostic{diagnostic(CodeInvalidManifest, "consumer_identity relay batch metadata must be an object.", path, nil)}
+	}
+	value, exists := object[VerificationManifestBatchRelayLaunchStatusKey]
+	status, statusOK := manifestRelayLaunchStatus(value)
+	statusPath := path + "/" + VerificationManifestBatchRelayLaunchStatusKey
+	if !exists {
+		return []diag.Diagnostic{diagnostic(
+			CodeInvalidManifest,
+			"consumer_identity relay batch metadata requires relay_launch_status.",
+			statusPath,
+			nil,
+		)}
+	}
+	return validateManifestRelayBatchStatusValue(value, status, statusOK, statusPath, globalStatus, globalStatusValid)
+}
+
+func validateManifestExtraRelayBatchLaunchStatus(raw any, path string, globalStatus string, globalStatusValid bool) []diag.Diagnostic {
+	object, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	value, exists := object[VerificationManifestBatchRelayLaunchStatusKey]
+	if !exists {
+		return nil
+	}
+	status, statusOK := manifestRelayLaunchStatus(value)
+	return validateManifestRelayBatchStatusValue(value, status, statusOK, path+"/"+VerificationManifestBatchRelayLaunchStatusKey, globalStatus, globalStatusValid)
+}
+
+func validateManifestRelayBatchStatusValue(value any, status string, statusOK bool, path string, globalStatus string, globalStatusValid bool) []diag.Diagnostic {
+	if !statusOK || !validRelayLaunchStatus(status) {
+		return []diag.Diagnostic{diagnostic(
+			CodeInvalidManifest,
+			"consumer_identity relay batch metadata relay_launch_status has an unsupported value.",
+			path,
+			map[string]any{"value": value},
+		)}
+	}
+	if globalStatusValid && status != globalStatus {
+		return []diag.Diagnostic{diagnostic(
+			CodeInvalidManifest,
+			"consumer_identity relay batch metadata relay_launch_status does not match witness_relay_launch_status.",
+			path,
+			map[string]any{"actual": status, "expected": globalStatus},
+		)}
+	}
+	return nil
+}
+
+func manifestRelayLaunchStatus(value any) (string, bool) {
+	status, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(status), true
+}
+
+func validRelayLaunchStatus(status string) bool {
+	return status == RelayLaunchStatusAbsent || status == RelayLaunchStatusPresent
 }
 
 func validateManifestChangeSurface(document VerificationManifest) []diag.Diagnostic {

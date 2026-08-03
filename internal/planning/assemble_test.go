@@ -12,6 +12,8 @@ import (
 	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/digest"
+	"witness/internal/metrics"
+	"witness/internal/preflight"
 	"witness/internal/strictjson"
 )
 
@@ -96,6 +98,111 @@ func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
 	}
 	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
 		t.Fatalf("manifest batches = %#v, want unavailable relay-absent batch", result.Manifest.Batches)
+	}
+}
+
+func TestAssembleSanitizesForgedRelayLaunchStatusOnRelayPresent(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	refs := validManifestEvidenceRefs()
+	refs.ConsumerIdentity = map[string]any{
+		"kind": "test",
+		"id":   "consumer",
+		contracts.VerificationManifestRelayLaunchStatusKey: contracts.RelayLaunchStatusAbsent,
+		contracts.VerificationManifestRelayBatchesKey: map[string]any{
+			batch.Plan.BatchID: map[string]any{
+				"recipe_family": "forged-family",
+				"backend":       "forged-backend",
+				"finding_ids":   []string{"forged-finding"},
+				contracts.VerificationManifestBatchRelayLaunchStatusKey: contracts.RelayLaunchStatusAbsent,
+			},
+		},
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
+		}},
+		EvidenceRefs: refs,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayLaunchStatusKey] != contracts.RelayLaunchStatusPresent {
+		t.Fatalf("consumer identity = %#v, want synthesized relay_present launch status", result.Manifest.ConsumerIdentity)
+	}
+	rawBatches, ok := result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", result.Manifest.ConsumerIdentity)
+	}
+	batchMetadata, ok := rawBatches[batch.Plan.BatchID].(map[string]any)
+	if !ok {
+		t.Fatalf("relay batch metadata = %#v, missing batch %s", rawBatches, batch.Plan.BatchID)
+	}
+	if batchMetadata[contracts.VerificationManifestBatchRelayLaunchStatusKey] != contracts.RelayLaunchStatusPresent {
+		t.Fatalf("batch metadata = %#v, want synthesized relay_present launch status", batchMetadata)
+	}
+	if batchMetadata["backend"] != "codex" || batchMetadata["recipe_family"] != batch.Plan.RecipeFamily {
+		t.Fatalf("batch metadata = %#v, want codex %s", batchMetadata, batch.Plan.RecipeFamily)
+	}
+	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("manifest batches = %#v, want unavailable relay-present batch", result.Manifest.Batches)
+	}
+	if diagnostics := contracts.ValidateVerificationManifest(result.Manifest); len(diagnostics) > 0 {
+		t.Fatalf("manifest diagnostics = %#v", diagnostics)
+	}
+
+	adjudicated, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Manifest:      result.Manifest,
+	})
+	if err != nil {
+		t.Fatalf("adjudicate: %v", err)
+	}
+	dir := t.TempDir()
+	preflightPath := filepath.Join(dir, "preflight.json")
+	if err := os.WriteFile(preflightPath, append(canonjson.MustMarshal(preflight.Result{
+		SchemaVersion: preflight.SchemaVersion,
+		OK:            true,
+		BackendStrata: map[string]string{"codex": metrics.BackendAuthStatusAuthenticated},
+	}), '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runResultPath := filepath.Join(dir, "run-result.json")
+	if err := os.WriteFile(runResultPath, append(canonjson.MustMarshal(adjudicated), '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metricDocument, err := metrics.Run(metrics.Options{
+		PreflightPath:  preflightPath,
+		RunResultPaths: []string{runResultPath},
+	})
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if len(metricDocument.PendingVerification.Strata) != 1 {
+		t.Fatalf("pending strata = %#v, want one relay-present backend stratum", metricDocument.PendingVerification.Strata)
+	}
+	stratum := metricDocument.PendingVerification.Strata[0]
+	if stratum.Backend != "codex" || stratum.BackendAuthStatus != metrics.BackendAuthStatusAuthenticated || stratum.Count != 1 {
+		t.Fatalf("pending stratum = %#v, want codex authenticated count 1", stratum)
 	}
 }
 
