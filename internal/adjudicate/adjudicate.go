@@ -241,6 +241,7 @@ func Run(options Options) (*Result, error) {
 	global = append(global, validateManifestEnvelope(options.Manifest, options.FrozenCharter)...)
 	global = append(global, validateManifestScopePolicy(options.Manifest, scopePolicy)...)
 	global = append(global, validateManifestChangeSurfaceDerivation(options.Manifest, options.BaseManifest, options.HeadManifest)...)
+	global = append(global, validateManifestExclusionChangeSurface(options.Manifest, scopePolicy)...)
 	global = append(global, validateManifestExclusionCoverage(options.Manifest, options.RoleOutputs)...)
 	if len(global) > 0 {
 		return nil, &ValidationError{Diagnostics: global}
@@ -447,6 +448,28 @@ func validateManifestChangeSurfaceDerivation(manifest contracts.VerificationMani
 	}
 	diagnostics := changesurface.ValidateDeclaredDerivation(*manifest.ChangeSurface, manifest.ChangeSurfaceDigest, base, head, manifest.ArtifactDigest)
 	return prefixDiagnostics("/manifest/change_surface", diagnostics)
+}
+
+func validateManifestExclusionChangeSurface(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
+	if len(manifest.ExcludedFindings) == 0 {
+		return nil
+	}
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
+		return nil
+	}
+	diagnostics := make([]diag.Diagnostic, 0, len(manifest.ExcludedFindings))
+	for index := range manifest.ExcludedFindings {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidManifest,
+			"excluded findings require delta_obligating scope policy with a derived change surface.",
+			"/manifest/excluded_findings/"+itoa(index),
+			map[string]any{
+				"scope_policy":       scopePolicy,
+				"has_change_surface": manifest.ChangeSurface != nil,
+			},
+		))
+	}
+	return diagnostics
 }
 
 type exclusionCoverageFinding struct {

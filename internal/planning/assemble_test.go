@@ -517,6 +517,57 @@ func TestAssembleDeclaredChangeSurfaceRequiresDerivationManifests(t *testing.T) 
 	}
 }
 
+func TestAssembleRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("included", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     planningTestPreflightBinding(t),
+		ChangeSurface: ChangeSurfaceInput{BaselinePass: true},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) != 1 || len(planResult.Plan.ExcludedFindings) != 0 || planResult.Plan.ChangeSurface != nil || planResult.Plan.BaselinePass == nil {
+		t.Fatalf("plan = %#v, want baseline-pass plan with included finding", planResult.Plan)
+	}
+	batch := planResult.Batches[0]
+	tamperedPlan := planResult.Plan
+	tamperedPlan.ExcludedFindings = []ExcludedFinding{{
+		Role:                   contracts.RoleDefect,
+		FindingID:              finding.ID,
+		SourceRoleOutputRef:    batch.Plan.SourceRoleOutputRef,
+		SourceRoleOutputDigest: batch.Plan.SourceRoleOutputDigest,
+		Disposition:            contracts.DispositionAdvisory,
+		ApplicationClass:       contracts.ApplicationClassCallerDecision,
+		Reason:                 contracts.ReasonOutOfDelta,
+	}}
+	if err := stampPlanDigest(&tamperedPlan); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: tamperedPlan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a baseline-pass plan with a fabricated out_of_delta exclusion")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for input-level exclusion rejection", result)
+	}
+	if planningErrorCode(err) != CodeInvalidManifest {
+		t.Fatalf("err = %v, want %s", err, CodeInvalidManifest)
+	}
+}
+
 func TestAssembleRejectsV1PlanBeforeDigestAcceptance(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)

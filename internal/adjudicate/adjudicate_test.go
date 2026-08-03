@@ -553,6 +553,55 @@ func TestAdjudicationRederivesDeclaredChangeSurface(t *testing.T) {
 	assertErrorHasDiagnostic(t, err, changesurface.CodeInvalidChangeSurface, "/manifest/change_surface/change_surface_digest")
 }
 
+func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *testing.T) {
+	frozen := testFrozenCharter(t)
+	artifactDigest := testDigest("artifact")
+	finding := defectFinding("included", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
+	roleOutputDigest, err := contracts.RoleOutputDigest(roleOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil)
+	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.BaselinePass = &changesurface.BaselinePass{
+		Declared: true,
+		Reason:   changesurface.BaselinePassReasonExplicit,
+	}
+	manifest.ExcludedFindings = []contracts.ExcludedFindingRecord{{
+		Role:      contracts.RoleDefect,
+		FindingID: finding.ID,
+		SourceRoleOutputRef: contracts.ArtifactRef{
+			Kind:          "role-output",
+			ID:            "defect-json",
+			Digest:        roleOutputDigest,
+			DigestProfile: digest.Profile,
+			MediaType:     "application/json",
+		},
+		SourceRoleOutputDigest: roleOutputDigest,
+		Reason:                 contracts.ReasonOutOfDelta,
+		Disposition:            contracts.DispositionAdvisory,
+		ApplicationClass:       contracts.ApplicationClassCallerDecision,
+	}}
+	policyDocument := contracts.DefaultReviewPolicy()
+	policyDocument.PolicyID = "delta-policy"
+	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
+
+	result, err := Run(Options{
+		FrozenCharter: &frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Manifest:      manifest,
+		Policy:        policyDocument,
+	})
+	if err == nil {
+		t.Fatalf("Run result=%#v err=nil, want baseline-pass exclusion rejection", result)
+	}
+	if result != nil {
+		t.Fatalf("Run result=%#v, want nil on global manifest failure", result)
+	}
+	assertErrorHasDiagnostic(t, err, CodeInvalidManifest, "/manifest/excluded_findings/0")
+}
+
 func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
 	frozen := testFrozenCharter(t)
 	artifactDigest := testDigest("artifact")

@@ -88,6 +88,9 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	if diagnostics := validatePlanChangeSurfaceDerivation(options.Plan, options.BaseManifest, options.HeadManifest); len(diagnostics) > 0 {
 		return nil, &ValidationError{Diagnostics: diagnostics}
 	}
+	if diagnostics := validatePlanExclusionChangeSurface(options.Plan); len(diagnostics) > 0 {
+		return nil, &ValidationError{Diagnostics: diagnostics}
+	}
 	result := &AssembleResult{}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
@@ -509,6 +512,26 @@ func validatePlanChangeSurfaceDerivation(plan PlanDocument, base *freeze.Manifes
 	}
 	diagnostics := changesurface.ValidateDeclaredDerivation(*plan.ChangeSurface, plan.ChangeSurfaceDigest, base, head, plan.ArtifactDigest)
 	return prefixDiagnosticPaths("/change_surface", diagnostics)
+}
+
+func validatePlanExclusionChangeSurface(plan PlanDocument) []diag.Diagnostic {
+	if plan.ScopePolicy == contracts.ScopePolicyDeltaObligating && plan.ChangeSurface != nil {
+		return nil
+	}
+	var diagnostics []diag.Diagnostic
+	for index, item := range plan.ExcludedFindings {
+		if item.Reason != contracts.ReasonOutOfDelta {
+			continue
+		}
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidManifest,
+			"out_of_delta excluded findings require delta_obligating scope policy with a derived change surface.",
+			diag.WithPath(fmt.Sprintf("/excluded_findings/%d", index)),
+			diag.WithDetail("scope_policy", plan.ScopePolicy),
+			diag.WithDetail("has_change_surface", plan.ChangeSurface != nil),
+		)))
+	}
+	return diagnostics
 }
 
 func manifestExcludedFindings(excluded []ExcludedFinding) []contracts.ExcludedFindingRecord {
