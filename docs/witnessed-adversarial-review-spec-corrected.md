@@ -1056,3 +1056,44 @@ Version impact: `witness-adjudication-run-result-v2` adds
 advisory, pending verification, automatic candidate, or caller decision.
 Historical `witness-adjudication-run-result-v1` inputs remain accepted by the
 metrics reader.
+
+---
+
+## 21. Pass Driver and Charter Bootstrap Addendum
+
+`witness pass begin` and `witness pass resume` provide the deterministic pass
+driver CLI surface. The driver sequences only deterministic Witness stages:
+Charter/source freeze, preflight, planning after caller-produced role outputs,
+assembly after caller-produced relay evidence when required, adjudication, and
+metrics. It never calls models, never launches relay verification batches,
+never applies findings, and owns no iteration or convergence loop.
+
+The driver persists `witness-pass-state-v1` as canonical JSON under the pass
+state directory. The state document records completed stages, exact input and
+output artifact paths and digests, relay batch evidence locations when batches
+exist, the next action, and a `state_digest` computed over the state document
+with `state_digest` blank. Every resume verifies the state digest and all
+recorded artifact digests before advancing; drift fails closed with a typed
+diagnostic.
+
+After each invocation the driver writes a canonical
+`witness-pass-next-action-v1` JSON document to stdout and a concise human
+summary to stderr. The next action is either the next `witness pass resume`
+command, a caller instruction to produce role outputs for named roles at the
+recorded snapshot digest into recorded paths, a caller instruction to run one
+relay batch with the recorded recipe and portable-export directory, or
+`complete`. Relay-absent degraded passes keep the existing degraded preflight,
+manifest, adjudication, and metrics behavior; the driver reports the degraded
+backend strata and skips relay-batch caller actions when relay evidence is not
+required.
+
+`witness charter init -template` adds embedded owner-editable template data:
+`minimal`, `delta-review`, and `whole-tree-audit`. Templates emit ordinary
+`review-charter-v2` documents and do not add freezing, hashing, or judgment
+semantics.
+
+Version impact: one new persisted surface,
+`witness-pass-state-v1`, and one driver invocation output surface,
+`witness-pass-next-action-v1`. Existing Charter, freeze, preflight, plan,
+manifest, adjudication, metrics, receipt, pending, DELTA1, and DEGRADE1
+surfaces are not bumped.

@@ -22,6 +22,7 @@ import (
 	"witness/internal/freeze"
 	"witness/internal/ledger"
 	"witness/internal/metrics"
+	passdriver "witness/internal/pass"
 	"witness/internal/planning"
 	"witness/internal/policy"
 	"witness/internal/preflight"
@@ -56,6 +57,10 @@ var witnessCommands = map[string]map[string]bool{
 		"show":              true,
 		"release-caps":      true,
 		"check-application": true,
+	},
+	"pass": {
+		"begin":  true,
+		"resume": true,
 	},
 }
 
@@ -117,6 +122,9 @@ func route(args []string) error {
 			}
 			if args[0] == "policy" {
 				return runPolicy(args[1], args[2:])
+			}
+			if args[0] == "pass" {
+				return runPass(args[1], args[2:])
 			}
 			return notImplemented(strings.Join(args[:2], " "))
 		}
@@ -1904,6 +1912,114 @@ func notImplemented(command string) error {
 	)
 }
 
+func runPass(command string, args []string) error {
+	switch command {
+	case "begin":
+		return runPassBegin(args)
+	case "resume":
+		return runPassResume(args)
+	default:
+		return notImplemented("pass " + command)
+	}
+}
+
+func runPassBegin(args []string) error {
+	flags := newFlagSet("witness pass begin")
+	stateDir := flags.String("state-dir", "", "pass state directory")
+	charterPath := flags.String("charter", "", "charter JSON path")
+	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
+	sourceDir := flags.String("source-dir", "", "reviewed source directory")
+	snapshotDir := flags.String("snapshot-dir", "", "source snapshot directory; defaults under -state-dir")
+	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
+	relayPath := flags.String("relay", "", "convo-relay executable path")
+	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
+	backend := flags.String("backend", "", "relay backend suffix for reported verification recipes")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface derivation")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface derivation")
+	baselinePass := flags.Bool("baseline-pass", false, "record an explicit whole-tree baseline pass under delta_obligating scope")
+	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
+	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
+	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
+	var roleOutputSpecs repeatedStrings
+	var receiptPaths repeatedStrings
+	flags.Var(&roleOutputSpecs, "role-output", "role=path for caller-produced role output; may be repeated")
+	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	roleOutputs, err := passRoleOutputs(roleOutputSpecs)
+	if err != nil {
+		return err
+	}
+	invocation, err := passdriver.Begin(context.Background(), passdriver.BeginOptions{
+		StateDir:              *stateDir,
+		CharterPath:           *charterPath,
+		AmendmentsPath:        *amendmentsPath,
+		SourceDir:             *sourceDir,
+		SnapshotDir:           *snapshotDir,
+		AllowNonGitSource:     *allowNonGitSource,
+		RelayPath:             *relayPath,
+		IntegrationBundlePath: *integrationBundlePath,
+		Backend:               *backend,
+		PolicyPath:            *policyPath,
+		RulesPath:             *rulesPath,
+		LedgerPath:            *ledgerPath,
+		BaseManifestPath:      *baseManifestPath,
+		HeadManifestPath:      *headManifestPath,
+		BaselinePass:          *baselinePass,
+		PriorLineagePath:      *priorLineagePath,
+		ReceiptOutputDir:      *receiptOutputDir,
+		ReceiptHMACKeyFile:    *receiptHMACKeyFile,
+		RoleOutputs:           roleOutputs,
+		ReceiptPaths:          append([]string(nil), receiptPaths...),
+	})
+	if err != nil {
+		return err
+	}
+	return writePassInvocation(invocation)
+}
+
+func runPassResume(args []string) error {
+	flags := newFlagSet("witness pass resume")
+	stateDir := flags.String("state-dir", "", "pass state directory")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	invocation, err := passdriver.Resume(context.Background(), passdriver.ResumeOptions{StateDir: *stateDir})
+	if err != nil {
+		return err
+	}
+	return writePassInvocation(invocation)
+}
+
+func writePassInvocation(invocation *passdriver.Invocation) error {
+	if invocation != nil && invocation.HumanSummary() != "" {
+		fmt.Fprintln(os.Stderr, invocation.HumanSummary())
+	}
+	return diag.WriteCanonical(os.Stdout, invocation)
+}
+
+func passRoleOutputs(values []string) ([]passdriver.RoleOutputSpec, error) {
+	outputs := make([]passdriver.RoleOutputSpec, 0, len(values))
+	for _, value := range values {
+		role, path, ok := splitKeyValueSpec(value)
+		if !ok || role == "" || path == "" {
+			return nil, diag.New(passdriver.CodeInvalidRoleOutputSpec, "pass -role-output values must use role=path.", diag.WithDetail("value", value))
+		}
+		outputs = append(outputs, passdriver.RoleOutputSpec{Role: role, Path: path})
+	}
+	return outputs, nil
+}
+
 func runCharter(command string, args []string) error {
 	switch command {
 	case "init":
@@ -1922,6 +2038,7 @@ func runCharter(command string, args []string) error {
 func runCharterInit(args []string) error {
 	flags := newFlagSet("witness charter init")
 	out := flags.String("out", "", "charter skeleton path")
+	template := flags.String("template", charter.TemplateMinimal, "charter template name")
 	actor := flags.String("actor", "owner", "owner actor")
 	eventID := flags.String("event-id", "initial-charter", "initial owner event ID")
 	summary := flags.String("summary", "Initial owner-authorized charter skeleton.", "initial owner event summary")
@@ -1934,7 +2051,15 @@ func runCharterInit(args []string) error {
 	if *out == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness charter init requires -out.")
 	}
-	skeleton := charter.InitSkeleton(*actor, *eventID, *summary)
+	skeleton, ok := charter.InitTemplate(*template, *actor, *eventID, *summary)
+	if !ok {
+		return diag.New(
+			diag.CodeInvalidCommand,
+			"unknown charter template.",
+			diag.WithDetail("template", *template),
+			diag.WithDetail("available_templates", charter.TemplateNames()),
+		)
+	}
 	if _, err := charter.Normalize(skeleton, nil); err != nil {
 		return err
 	}
@@ -2398,6 +2523,10 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var metricsValidation *metrics.ValidationError
 	if errors.As(err, &metricsValidation) {
 		return metricsValidation.Diagnostics
+	}
+	var passValidation *passdriver.ValidationError
+	if errors.As(err, &passValidation) {
+		return passValidation.Diagnostics
 	}
 	var preflightError *preflight.Error
 	if errors.As(err, &preflightError) {
