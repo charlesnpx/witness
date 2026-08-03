@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/diag"
 	"witness/internal/digest"
@@ -341,6 +342,40 @@ func TestVerificationBatchPreservesExplicitEmptyWitnessArtifactRefs(t *testing.T
 	}
 	if diagnostics := ValidateVerificationBatch(roundTrip, &document); len(diagnostics) > 0 {
 		t.Fatalf("round-trip batch diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestFindingInChangeSurfaceUsesExecutableTransformationRef(t *testing.T) {
+	surface := changesurface.Document{
+		SchemaVersion:      changesurface.SchemaVersion,
+		DigestProfile:      digest.Profile,
+		BaseArtifactDigest: testDigest("base"),
+		HeadArtifactDigest: testDigest("head"),
+		ChangedPaths: []changesurface.PathChange{{
+			Path:        "changed.go",
+			ChangeKinds: []string{changesurface.ChangeKindModified},
+		}},
+	}
+	finding := Finding{
+		ID: "finding-transform",
+		Witness: Witness{
+			Strength: WitnessStrengthExecutable,
+			Executable: &ExecutableSpec{
+				Argv:                []string{"go", "test"},
+				CWD:                 ".",
+				ExpectedObservation: "tests pass",
+				TransformationRef: &ArtifactRef{
+					Kind:          "patch",
+					ID:            "changed.go",
+					Digest:        testDigest("patch"),
+					DigestProfile: digest.Profile,
+					MediaType:     "text/plain",
+				},
+			},
+		},
+	}
+	if !FindingInChangeSurface(finding, surface) {
+		t.Fatal("FindingInChangeSurface returned false for executable transformation_ref path")
 	}
 }
 

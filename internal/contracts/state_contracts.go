@@ -23,6 +23,7 @@ type VerificationManifest struct {
 	IntegrationBundle     ArtifactRef                      `json:"integration_bundle"`
 	SelectedContracts     []ArtifactRef                    `json:"selected_contracts"`
 	Batches               []VerificationManifestBatch      `json:"batches"`
+	ExcludedFindings      []ExcludedFindingRecord          `json:"excluded_findings,omitempty"`
 	ExecutionReceipts     []ExecutionReceiptManifestRecord `json:"execution_receipts,omitempty"`
 	ConsumerIdentity      map[string]any                   `json:"consumer_identity"`
 }
@@ -45,6 +46,16 @@ type ExecutionReceiptManifestRecord struct {
 	ReceiptRef    *ArtifactRef `json:"receipt_ref,omitempty"`
 	ReceiptDigest string       `json:"receipt_digest,omitempty"`
 	FailureReason string       `json:"failure_reason,omitempty"`
+}
+
+type ExcludedFindingRecord struct {
+	Role                   string      `json:"role"`
+	FindingID              string      `json:"finding_id"`
+	SourceRoleOutputRef    ArtifactRef `json:"source_role_output_ref"`
+	SourceRoleOutputDigest string      `json:"source_role_output_digest"`
+	Reason                 string      `json:"reason"`
+	Disposition            string      `json:"disposition"`
+	ApplicationClass       string      `json:"application_class"`
 }
 
 type ExecutionReceipt struct {
@@ -146,6 +157,9 @@ func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnost
 	for index, batch := range document.Batches {
 		diagnostics = append(diagnostics, validateManifestBatch(batch, "/batches/"+itoa(index))...)
 	}
+	for index, excluded := range document.ExcludedFindings {
+		diagnostics = append(diagnostics, validateExcludedFindingRecord(excluded, "/excluded_findings/"+itoa(index))...)
+	}
 	for index, receipt := range document.ExecutionReceipts {
 		diagnostics = append(diagnostics, validateExecutionReceiptRecord(receipt, "/execution_receipts/"+itoa(index))...)
 	}
@@ -239,6 +253,30 @@ func validateExecutionReceiptRecord(record ExecutionReceiptManifestRecord, path 
 	}
 	if record.ReceiptRef != nil && record.ReceiptDigest != "" {
 		compareDigest(&diagnostics, path+"/receipt_ref/digest", "receipt ref", record.ReceiptRef.Digest, record.ReceiptDigest)
+	}
+	return diagnostics
+}
+
+func validateExcludedFindingRecord(record ExcludedFindingRecord, path string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	requireEnum(&diagnostics, path+"/role", "role", record.Role, stringSet(RoleDefect, RoleEconomy), CodeInvalidManifest)
+	requireStableID(&diagnostics, path+"/finding_id", "finding ID", record.FindingID)
+	diagnostics = append(diagnostics, prefixDiagnostics(path+"/source_role_output_ref", validateArtifactRef(record.SourceRoleOutputRef, ""))...)
+	if record.SourceRoleOutputRef.Kind != "" && record.SourceRoleOutputRef.Kind != "role-output" {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding source_role_output_ref must reference a role-output artifact.", path+"/source_role_output_ref/kind", map[string]any{"actual": record.SourceRoleOutputRef.Kind, "expected": "role-output"}))
+	}
+	requireDigest(&diagnostics, path+"/source_role_output_digest", "source role-output digest", record.SourceRoleOutputDigest)
+	if record.SourceRoleOutputRef.Digest != "" && record.SourceRoleOutputDigest != "" {
+		compareDigest(&diagnostics, path+"/source_role_output_ref/digest", "source role-output reference", record.SourceRoleOutputRef.Digest, record.SourceRoleOutputDigest)
+	}
+	if record.Reason != ReasonOutOfDelta {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding reason must be out_of_delta.", path+"/reason", map[string]any{"actual": record.Reason, "expected": ReasonOutOfDelta}))
+	}
+	if record.Disposition != DispositionAdvisory {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding disposition must be advisory.", path+"/disposition", map[string]any{"actual": record.Disposition, "expected": DispositionAdvisory}))
+	}
+	if record.ApplicationClass != ApplicationClassCallerDecision {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding application_class must be caller_decision.", path+"/application_class", map[string]any{"actual": record.ApplicationClass, "expected": ApplicationClassCallerDecision}))
 	}
 	return diagnostics
 }

@@ -12,6 +12,7 @@ import (
 	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/harness"
 	"witness/internal/planning"
 )
@@ -472,7 +473,7 @@ func TestApplicationClassIsIndependentFromDisposition(t *testing.T) {
 
 func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 	frozen := testFrozenCharter(t)
-	artifactDigest := testDigest("artifact")
+	baseManifest, headManifest, artifactDigest := adjudicationDeltaManifests(t)
 	inDelta := defectFinding("in-delta", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
 	inDelta.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/touched.go"}}
 	outOfDelta := defectFinding("out-of-delta", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
@@ -485,17 +486,7 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 		survivedVerdict(t, outOfDelta),
 		survivedVerdict(t, deleted),
 	}, nil)
-	surface := changesurface.Document{
-		SchemaVersion:      changesurface.SchemaVersion,
-		DigestProfile:      digest.Profile,
-		BaseArtifactDigest: testDigest("base"),
-		HeadArtifactDigest: artifactDigest,
-		ChangedPaths: []changesurface.PathChange{
-			{Path: "internal/deleted.go", ChangeKinds: []string{changesurface.ChangeKindRemoved}},
-			{Path: "internal/touched.go", ChangeKinds: []string{changesurface.ChangeKindModified}},
-		},
-	}
-	surfaceDigest, err := changesurface.Digest(surface)
+	surface, surfaceDigest, err := changesurface.Derive(baseManifest, headManifest, artifactDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,10 +498,12 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
 
 	result := runAdjudication(t, runInput{
-		frozen:      frozen,
-		roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		manifest:    manifest,
-		policy:      policyDocument,
+		frozen:       frozen,
+		roleOutputs:  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		manifest:     manifest,
+		baseManifest: &baseManifest,
+		headManifest: &headManifest,
+		policy:       policyDocument,
 	})
 	byID := findingsByID(result)
 	assertDisposition(t, byID["in-delta"], contracts.DispositionAdmitted)
@@ -521,6 +514,43 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 	if result.Summary.Advisory != 1 {
 		t.Fatalf("summary = %#v, want one advisory finding", result.Summary)
 	}
+}
+
+func TestAdjudicationRederivesDeclaredChangeSurface(t *testing.T) {
+	frozen := testFrozenCharter(t)
+	baseManifest, headManifest, artifactDigest := adjudicationDeltaManifests(t)
+	finding := defectFinding("in-delta", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/touched.go"}}
+	roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
+	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil)
+	surface, _, err := changesurface.Derive(baseManifest, headManifest, artifactDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface.ChangedPaths = []changesurface.PathChange{{Path: "internal/other.go", ChangeKinds: []string{changesurface.ChangeKindModified}}}
+	surfaceDigest, err := changesurface.Digest(surface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ChangeSurface = &surface
+	manifest.ChangeSurfaceDigest = surfaceDigest
+	policyDocument := contracts.DefaultReviewPolicy()
+	policyDocument.PolicyID = "delta-policy"
+	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
+
+	result, err := Run(Options{
+		FrozenCharter: &frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Manifest:      manifest,
+		Policy:        policyDocument,
+		BaseManifest:  &baseManifest,
+		HeadManifest:  &headManifest,
+	})
+	if err == nil {
+		t.Fatalf("Run result=%#v err=nil, want change surface derivation rejection", result)
+	}
+	assertErrorHasDiagnostic(t, err, changesurface.CodeInvalidChangeSurface, "/manifest/change_surface/change_surface_digest")
 }
 
 func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
@@ -607,6 +637,8 @@ type runInput struct {
 	frozen                       charter.FrozenCharter
 	roleOutputs                  []RoleOutputInput
 	manifest                     contracts.VerificationManifest
+	baseManifest                 *freeze.Manifest
+	headManifest                 *freeze.Manifest
 	receiptDir                   string
 	receiptKey                   []byte
 	rules                        contracts.ReviewRules
@@ -622,6 +654,8 @@ func runAdjudication(t *testing.T, input runInput) *Result {
 		FrozenCharter:                &input.frozen,
 		RoleOutputs:                  input.roleOutputs,
 		Manifest:                     input.manifest,
+		BaseManifest:                 input.baseManifest,
+		HeadManifest:                 input.headManifest,
 		ReceiptOutputDir:             input.receiptDir,
 		ReceiptHMACKey:               input.receiptKey,
 		Rules:                        input.rules,
@@ -782,6 +816,43 @@ func roleOutputFor(frozen charter.FrozenCharter, role string, artifactDigest str
 			"id":   "consumer",
 		},
 		Findings: findings,
+	}
+}
+
+func adjudicationDeltaManifests(t *testing.T) (freeze.Manifest, freeze.Manifest, string) {
+	t.Helper()
+	baseManifest := freeze.Manifest{
+		SchemaVersion: freeze.SchemaVersion,
+		DigestProfile: digest.Profile,
+		Files: []freeze.FileEntry{
+			adjudicationManifestFile("internal/deleted.go", "100644", "deleted"),
+			adjudicationManifestFile("internal/touched.go", "100644", "old"),
+			adjudicationManifestFile("internal/untouched.go", "100644", "same"),
+		},
+	}
+	headManifest := freeze.Manifest{
+		SchemaVersion: freeze.SchemaVersion,
+		DigestProfile: digest.Profile,
+		Files: []freeze.FileEntry{
+			adjudicationManifestFile("internal/touched.go", "100644", "new"),
+			adjudicationManifestFile("internal/untouched.go", "100644", "same"),
+		},
+	}
+	headDigest, err := freeze.ManifestDigest(headManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return baseManifest, headManifest, headDigest
+}
+
+func adjudicationManifestFile(path string, mode string, content string) freeze.FileEntry {
+	sum := digest.RawBytes([]byte(content))
+	return freeze.FileEntry{
+		Path:   path,
+		Mode:   mode,
+		Size:   int64(len(content)),
+		Digest: sum,
+		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
 	}
 }
 

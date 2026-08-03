@@ -1,6 +1,7 @@
 package changesurface
 
 import (
+	"bytes"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -101,6 +102,83 @@ func ChangedPathSet(document Document) map[string]struct{} {
 		paths[change.Path] = struct{}{}
 	}
 	return paths
+}
+
+func ValidateDeclaredDerivation(document Document, declaredDigest string, base *freeze.Manifest, head *freeze.Manifest, passArtifactDigest string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if base == nil || head == nil {
+		return []diag.Diagnostic{diagnostic(
+			CodeMissingDerivationManifest,
+			"declared change surface requires base and head freeze manifests for derivation verification.",
+			"",
+			map[string]any{"base_manifest": base != nil, "head_manifest": head != nil},
+		)}
+	}
+	derived, derivedDigest, err := Derive(*base, *head, passArtifactDigest)
+	if err != nil {
+		return []diag.Diagnostic{diag.FromError(err)}
+	}
+	if derived.BaseArtifactDigest != document.BaseArtifactDigest {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidChangeSurface,
+			"base freeze manifest digest does not match the declared change surface base_artifact_digest.",
+			"/base_artifact_digest",
+			map[string]any{"actual": derived.BaseArtifactDigest, "expected": document.BaseArtifactDigest},
+		))
+	}
+	if derived.HeadArtifactDigest != document.HeadArtifactDigest {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidChangeSurface,
+			"head freeze manifest digest does not match the declared change surface head_artifact_digest.",
+			"/head_artifact_digest",
+			map[string]any{"actual": derived.HeadArtifactDigest, "expected": document.HeadArtifactDigest},
+		))
+	}
+	actualDigest, err := Digest(document)
+	if err != nil {
+		if validation, ok := err.(*ValidationError); ok {
+			diagnostics = append(diagnostics, validation.Diagnostics...)
+		} else {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidChangeSurface, "declared change surface digest could not be computed.", "/change_surface_digest", map[string]any{"error": err.Error()}))
+		}
+		return diagnostics
+	}
+	if strings.TrimSpace(declaredDigest) != actualDigest {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidChangeSurface,
+			"declared change_surface_digest does not match the embedded change surface.",
+			"/change_surface_digest",
+			map[string]any{"actual": actualDigest, "expected": strings.TrimSpace(declaredDigest)},
+		))
+	}
+	if actualDigest != derivedDigest {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidChangeSurface,
+			"declared change surface digest does not match the surface derived from base and head manifests.",
+			"/change_surface_digest",
+			map[string]any{"actual": actualDigest, "expected": derivedDigest},
+		))
+	}
+	declaredBytes, declaredErr := CanonicalBytes(document)
+	derivedBytes, derivedErr := CanonicalBytes(derived)
+	if declaredErr != nil || derivedErr != nil {
+		if declaredErr != nil {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidChangeSurface, "declared change surface canonical bytes could not be computed.", "", map[string]any{"error": declaredErr.Error()}))
+		}
+		if derivedErr != nil {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidChangeSurface, "derived change surface canonical bytes could not be computed.", "", map[string]any{"error": derivedErr.Error()}))
+		}
+		return diagnostics
+	}
+	if !bytes.Equal(declaredBytes, derivedBytes) {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidChangeSurface,
+			"declared change surface bytes do not match the surface derived from base and head manifests.",
+			"",
+			map[string]any{"actual_digest": actualDigest, "expected_digest": derivedDigest},
+		))
+	}
+	return diagnostics
 }
 
 func ScopePolicy(value string) string {

@@ -280,6 +280,8 @@ func runVerificationPlan(args []string) error {
 func runVerificationAssemble(args []string) error {
 	flags := newFlagSet("witness verification assemble")
 	planPath := flags.String("plan", "", "verification plan path")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface verification")
 	compatibilityPath := flags.String("compatibility-manifest", "", "retained compatibility manifest path")
 	capabilitiesPath := flags.String("relay-capabilities", "", "retained relay capabilities path")
 	integrationBundlePath := flags.String("integration-bundle", "", "retained integration bundle path")
@@ -319,6 +321,8 @@ func runVerificationAssemble(args []string) error {
 	}
 	protected := []protectedInput{
 		{role: "plan", path: *planPath},
+		{role: "base-manifest", path: *baseManifestPath},
+		{role: "head-manifest", path: *headManifestPath},
 		{role: "compatibility-manifest", path: *compatibilityPath},
 		{role: "relay-capabilities", path: *capabilitiesPath},
 		{role: "integration-bundle", path: *integrationBundlePath},
@@ -338,6 +342,10 @@ func runVerificationAssemble(args []string) error {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble -run-relay cannot be combined with pre-produced relay evidence flags.")
 	}
 	plan, err := readPlanFile(*planPath)
+	if err != nil {
+		return err
+	}
+	changeSurfaceInput, err := readPlanningChangeSurfaceInput(*baseManifestPath, *headManifestPath, false)
 	if err != nil {
 		return err
 	}
@@ -388,6 +396,8 @@ func runVerificationAssemble(args []string) error {
 		RelayResults: relayEvidence,
 		Receipts:     receipts,
 		EvidenceRefs: evidenceRefs,
+		BaseManifest: changeSurfaceInput.BaseManifest,
+		HeadManifest: changeSurfaceInput.HeadManifest,
 
 		ReceiptOutputDir:   *receiptOutputDir,
 		ReceiptHMACKeyFile: *receiptHMACKeyFile,
@@ -414,6 +424,8 @@ func runAdjudicate(args []string) error {
 	flags := newFlagSet("witness adjudicate")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	manifestPath := flags.String("manifest", "", "verification manifest path")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface verification")
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
@@ -441,6 +453,8 @@ func runAdjudicate(args []string) error {
 	protected := []protectedInput{
 		{role: "charter-freeze", path: *frozenPath},
 		{role: "manifest", path: *manifestPath},
+		{role: "base-manifest", path: *baseManifestPath},
+		{role: "head-manifest", path: *headManifestPath},
 		{role: "receipt-hmac-key-file", path: *receiptHMACKeyFile},
 		{role: "prior-lineage", path: *priorLineagePath},
 		{role: "rules", path: *rulesPath},
@@ -456,6 +470,10 @@ func runAdjudicate(args []string) error {
 		return err
 	}
 	manifest, err := readVerificationManifestFile(*manifestPath)
+	if err != nil {
+		return err
+	}
+	changeSurfaceInput, err := readPlanningChangeSurfaceInput(*baseManifestPath, *headManifestPath, false)
 	if err != nil {
 		return err
 	}
@@ -486,6 +504,8 @@ func runAdjudicate(args []string) error {
 		FrozenCharter:                &frozen,
 		RoleOutputs:                  inputs,
 		Manifest:                     manifest,
+		BaseManifest:                 changeSurfaceInput.BaseManifest,
+		HeadManifest:                 changeSurfaceInput.HeadManifest,
 		ReceiptOutputDir:             *receiptOutputDir,
 		ReceiptHMACKeyFile:           *receiptHMACKeyFile,
 		Rules:                        effective.Rules,

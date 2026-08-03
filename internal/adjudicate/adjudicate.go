@@ -8,10 +8,12 @@ import (
 	"sort"
 	"strings"
 
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/harness"
 	"witness/internal/strictjson"
 )
@@ -52,6 +54,8 @@ type Options struct {
 	FrozenCharter *charter.FrozenCharter
 	RoleOutputs   []RoleOutputInput
 	Manifest      contracts.VerificationManifest
+	BaseManifest  *freeze.Manifest
+	HeadManifest  *freeze.Manifest
 
 	ReceiptOutputDir   string
 	ReceiptHMACKey     []byte
@@ -236,6 +240,8 @@ func Run(options Options) (*Result, error) {
 	}
 	global = append(global, validateManifestEnvelope(options.Manifest, options.FrozenCharter)...)
 	global = append(global, validateManifestScopePolicy(options.Manifest, scopePolicy)...)
+	global = append(global, validateManifestChangeSurfaceDerivation(options.Manifest, options.BaseManifest, options.HeadManifest)...)
+	global = append(global, validateManifestExclusionCoverage(options.Manifest, options.RoleOutputs)...)
 	if len(global) > 0 {
 		return nil, &ValidationError{Diagnostics: global}
 	}
@@ -435,10 +441,66 @@ func validateManifestScopePolicy(manifest contracts.VerificationManifest, scopeP
 	return diagnostics
 }
 
+func validateManifestChangeSurfaceDerivation(manifest contracts.VerificationManifest, base *freeze.Manifest, head *freeze.Manifest) []diag.Diagnostic {
+	if manifest.ChangeSurface == nil {
+		return nil
+	}
+	diagnostics := changesurface.ValidateDeclaredDerivation(*manifest.ChangeSurface, manifest.ChangeSurfaceDigest, base, head, manifest.ArtifactDigest)
+	return prefixDiagnostics("/manifest/change_surface", diagnostics)
+}
+
+type exclusionCoverageFinding struct {
+	role    string
+	finding contracts.Finding
+}
+
+func validateManifestExclusionCoverage(manifest contracts.VerificationManifest, inputs []RoleOutputInput) []diag.Diagnostic {
+	if len(manifest.ExcludedFindings) == 0 {
+		return nil
+	}
+	byDigest := map[string]map[string]exclusionCoverageFinding{}
+	for _, input := range inputs {
+		roleDigest, err := contracts.RoleOutputDigest(input.Document)
+		if err != nil {
+			continue
+		}
+		findings := byDigest[roleDigest]
+		if findings == nil {
+			findings = map[string]exclusionCoverageFinding{}
+			byDigest[roleDigest] = findings
+		}
+		for _, finding := range input.Document.Findings {
+			findings[finding.ID] = exclusionCoverageFinding{role: input.Document.Role, finding: finding}
+		}
+	}
+	var diagnostics []diag.Diagnostic
+	for index, record := range manifest.ExcludedFindings {
+		path := "/manifest/excluded_findings/" + itoa(index)
+		findings := byDigest[record.SourceRoleOutputDigest]
+		if findings == nil {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding source role-output is not supplied to adjudication.", path+"/source_role_output_digest", map[string]any{"finding_id": record.FindingID, "source_role_output_digest": record.SourceRoleOutputDigest}))
+			continue
+		}
+		covered, exists := findings[record.FindingID]
+		if !exists {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding is not present in its supplied source role-output.", path+"/finding_id", map[string]any{"finding_id": record.FindingID, "source_role_output_digest": record.SourceRoleOutputDigest}))
+			continue
+		}
+		if covered.role != record.Role {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding role does not match its supplied source role-output.", path+"/role", map[string]any{"actual": record.Role, "expected": covered.role, "finding_id": record.FindingID}))
+		}
+		if manifest.ChangeSurface != nil && contracts.FindingInChangeSurface(covered.finding, *manifest.ChangeSurface) {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded out-of-delta finding touches the verified change surface.", path+"/finding_id", map[string]any{"finding_id": record.FindingID, "reason": record.Reason}))
+		}
+	}
+	return diagnostics
+}
+
 type loadedFinding struct {
 	sourceIndex      int
 	findingIndex     int
 	sourceRoleOutput string
+	sourceDigest     string
 	role             string
 	document         contracts.RoleOutputDocument
 	finding          contracts.Finding
@@ -451,6 +513,10 @@ func collectFindings(inputs []RoleOutputInput, frozen *charter.FrozenCharter, ma
 	var findings []loadedFinding
 	var documentDiagnostics []diag.Diagnostic
 	for sourceIndex, input := range inputs {
+		roleDigest, err := contracts.RoleOutputDigest(input.Document)
+		if err != nil {
+			documentDiagnostics = append(documentDiagnostics, diagnostic(CodeInvalidRoleOutput, "role-output digest could not be computed.", "/role_outputs/"+itoa(sourceIndex), map[string]any{"error": err.Error(), "role_output": input.Path}))
+		}
 		roleOutputDiagnostics := contracts.ValidateRoleOutput(input.Document, frozen)
 		byFinding, documentLevel := splitFindingDiagnostics(roleOutputDiagnostics)
 		documentDiagnostics = append(documentDiagnostics, appendRoleOutputContext(documentLevel, sourceIndex, input.Path)...)
@@ -459,6 +525,7 @@ func collectFindings(inputs []RoleOutputInput, frozen *charter.FrozenCharter, ma
 				sourceIndex:      sourceIndex,
 				findingIndex:     findingIndex,
 				sourceRoleOutput: input.Path,
+				sourceDigest:     roleDigest,
 				role:             input.Document.Role,
 				document:         input.Document,
 				finding:          finding,
@@ -746,6 +813,13 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		verdict.Disposition = contracts.DispositionAdvisory
 		verdict.ApplicationClass = contracts.ApplicationClassNone
 		verdict.Reasons = appendValidationReasons(verdict.Reasons, item.diagnostics)
+		return verdict
+	}
+
+	if excluded, ok := manifestExcludedFinding(options.Manifest, item); ok {
+		verdict.Disposition = excluded.Disposition
+		verdict.ApplicationClass = excluded.ApplicationClass
+		verdict.Reasons = appendReason(verdict.Reasons, excluded.Reason)
 		return verdict
 	}
 
@@ -1203,6 +1277,15 @@ func appendValidationReasons(reasons []string, diagnostics []diag.Diagnostic) []
 		reasons = appendReason(reasons, ReasonValidationFailed)
 	}
 	return reasons
+}
+
+func manifestExcludedFinding(manifest contracts.VerificationManifest, item loadedFinding) (contracts.ExcludedFindingRecord, bool) {
+	for _, excluded := range manifest.ExcludedFindings {
+		if excluded.FindingID == item.finding.ID && excluded.SourceRoleOutputDigest == item.sourceDigest {
+			return excluded, true
+		}
+	}
+	return contracts.ExcludedFindingRecord{}, false
 }
 
 func appendRoleOutputContext(diagnostics []diag.Diagnostic, sourceIndex int, roleOutputPath string) []diag.Diagnostic {

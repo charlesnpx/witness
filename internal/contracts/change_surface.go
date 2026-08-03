@@ -27,6 +27,11 @@ func FindingInChangeSurface(finding Finding, surface changesurface.Document) boo
 			return true
 		}
 	}
+	if finding.Witness.Executable != nil && finding.Witness.Executable.TransformationRef != nil {
+		if artifactRefTouchesChangedPath(*finding.Witness.Executable.TransformationRef, changed) {
+			return true
+		}
+	}
 	return false
 }
 

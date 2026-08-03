@@ -135,12 +135,14 @@ type PreflightBinding struct {
 }
 
 type ExcludedFinding struct {
-	Role             string            `json:"role"`
-	FindingID        string            `json:"finding_id,omitempty"`
-	Disposition      string            `json:"disposition"`
-	ApplicationClass string            `json:"application_class,omitempty"`
-	Reason           string            `json:"reason"`
-	Diagnostics      []diag.Diagnostic `json:"diagnostics,omitempty"`
+	Role                   string                `json:"role"`
+	FindingID              string                `json:"finding_id,omitempty"`
+	SourceRoleOutputRef    contracts.ArtifactRef `json:"source_role_output_ref"`
+	SourceRoleOutputDigest string                `json:"source_role_output_digest"`
+	Disposition            string                `json:"disposition"`
+	ApplicationClass       string                `json:"application_class,omitempty"`
+	Reason                 string                `json:"reason"`
+	Diagnostics            []diag.Diagnostic     `json:"diagnostics,omitempty"`
 }
 
 type BatchOutput struct {
@@ -297,70 +299,81 @@ func Run(options Options) (*Result, error) {
 			continue
 		}
 		roleDigests[sourceIndex] = roleDigest
+		roleOutputRef := sourceRoleOutputRef(input, sourceIndex, document, roleDigest)
 		diagnostics := contracts.ValidateRoleOutput(document, options.FrozenCharter)
 		findingDiagnostics, documentDiagnostics := splitFindingDiagnostics(diagnostics)
 		plan.Diagnostics = append(plan.Diagnostics, prefixedRoleDiagnostics(input, sourceIndex, documentDiagnostics)...)
 		documentInvalid := len(documentDiagnostics) > 0
 		if document.Role == contracts.RoleGoalFit {
 			if len(document.Findings) > 0 {
-				plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, CodeUnsupportedRole, documentDiagnostics)...)
+				plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, roleOutputRef, roleDigest, CodeUnsupportedRole, documentDiagnostics)...)
 			}
 			continue
 		}
 		if document.Role != contracts.RoleDefect && document.Role != contracts.RoleEconomy {
-			plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, CodeUnsupportedRole, documentDiagnostics)...)
+			plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, roleOutputRef, roleDigest, CodeUnsupportedRole, documentDiagnostics)...)
 			continue
 		}
 		for findingIndex, finding := range document.Findings {
 			if documentInvalid {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      CodeInvalidRoleOutput,
-					Diagnostics: documentDiagnostics,
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 CodeInvalidRoleOutput,
+					Diagnostics:            documentDiagnostics,
 				})
 				continue
 			}
 			if diagnostics := findingDiagnostics[findingIndex]; len(diagnostics) > 0 {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      CodeInvalidRoleOutput,
-					Diagnostics: diagnostics,
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 CodeInvalidRoleOutput,
+					Diagnostics:            diagnostics,
 				})
 				continue
 			}
 			if scopePolicy == contracts.ScopePolicyDeltaObligating && changeSurface != nil && !contracts.FindingInChangeSurface(finding, *changeSurface) {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:             document.Role,
-					FindingID:        finding.ID,
-					Disposition:      DispositionAdvisory,
-					ApplicationClass: contracts.ApplicationClassCallerDecision,
-					Reason:           contracts.ReasonOutOfDelta,
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					ApplicationClass:       contracts.ApplicationClassCallerDecision,
+					Reason:                 contracts.ReasonOutOfDelta,
 				})
 				continue
 			}
 			preSpendDiagnostics, reason := preSpendDiagnostics(document, finding, options.FrozenCharter)
 			if len(preSpendDiagnostics) > 0 {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      reason,
-					Diagnostics: preSpendDiagnostics,
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 reason,
+					Diagnostics:            preSpendDiagnostics,
 				})
 				continue
 			}
 			witnessDigest, err := contracts.WitnessDigest(finding.Witness)
 			if err != nil {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      CodeInvalidRoleOutput,
-					Diagnostics: []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidRoleOutput, "witness digest could not be computed."))},
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 CodeInvalidRoleOutput,
+					Diagnostics:            []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidRoleOutput, "witness digest could not be computed."))},
 				})
 				continue
 			}
@@ -683,18 +696,37 @@ func prefixedRoleDiagnostics(input RoleOutputInput, index int, diagnostics []dia
 	return result
 }
 
-func excludeDocumentFindings(document contracts.RoleOutputDocument, reason string, diagnostics []diag.Diagnostic) []ExcludedFinding {
+func excludeDocumentFindings(document contracts.RoleOutputDocument, sourceRef contracts.ArtifactRef, sourceDigest string, reason string, diagnostics []diag.Diagnostic) []ExcludedFinding {
 	excluded := make([]ExcludedFinding, 0, len(document.Findings))
 	for _, finding := range document.Findings {
 		excluded = append(excluded, ExcludedFinding{
-			Role:        document.Role,
-			FindingID:   finding.ID,
-			Disposition: DispositionAdvisory,
-			Reason:      reason,
-			Diagnostics: diagnostics,
+			Role:                   document.Role,
+			FindingID:              finding.ID,
+			SourceRoleOutputRef:    sourceRef,
+			SourceRoleOutputDigest: sourceDigest,
+			Disposition:            DispositionAdvisory,
+			Reason:                 reason,
+			Diagnostics:            diagnostics,
 		})
 	}
 	return excluded
+}
+
+func sourceRoleOutputRef(input RoleOutputInput, index int, document contracts.RoleOutputDocument, roleDigest string) contracts.ArtifactRef {
+	id := strings.TrimSpace(input.RefID)
+	if id == "" {
+		id = strings.TrimSpace(document.Role)
+	}
+	if id == "" {
+		id = inputLabel(input, index)
+	}
+	return contracts.ArtifactRef{
+		Kind:          "role-output",
+		ID:            id,
+		Digest:        roleDigest,
+		DigestProfile: digest.Profile,
+		MediaType:     "application/json",
+	}
 }
 
 func exceedsSeverityCap(claimed string, strength string, rules contracts.ReviewRules) bool {

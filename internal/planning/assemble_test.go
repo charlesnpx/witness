@@ -6,7 +6,10 @@ import (
 	"sort"
 	"testing"
 
+	"witness/internal/adjudicate"
 	"witness/internal/canonjson"
+	"witness/internal/changesurface"
+	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/digest"
 	"witness/internal/strictjson"
@@ -434,6 +437,212 @@ func TestAssembleRejectsPlanDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestAssembleRederivesDeclaredChangeSurface(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	finding := planningTestFinding("in-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/changed.go"}}
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	roleOutput.ArtifactDigest = headDigest
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tamperedPlan := planResult.Plan
+	tamperedSurface := *tamperedPlan.ChangeSurface
+	tamperedSurface.ChangedPaths = []changesurface.PathChange{{Path: "internal/unchanged.go", ChangeKinds: []string{changesurface.ChangeKindModified}}}
+	tamperedDigest, err := changesurface.Digest(tamperedSurface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedPlan.ChangeSurface = &tamperedSurface
+	tamperedPlan.ChangeSurfaceDigest = tamperedDigest
+	if err := stampPlanDigest(&tamperedPlan); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan:         tamperedPlan,
+		EvidenceRefs: validManifestEvidenceRefs(),
+		BaseManifest: &baseManifest,
+		HeadManifest: &headManifest,
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a tampered but self-consistent change surface")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for input-level change surface mismatch", result)
+	}
+	if planningErrorCode(err) != changesurface.CodeInvalidChangeSurface {
+		t.Fatalf("err = %v, want %s", err, changesurface.CodeInvalidChangeSurface)
+	}
+}
+
+func TestAssembleDeclaredChangeSurfaceRequiresDerivationManifests(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	finding := planningTestFinding("in-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/changed.go"}}
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	roleOutput.ArtifactDigest = headDigest
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan:         planResult.Plan,
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a declared change surface without derivation manifests")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for missing derivation manifests", result)
+	}
+	if planningErrorCode(err) != changesurface.CodeMissingDerivationManifest {
+		t.Fatalf("err = %v, want %s", err, changesurface.CodeMissingDerivationManifest)
+	}
+}
+
+func TestAssembleRejectsV1PlanBeforeDigestAcceptance(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	legacyPlan := planResult.Plan
+	legacyPlan.SchemaVersion = "witness-verification-plan-v1"
+	if err := stampPlanDigest(&legacyPlan); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan:         legacyPlan,
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a digest-valid v1 verification plan")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for unsupported plan schema", result)
+	}
+	if planningErrorCode(err) != CodeInvalidPlanDigest {
+		t.Fatalf("err = %v, want %s", err, CodeInvalidPlanDigest)
+	}
+}
+
+func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	outOfDelta := planningTestFinding("out-of-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	outOfDelta.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/unchanged.go"}}
+	inDelta := planningTestFinding("in-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	inDelta.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/changed.go"}}
+	outRoleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{outOfDelta})
+	outRoleOutput.ArtifactDigest = headDigest
+	inRoleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{inDelta})
+	inRoleOutput.ArtifactDigest = headDigest
+	preflight := planningTestPreflightBinding(t)
+	preflight.SnapshotDigest = headDigest
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "role-a.json", RefID: "role-a", Document: outRoleOutput},
+			{Path: "role-b.json", RefID: "role-b", Document: inRoleOutput},
+		},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     preflight,
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.ExcludedFindings) != 1 || planResult.Plan.ExcludedFindings[0].SourceRoleOutputDigest == "" {
+		t.Fatalf("plan exclusions = %#v, want one bound out-of-delta exclusion", planResult.Plan.ExcludedFindings)
+	}
+
+	assembled, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  planResult.Batches[0].Plan.BatchID,
+			Document: planResult.Batches[0].Document,
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+		BaseManifest: &baseManifest,
+		HeadManifest: &headManifest,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	manifest := assembled.Manifest
+	if len(manifest.ExcludedFindings) != 1 || manifest.ExcludedFindings[0].FindingID != outOfDelta.ID {
+		t.Fatalf("manifest exclusions = %#v, want out-of-delta record", manifest.ExcludedFindings)
+	}
+
+	_, err = adjudicate.Run(adjudicate.Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "role-b.json", Document: inRoleOutput}},
+		Manifest:      manifest,
+		Policy:        planningDeltaPolicy(),
+		BaseManifest:  &baseManifest,
+		HeadManifest:  &headManifest,
+	})
+	if err == nil {
+		t.Fatal("adjudication accepted manifest exclusions without the excluding role output")
+	}
+	if got := adjudicationErrorCode(err); got != adjudicate.CodeInvalidManifest {
+		t.Fatalf("adjudication err = %v, want %s", err, adjudicate.CodeInvalidManifest)
+	}
+
+	adjudicated, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []adjudicate.RoleOutputInput{
+			{Path: "role-a.json", Document: outRoleOutput},
+			{Path: "role-b.json", Document: inRoleOutput},
+		},
+		Manifest:     manifest,
+		Policy:       planningDeltaPolicy(),
+		BaseManifest: &baseManifest,
+		HeadManifest: &headManifest,
+	})
+	if err != nil {
+		t.Fatalf("adjudicate with exclusion coverage: %v", err)
+	}
+	byID := map[string]adjudicate.FindingVerdict{}
+	for _, finding := range adjudicated.Findings {
+		byID[finding.FindingID] = finding
+	}
+	excluded := byID[outOfDelta.ID]
+	if excluded.Disposition != contracts.DispositionAdvisory || excluded.ApplicationClass != contracts.ApplicationClassCallerDecision {
+		t.Fatalf("excluded verdict = %#v, want advisory caller_decision", excluded)
+	}
+	if !stringSliceContains(excluded.Reasons, contracts.ReasonOutOfDelta) {
+		t.Fatalf("excluded reasons = %#v, want out_of_delta", excluded.Reasons)
+	}
+	if excluded.Relay != nil || excluded.Execution != nil {
+		t.Fatalf("excluded verdict used verification evidence: %#v", excluded)
+	}
+}
+
 func TestAssembleRejectsSelectedContractManifestEvidenceMismatch(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
@@ -801,6 +1010,14 @@ func validContradictoryReceipt(plan PlanDocument, findingID string) contracts.Ex
 		ObservedObservation:      "test failed",
 		ExecutionStatus:          contracts.ExecutionStatusContradicted,
 	}
+}
+
+func adjudicationErrorCode(err error) string {
+	validation, ok := err.(*adjudicate.ValidationError)
+	if !ok || len(validation.Diagnostics) == 0 {
+		return ""
+	}
+	return validation.Diagnostics[0].Code
 }
 
 func testArtifactRef(kind string, id string, seed string) contracts.ArtifactRef {
