@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/diag"
 	"witness/internal/digest"
@@ -344,6 +345,40 @@ func TestVerificationBatchPreservesExplicitEmptyWitnessArtifactRefs(t *testing.T
 	}
 }
 
+func TestFindingInChangeSurfaceUsesExecutableTransformationRef(t *testing.T) {
+	surface := changesurface.Document{
+		SchemaVersion:      changesurface.SchemaVersion,
+		DigestProfile:      digest.Profile,
+		BaseArtifactDigest: testDigest("base"),
+		HeadArtifactDigest: testDigest("head"),
+		ChangedPaths: []changesurface.PathChange{{
+			Path:        "changed.go",
+			ChangeKinds: []string{changesurface.ChangeKindModified},
+		}},
+	}
+	finding := Finding{
+		ID: "finding-transform",
+		Witness: Witness{
+			Strength: WitnessStrengthExecutable,
+			Executable: &ExecutableSpec{
+				Argv:                []string{"go", "test"},
+				CWD:                 ".",
+				ExpectedObservation: "tests pass",
+				TransformationRef: &ArtifactRef{
+					Kind:          "patch",
+					ID:            "changed.go",
+					Digest:        testDigest("patch"),
+					DigestProfile: digest.Profile,
+					MediaType:     "text/plain",
+				},
+			},
+		},
+	}
+	if !FindingInChangeSurface(finding, surface) {
+		t.Fatal("FindingInChangeSurface returned false for executable transformation_ref path")
+	}
+}
+
 func TestManifestCanonicalResultDigestBindsEmbeddedRelayVerdicts(t *testing.T) {
 	_, batch := validRoleOutputAndBatch(t)
 	verdicts := validSurvivedVerdicts(batch)
@@ -488,8 +523,9 @@ func validCounterWitness() *CounterWitness {
 
 func validAutoApplyPolicy(productionCap int, testCap int) ReviewPolicy {
 	return ReviewPolicy{
-		SchemaVersion:                  ReviewPolicyV2,
+		SchemaVersion:                  ReviewPolicyV3,
 		PolicyID:                       "policy-1",
+		ScopePolicy:                    ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -563,7 +599,7 @@ func validVerificationManifest(t *testing.T, batch VerificationBatchDocument, ve
 	portableExportDigest := testDigest("portable-export")
 	portableExportRef := testArtifactRef("portable-export", "portable-export-1", portableExportDigest)
 	return VerificationManifest{
-		SchemaVersion:         VerificationManifestV3,
+		SchemaVersion:         VerificationManifestV4,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           batch.CharterHash,
 		ArtifactDigest:        batch.ArtifactDigest,

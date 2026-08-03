@@ -3,6 +3,7 @@ package contracts
 import (
 	"io"
 
+	"witness/internal/changesurface"
 	"witness/internal/diag"
 	"witness/internal/digest"
 	"witness/internal/strictjson"
@@ -13,11 +14,16 @@ type VerificationManifest struct {
 	PlanDigest            string                           `json:"plan_digest"`
 	CharterHash           string                           `json:"charter_hash"`
 	ArtifactDigest        string                           `json:"artifact_digest"`
+	ScopePolicy           string                           `json:"scope_policy,omitempty"`
+	ChangeSurface         *changesurface.Document          `json:"change_surface,omitempty"`
+	ChangeSurfaceDigest   string                           `json:"change_surface_digest,omitempty"`
+	BaselinePass          *changesurface.BaselinePass      `json:"baseline_pass,omitempty"`
 	CompatibilityManifest ArtifactRef                      `json:"compatibility_manifest"`
 	RelayCapabilities     ArtifactRef                      `json:"relay_capabilities"`
 	IntegrationBundle     ArtifactRef                      `json:"integration_bundle"`
 	SelectedContracts     []ArtifactRef                    `json:"selected_contracts"`
 	Batches               []VerificationManifestBatch      `json:"batches"`
+	ExcludedFindings      []ExcludedFindingRecord          `json:"excluded_findings,omitempty"`
 	ExecutionReceipts     []ExecutionReceiptManifestRecord `json:"execution_receipts,omitempty"`
 	ConsumerIdentity      map[string]any                   `json:"consumer_identity"`
 }
@@ -40,6 +46,16 @@ type ExecutionReceiptManifestRecord struct {
 	ReceiptRef    *ArtifactRef `json:"receipt_ref,omitempty"`
 	ReceiptDigest string       `json:"receipt_digest,omitempty"`
 	FailureReason string       `json:"failure_reason,omitempty"`
+}
+
+type ExcludedFindingRecord struct {
+	Role                   string      `json:"role"`
+	FindingID              string      `json:"finding_id"`
+	SourceRoleOutputRef    ArtifactRef `json:"source_role_output_ref"`
+	SourceRoleOutputDigest string      `json:"source_role_output_digest"`
+	Reason                 string      `json:"reason"`
+	Disposition            string      `json:"disposition"`
+	ApplicationClass       string      `json:"application_class"`
 }
 
 type ExecutionReceipt struct {
@@ -122,12 +138,13 @@ func RequireValidVerificationManifest(document VerificationManifest) error {
 
 func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != VerificationManifestV3 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v3.", "/schema_version", map[string]any{"expected": VerificationManifestV3, "actual": document.SchemaVersion}))
+	if document.SchemaVersion != VerificationManifestV4 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v4.", "/schema_version", map[string]any{"expected": VerificationManifestV4, "actual": document.SchemaVersion}))
 	}
 	requireDigest(&diagnostics, "/plan_digest", "plan_digest", document.PlanDigest)
 	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
 	requireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
+	diagnostics = append(diagnostics, validateManifestChangeSurface(document)...)
 	diagnostics = append(diagnostics, prefixDiagnostics("/compatibility_manifest", validateArtifactRef(document.CompatibilityManifest, ""))...)
 	diagnostics = append(diagnostics, prefixDiagnostics("/relay_capabilities", validateArtifactRef(document.RelayCapabilities, ""))...)
 	diagnostics = append(diagnostics, prefixDiagnostics("/integration_bundle", validateArtifactRef(document.IntegrationBundle, ""))...)
@@ -140,8 +157,52 @@ func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnost
 	for index, batch := range document.Batches {
 		diagnostics = append(diagnostics, validateManifestBatch(batch, "/batches/"+itoa(index))...)
 	}
+	for index, excluded := range document.ExcludedFindings {
+		diagnostics = append(diagnostics, validateExcludedFindingRecord(excluded, "/excluded_findings/"+itoa(index))...)
+	}
 	for index, receipt := range document.ExecutionReceipts {
 		diagnostics = append(diagnostics, validateExecutionReceiptRecord(receipt, "/execution_receipts/"+itoa(index))...)
+	}
+	return diagnostics
+}
+
+func validateManifestChangeSurface(document VerificationManifest) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	scopePolicy := EffectiveScopePolicy(ReviewPolicy{ScopePolicy: document.ScopePolicy})
+	if document.ScopePolicy != "" && document.ScopePolicy != ScopePolicyDeltaObligating && document.ScopePolicy != ScopePolicyWholeTree {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "scope_policy must be delta_obligating or whole_tree when set.", "/scope_policy", map[string]any{"value": document.ScopePolicy}))
+	}
+	if document.ChangeSurface != nil {
+		surfaceDiagnostics := changesurface.Validate(*document.ChangeSurface)
+		for _, item := range surfaceDiagnostics {
+			item.Code = CodeInvalidManifest
+			diagnostics = append(diagnostics, prefixDiagnostics("/change_surface", []diag.Diagnostic{item})...)
+		}
+		if len(surfaceDiagnostics) == 0 {
+			surfaceDigest, err := changesurface.Digest(*document.ChangeSurface)
+			if err != nil {
+				diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "change surface digest could not be computed.", "/change_surface_digest", map[string]any{"error": err.Error()}))
+			} else {
+				compareDigest(&diagnostics, "/change_surface_digest", "change surface", document.ChangeSurfaceDigest, surfaceDigest)
+				compareDigest(&diagnostics, "/change_surface/head_artifact_digest", "change surface head artifact", document.ChangeSurface.HeadArtifactDigest, document.ArtifactDigest)
+			}
+		}
+	} else if document.ChangeSurfaceDigest != "" {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "change_surface_digest requires an embedded change_surface document.", "/change_surface_digest", nil))
+	}
+	if document.BaselinePass != nil {
+		if !document.BaselinePass.Declared {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass marker must be declared when present.", "/baseline_pass/declared", nil))
+		}
+		if document.BaselinePass.Reason == "" {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass reason is required.", "/baseline_pass/reason", nil))
+		}
+		if document.ChangeSurface != nil {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass and change_surface are mutually exclusive.", "/baseline_pass", nil))
+		}
+	}
+	if scopePolicy == ScopePolicyDeltaObligating && document.ChangeSurface == nil && document.BaselinePass == nil {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating manifests require a change_surface or explicit baseline_pass.", "/change_surface", map[string]any{"scope_policy": scopePolicy}))
 	}
 	return diagnostics
 }
@@ -192,6 +253,30 @@ func validateExecutionReceiptRecord(record ExecutionReceiptManifestRecord, path 
 	}
 	if record.ReceiptRef != nil && record.ReceiptDigest != "" {
 		compareDigest(&diagnostics, path+"/receipt_ref/digest", "receipt ref", record.ReceiptRef.Digest, record.ReceiptDigest)
+	}
+	return diagnostics
+}
+
+func validateExcludedFindingRecord(record ExcludedFindingRecord, path string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	requireEnum(&diagnostics, path+"/role", "role", record.Role, stringSet(RoleDefect, RoleEconomy), CodeInvalidManifest)
+	requireStableID(&diagnostics, path+"/finding_id", "finding ID", record.FindingID)
+	diagnostics = append(diagnostics, prefixDiagnostics(path+"/source_role_output_ref", validateArtifactRef(record.SourceRoleOutputRef, ""))...)
+	if record.SourceRoleOutputRef.Kind != "" && record.SourceRoleOutputRef.Kind != "role-output" {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding source_role_output_ref must reference a role-output artifact.", path+"/source_role_output_ref/kind", map[string]any{"actual": record.SourceRoleOutputRef.Kind, "expected": "role-output"}))
+	}
+	requireDigest(&diagnostics, path+"/source_role_output_digest", "source role-output digest", record.SourceRoleOutputDigest)
+	if record.SourceRoleOutputRef.Digest != "" && record.SourceRoleOutputDigest != "" {
+		compareDigest(&diagnostics, path+"/source_role_output_ref/digest", "source role-output reference", record.SourceRoleOutputRef.Digest, record.SourceRoleOutputDigest)
+	}
+	if record.Reason != ReasonOutOfDelta {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding reason must be out_of_delta.", path+"/reason", map[string]any{"actual": record.Reason, "expected": ReasonOutOfDelta}))
+	}
+	if record.Disposition != DispositionAdvisory {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding disposition must be advisory.", path+"/disposition", map[string]any{"actual": record.Disposition, "expected": DispositionAdvisory}))
+	}
+	if record.ApplicationClass != ApplicationClassCallerDecision {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding application_class must be caller_decision.", path+"/application_class", map[string]any{"actual": record.ApplicationClass, "expected": ApplicationClassCallerDecision}))
 	}
 	return diagnostics
 }

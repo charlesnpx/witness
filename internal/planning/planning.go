@@ -7,22 +7,28 @@ import (
 	"sort"
 	"strings"
 
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 )
 
 const (
-	SchemaVersion                 = "witness-verification-plan-v1"
+	SchemaVersion                 = "witness-verification-plan-v2"
 	ManifestSkeletonSchemaVersion = "witness-verification-manifest-skeleton-v1"
 	MaxBatchFindings              = 8
 
 	CodeMissingFrozenCharter       = "planning_missing_frozen_charter"
 	CodeInvalidReviewRules         = "planning_invalid_review_rules"
+	CodeInvalidReviewPolicy        = "planning_invalid_review_policy"
 	CodeMixedCharter               = "planning_mixed_charter"
 	CodeMixedArtifact              = "planning_mixed_artifact"
 	CodeSnapshotArtifactMismatch   = "planning_snapshot_artifact_mismatch"
+	CodeMissingChangeSurface       = "planning_missing_change_surface"
+	CodeInvalidChangeSurface       = "planning_invalid_change_surface"
+	CodeBaselineSurfaceConflict    = "planning_baseline_change_surface_conflict"
 	CodeInvalidRoleOutput          = "planning_invalid_role_output"
 	CodeScopeAdvisory              = "planning_scope_advisory"
 	CodeInvalidReachability        = "planning_invalid_reachability"
@@ -49,13 +55,21 @@ type Options struct {
 	StateDir         string
 	ConsumerIdentity map[string]any
 	Rules            contracts.ReviewRules
+	Policy           contracts.ReviewPolicy
 	Preflight        PreflightBinding
+	ChangeSurface    ChangeSurfaceInput
 }
 
 type Result struct {
 	Plan             PlanDocument
 	Batches          []BatchOutput
 	ManifestSkeleton ManifestSkeleton
+}
+
+type ChangeSurfaceInput struct {
+	BaseManifest *freeze.Manifest
+	HeadManifest *freeze.Manifest
+	BaselinePass bool
 }
 
 type ValidationError struct {
@@ -74,21 +88,25 @@ func (err *ValidationError) Error() string {
 }
 
 type PlanDocument struct {
-	SchemaVersion                    string            `json:"schema_version"`
-	DigestProfile                    string            `json:"digest_profile"`
-	PlanDigest                       string            `json:"plan_digest"`
-	CharterHash                      string            `json:"charter_hash"`
-	CharterDigest                    string            `json:"charter_digest,omitempty"`
-	ArtifactDigest                   string            `json:"artifact_digest"`
-	PreflightSnapshotDigest          string            `json:"preflight_snapshot_digest,omitempty"`
-	PreflightCompatibilityDigest     string            `json:"preflight_compatibility_digest,omitempty"`
-	PreflightRelayCapabilitiesDigest string            `json:"preflight_relay_capabilities_digest,omitempty"`
-	IntegrationBundleDigest          string            `json:"integration_bundle_digest,omitempty"`
-	BatchSizeMaximum                 int               `json:"batch_size_maximum"`
-	Batches                          []BatchPlan       `json:"batches"`
-	ExcludedFindings                 []ExcludedFinding `json:"excluded_findings,omitempty"`
-	Diagnostics                      []diag.Diagnostic `json:"diagnostics,omitempty"`
-	ConsumerIdentity                 map[string]any    `json:"consumer_identity"`
+	SchemaVersion                    string                      `json:"schema_version"`
+	DigestProfile                    string                      `json:"digest_profile"`
+	PlanDigest                       string                      `json:"plan_digest"`
+	CharterHash                      string                      `json:"charter_hash"`
+	CharterDigest                    string                      `json:"charter_digest,omitempty"`
+	ArtifactDigest                   string                      `json:"artifact_digest"`
+	ScopePolicy                      string                      `json:"scope_policy,omitempty"`
+	ChangeSurface                    *changesurface.Document     `json:"change_surface,omitempty"`
+	ChangeSurfaceDigest              string                      `json:"change_surface_digest,omitempty"`
+	BaselinePass                     *changesurface.BaselinePass `json:"baseline_pass,omitempty"`
+	PreflightSnapshotDigest          string                      `json:"preflight_snapshot_digest,omitempty"`
+	PreflightCompatibilityDigest     string                      `json:"preflight_compatibility_digest,omitempty"`
+	PreflightRelayCapabilitiesDigest string                      `json:"preflight_relay_capabilities_digest,omitempty"`
+	IntegrationBundleDigest          string                      `json:"integration_bundle_digest,omitempty"`
+	BatchSizeMaximum                 int                         `json:"batch_size_maximum"`
+	Batches                          []BatchPlan                 `json:"batches"`
+	ExcludedFindings                 []ExcludedFinding           `json:"excluded_findings,omitempty"`
+	Diagnostics                      []diag.Diagnostic           `json:"diagnostics,omitempty"`
+	ConsumerIdentity                 map[string]any              `json:"consumer_identity"`
 }
 
 type BatchPlan struct {
@@ -117,11 +135,14 @@ type PreflightBinding struct {
 }
 
 type ExcludedFinding struct {
-	Role        string            `json:"role"`
-	FindingID   string            `json:"finding_id,omitempty"`
-	Disposition string            `json:"disposition"`
-	Reason      string            `json:"reason"`
-	Diagnostics []diag.Diagnostic `json:"diagnostics,omitempty"`
+	Role                   string                `json:"role"`
+	FindingID              string                `json:"finding_id,omitempty"`
+	SourceRoleOutputRef    contracts.ArtifactRef `json:"source_role_output_ref"`
+	SourceRoleOutputDigest string                `json:"source_role_output_digest"`
+	Disposition            string                `json:"disposition"`
+	ApplicationClass       string                `json:"application_class,omitempty"`
+	Reason                 string                `json:"reason"`
+	Diagnostics            []diag.Diagnostic     `json:"diagnostics,omitempty"`
 }
 
 type BatchOutput struct {
@@ -131,15 +152,19 @@ type BatchOutput struct {
 }
 
 type ManifestSkeleton struct {
-	SchemaVersion       string                   `json:"schema_version"`
-	DigestProfile       string                   `json:"digest_profile"`
-	PlanDigest          string                   `json:"plan_digest"`
-	CharterHash         string                   `json:"charter_hash"`
-	ArtifactDigest      string                   `json:"artifact_digest"`
-	Batches             []ManifestSkeletonBatch  `json:"batches"`
-	PendingVerification []ManifestPendingFinding `json:"pending_verification,omitempty"`
-	ExcludedFindings    []ExcludedFinding        `json:"excluded_findings,omitempty"`
-	ConsumerIdentity    map[string]any           `json:"consumer_identity"`
+	SchemaVersion       string                      `json:"schema_version"`
+	DigestProfile       string                      `json:"digest_profile"`
+	PlanDigest          string                      `json:"plan_digest"`
+	CharterHash         string                      `json:"charter_hash"`
+	ArtifactDigest      string                      `json:"artifact_digest"`
+	ScopePolicy         string                      `json:"scope_policy,omitempty"`
+	ChangeSurface       *changesurface.Document     `json:"change_surface,omitempty"`
+	ChangeSurfaceDigest string                      `json:"change_surface_digest,omitempty"`
+	BaselinePass        *changesurface.BaselinePass `json:"baseline_pass,omitempty"`
+	Batches             []ManifestSkeletonBatch     `json:"batches"`
+	PendingVerification []ManifestPendingFinding    `json:"pending_verification,omitempty"`
+	ExcludedFindings    []ExcludedFinding           `json:"excluded_findings,omitempty"`
+	ConsumerIdentity    map[string]any              `json:"consumer_identity"`
 }
 
 type ManifestSkeletonBatch struct {
@@ -178,9 +203,29 @@ func Run(options Options) (*Result, error) {
 	if diagnostics := contracts.ValidateReviewRules(rules); len(diagnostics) > 0 {
 		return nil, diag.New(CodeInvalidReviewRules, "planning review rules are invalid.", diag.WithDetails(firstDiagnosticDetails(diagnostics)))
 	}
+	policy := options.Policy
+	if policy.SchemaVersion == "" {
+		policy = contracts.DefaultReviewPolicy()
+	}
+	if diagnostics := contracts.ValidateReviewPolicy(policy, nil).Diagnostics; len(diagnostics) > 0 {
+		return nil, diag.New(CodeInvalidReviewPolicy, "planning review policy is invalid.", diag.WithDetails(firstDiagnosticDetails(diagnostics)))
+	}
+	scopePolicy := contracts.EffectiveScopePolicy(policy)
+	if scopePolicy == contracts.ScopePolicyDeltaObligating {
+		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
+			return nil, diag.New(CodeInvalidReviewPolicy, "delta_obligating scope policy requires review-policy-v3.", diag.WithDetail("actual", policy.SchemaVersion), diag.WithDetail("expected", contracts.ReviewPolicyV3))
+		}
+		if rules.SchemaVersion != contracts.ReviewRulesV3 {
+			return nil, diag.New(CodeInvalidReviewRules, "delta_obligating scope policy requires review-rules-v3.", diag.WithDetail("actual", rules.SchemaVersion), diag.WithDetail("expected", contracts.ReviewRulesV3))
+		}
+	}
 
 	result := &Result{}
 	preflightSnapshotDigest := strings.TrimSpace(options.Preflight.SnapshotDigest)
+	changeSurface, changeSurfaceDigest, baselinePass, err := planChangeSurface(options.ChangeSurface, scopePolicy, preflightSnapshotDigest)
+	if err != nil {
+		return nil, err
+	}
 	consumer := cloneIdentity(options.ConsumerIdentity)
 	if len(consumer) == 0 {
 		consumer = firstConsumerIdentity(options.RoleOutputs, preflightSnapshotDigest)
@@ -195,6 +240,10 @@ func Run(options Options) (*Result, error) {
 		CharterHash:                      options.FrozenCharter.CharterHash,
 		CharterDigest:                    strings.TrimSpace(options.CharterDigest),
 		ArtifactDigest:                   preflightSnapshotDigest,
+		ScopePolicy:                      scopePolicy,
+		ChangeSurface:                    changeSurface,
+		ChangeSurfaceDigest:              changeSurfaceDigest,
+		BaselinePass:                     baselinePass,
 		PreflightSnapshotDigest:          preflightSnapshotDigest,
 		PreflightCompatibilityDigest:     strings.TrimSpace(options.Preflight.CompatibilityDigest),
 		PreflightRelayCapabilitiesDigest: strings.TrimSpace(options.Preflight.RelayCapabilitiesDigest),
@@ -250,60 +299,81 @@ func Run(options Options) (*Result, error) {
 			continue
 		}
 		roleDigests[sourceIndex] = roleDigest
+		roleOutputRef := sourceRoleOutputRef(input, sourceIndex, document, roleDigest)
 		diagnostics := contracts.ValidateRoleOutput(document, options.FrozenCharter)
 		findingDiagnostics, documentDiagnostics := splitFindingDiagnostics(diagnostics)
 		plan.Diagnostics = append(plan.Diagnostics, prefixedRoleDiagnostics(input, sourceIndex, documentDiagnostics)...)
 		documentInvalid := len(documentDiagnostics) > 0
 		if document.Role == contracts.RoleGoalFit {
 			if len(document.Findings) > 0 {
-				plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, CodeUnsupportedRole, documentDiagnostics)...)
+				plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, roleOutputRef, roleDigest, CodeUnsupportedRole, documentDiagnostics)...)
 			}
 			continue
 		}
 		if document.Role != contracts.RoleDefect && document.Role != contracts.RoleEconomy {
-			plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, CodeUnsupportedRole, documentDiagnostics)...)
+			plan.ExcludedFindings = append(plan.ExcludedFindings, excludeDocumentFindings(document, roleOutputRef, roleDigest, CodeUnsupportedRole, documentDiagnostics)...)
 			continue
 		}
 		for findingIndex, finding := range document.Findings {
 			if documentInvalid {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      CodeInvalidRoleOutput,
-					Diagnostics: documentDiagnostics,
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 CodeInvalidRoleOutput,
+					Diagnostics:            documentDiagnostics,
 				})
 				continue
 			}
 			if diagnostics := findingDiagnostics[findingIndex]; len(diagnostics) > 0 {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      CodeInvalidRoleOutput,
-					Diagnostics: diagnostics,
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 CodeInvalidRoleOutput,
+					Diagnostics:            diagnostics,
+				})
+				continue
+			}
+			if scopePolicy == contracts.ScopePolicyDeltaObligating && changeSurface != nil && !contracts.FindingInChangeSurface(finding, *changeSurface) {
+				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					ApplicationClass:       contracts.ApplicationClassCallerDecision,
+					Reason:                 contracts.ReasonOutOfDelta,
 				})
 				continue
 			}
 			preSpendDiagnostics, reason := preSpendDiagnostics(document, finding, options.FrozenCharter)
 			if len(preSpendDiagnostics) > 0 {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      reason,
-					Diagnostics: preSpendDiagnostics,
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 reason,
+					Diagnostics:            preSpendDiagnostics,
 				})
 				continue
 			}
 			witnessDigest, err := contracts.WitnessDigest(finding.Witness)
 			if err != nil {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
-					Role:        document.Role,
-					FindingID:   finding.ID,
-					Disposition: DispositionAdvisory,
-					Reason:      CodeInvalidRoleOutput,
-					Diagnostics: []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidRoleOutput, "witness digest could not be computed."))},
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 CodeInvalidRoleOutput,
+					Diagnostics:            []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidRoleOutput, "witness digest could not be computed."))},
 				})
 				continue
 			}
@@ -355,10 +425,58 @@ func WriteState(stateDir string, result *Result) error {
 		}
 		result.Batches[index].Path = path
 	}
+	if result.Plan.ChangeSurface != nil {
+		if err := writeCanonicalFile(filepath.Join(stateDir, "verification", "change-surface.json"), result.Plan.ChangeSurface); err != nil {
+			return err
+		}
+	}
 	if err := writeCanonicalFile(filepath.Join(stateDir, "verification-plan.json"), result.Plan); err != nil {
 		return err
 	}
 	return writeCanonicalFile(filepath.Join(stateDir, "verification", "index.skeleton.json"), result.ManifestSkeleton)
+}
+
+func planChangeSurface(input ChangeSurfaceInput, scopePolicy string, passArtifactDigest string) (*changesurface.Document, string, *changesurface.BaselinePass, error) {
+	hasBase := input.BaseManifest != nil
+	hasHead := input.HeadManifest != nil
+	if hasBase != hasHead {
+		return nil, "", nil, diag.New(
+			CodeMissingChangeSurface,
+			"change surface derivation requires both -base-manifest and -head-manifest.",
+			diag.WithDetail("base_manifest", hasBase),
+			diag.WithDetail("head_manifest", hasHead),
+		)
+	}
+	if input.BaselinePass && hasBase {
+		return nil, "", nil, diag.New(CodeBaselineSurfaceConflict, "baseline_pass cannot be combined with derived change surface manifests.")
+	}
+	if hasBase && hasHead {
+		surface, surfaceDigest, err := changesurface.Derive(*input.BaseManifest, *input.HeadManifest, passArtifactDigest)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		return &surface, surfaceDigest, nil, nil
+	}
+	if scopePolicy == contracts.ScopePolicyDeltaObligating {
+		if input.BaselinePass {
+			return nil, "", &changesurface.BaselinePass{
+				Declared: true,
+				Reason:   changesurface.BaselinePassReasonExplicit,
+			}, nil
+		}
+		return nil, "", nil, diag.New(
+			CodeMissingChangeSurface,
+			"delta_obligating scope policy requires derived change surface manifests or an explicit baseline_pass marker.",
+			diag.WithDetail("scope_policy", scopePolicy),
+		)
+	}
+	if input.BaselinePass {
+		return nil, "", &changesurface.BaselinePass{
+			Declared: true,
+			Reason:   changesurface.BaselinePassReasonExplicit,
+		}, nil
+	}
+	return nil, "", nil, nil
 }
 
 func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contracts.Finding, frozen *charter.FrozenCharter) ([]diag.Diagnostic, string) {
@@ -387,7 +505,7 @@ func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contract
 			return prefixDiagnostics("/witness", witness.Diagnostics), CodeInvalidReachability
 		}
 	}
-	// review-rules-v2 caps are adjudication semantics: planning sends over-cap
+	// Review-rules caps are adjudication semantics: planning sends over-cap
 	// claims to verification, and adjudication caps admitted or pending results.
 	if finding.Recurrence != nil && finding.Recurrence.PriorFindingID == finding.ID {
 		return []diag.Diagnostic{diag.FromError(diag.New(
@@ -489,13 +607,17 @@ func sortCandidates(candidates []candidate) {
 
 func manifestSkeleton(plan PlanDocument) ManifestSkeleton {
 	skeleton := ManifestSkeleton{
-		SchemaVersion:    ManifestSkeletonSchemaVersion,
-		DigestProfile:    digest.Profile,
-		PlanDigest:       plan.PlanDigest,
-		CharterHash:      plan.CharterHash,
-		ArtifactDigest:   plan.ArtifactDigest,
-		ExcludedFindings: append([]ExcludedFinding(nil), plan.ExcludedFindings...),
-		ConsumerIdentity: cloneIdentity(plan.ConsumerIdentity),
+		SchemaVersion:       ManifestSkeletonSchemaVersion,
+		DigestProfile:       digest.Profile,
+		PlanDigest:          plan.PlanDigest,
+		CharterHash:         plan.CharterHash,
+		ArtifactDigest:      plan.ArtifactDigest,
+		ScopePolicy:         plan.ScopePolicy,
+		ChangeSurface:       plan.ChangeSurface,
+		ChangeSurfaceDigest: plan.ChangeSurfaceDigest,
+		BaselinePass:        plan.BaselinePass,
+		ExcludedFindings:    append([]ExcludedFinding(nil), plan.ExcludedFindings...),
+		ConsumerIdentity:    cloneIdentity(plan.ConsumerIdentity),
 	}
 	for _, batch := range plan.Batches {
 		skeleton.Batches = append(skeleton.Batches, ManifestSkeletonBatch{
@@ -574,18 +696,37 @@ func prefixedRoleDiagnostics(input RoleOutputInput, index int, diagnostics []dia
 	return result
 }
 
-func excludeDocumentFindings(document contracts.RoleOutputDocument, reason string, diagnostics []diag.Diagnostic) []ExcludedFinding {
+func excludeDocumentFindings(document contracts.RoleOutputDocument, sourceRef contracts.ArtifactRef, sourceDigest string, reason string, diagnostics []diag.Diagnostic) []ExcludedFinding {
 	excluded := make([]ExcludedFinding, 0, len(document.Findings))
 	for _, finding := range document.Findings {
 		excluded = append(excluded, ExcludedFinding{
-			Role:        document.Role,
-			FindingID:   finding.ID,
-			Disposition: DispositionAdvisory,
-			Reason:      reason,
-			Diagnostics: diagnostics,
+			Role:                   document.Role,
+			FindingID:              finding.ID,
+			SourceRoleOutputRef:    sourceRef,
+			SourceRoleOutputDigest: sourceDigest,
+			Disposition:            DispositionAdvisory,
+			Reason:                 reason,
+			Diagnostics:            diagnostics,
 		})
 	}
 	return excluded
+}
+
+func sourceRoleOutputRef(input RoleOutputInput, index int, document contracts.RoleOutputDocument, roleDigest string) contracts.ArtifactRef {
+	id := strings.TrimSpace(input.RefID)
+	if id == "" {
+		id = strings.TrimSpace(document.Role)
+	}
+	if id == "" {
+		id = inputLabel(input, index)
+	}
+	return contracts.ArtifactRef{
+		Kind:          "role-output",
+		ID:            id,
+		Digest:        roleDigest,
+		DigestProfile: digest.Profile,
+		MediaType:     "application/json",
+	}
 }
 
 func exceedsSeverityCap(claimed string, strength string, rules contracts.ReviewRules) bool {
