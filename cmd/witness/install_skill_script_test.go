@@ -138,7 +138,7 @@ func TestInstallSkillScriptInstallRootAndUninstall(t *testing.T) {
 	if uninstallReport.Operation != "uninstall" {
 		t.Fatalf("operation = %q, want uninstall", uninstallReport.Operation)
 	}
-	for _, file := range reportedInstallSkillFiles(uninstallReport) {
+	for _, file := range reported {
 		assertPathUnderRoot(t, file.Path, installRoot)
 		if _, err := os.Stat(file.Path); !os.IsNotExist(err) {
 			t.Fatalf("uninstalled file still exists %s: %v", file.Path, err)
