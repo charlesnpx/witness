@@ -175,6 +175,9 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 
 	capabilities, err := client.Capabilities(ctx)
 	if err != nil {
+		if relayMissing(err) {
+			return runRelayAbsentPreflight(result, options, err, diagnostics)
+		}
 		diagnostics = append(diagnostics, commandDiagnostic("capabilities", err))
 		return finish(result, diagnostics)
 	}
@@ -281,6 +284,70 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		result.ArtifactDigests["compatibility-manifest.json"] = retainedDigest
 	}
 
+	return finish(result, diagnostics)
+}
+
+func runRelayAbsentPreflight(result *Result, options Options, launchErr error, diagnostics []diag.Diagnostic) (*Result, error) {
+	result.BackendStrata = relayAbsentBackendStrata()
+	if retainedDigest, err := retain(options.StateDir, "relay-capabilities.json", relayAbsentCapabilitiesPayload(options.RelayPath, launchErr)); err != nil {
+		return result, err
+	} else {
+		result.ArtifactDigests["relay-capabilities.json"] = retainedDigest
+	}
+	if retainedDigest, err := retain(options.StateDir, "backend-status.json", relayAbsentBackendStatusPayload(options.RelayPath, launchErr)); err != nil {
+		return result, err
+	} else {
+		result.ArtifactDigests["backend-status.json"] = retainedDigest
+	}
+	if retainedDigest, err := retain(options.StateDir, "recipes-list.json", relayAbsentRecipesListPayload(options.RelayPath, launchErr)); err != nil {
+		return result, err
+	} else {
+		result.ArtifactDigests["recipes-list.json"] = retainedDigest
+	}
+	for _, requirement := range RequiredRecipes {
+		relative := filepath.ToSlash(filepath.Join("compile-reports", requirement.ID+".json"))
+		payload := relayAbsentCompileReportPayload(requirement, options.RelayPath, launchErr)
+		if retainedDigest, err := retain(options.StateDir, relative, payload); err != nil {
+			return result, err
+		} else {
+			result.CompileReportDigests[requirement.ID] = retainedDigest
+			result.ArtifactDigests[relative] = retainedDigest
+		}
+	}
+
+	bundlePayload, bundleDigest, bundleDiagnostics := loadIntegrationBundle(options.IntegrationBundlePath)
+	diagnostics = append(diagnostics, bundleDiagnostics...)
+	if len(bundleDiagnostics) == 0 {
+		result.ContractDigests["integration_bundle"] = bundleDigest
+		if retainedDigest, err := retain(options.StateDir, "integration-bundle.json", bundlePayload); err != nil {
+			return result, err
+		} else {
+			result.ArtifactDigests["integration-bundle.json"] = retainedDigest
+		}
+		contractDigests, contractDiagnostics := selectedContractDigestsFromBundle(bundlePayload)
+		diagnostics = append(diagnostics, contractDiagnostics...)
+		for contractID, contractDigest := range contractDigests {
+			result.ContractDigests[contractID] = contractDigest
+		}
+	}
+
+	contractDigestDoc := map[string]any{
+		"schema_version":   "witness-preflight-contract-digests-v1",
+		"digest_profile":   digest.Profile,
+		"contract_digests": result.ContractDigests,
+	}
+	if retainedDigest, err := retain(options.StateDir, "contract-digests.json", contractDigestDoc); err != nil {
+		return result, err
+	} else {
+		result.ArtifactDigests["contract-digests.json"] = retainedDigest
+	}
+
+	compatibility := compatibilityManifest(result, diagnostics)
+	if retainedDigest, err := retain(options.StateDir, "compatibility-manifest.json", compatibility); err != nil {
+		return result, err
+	} else {
+		result.ArtifactDigests["compatibility-manifest.json"] = retainedDigest
+	}
 	return finish(result, diagnostics)
 }
 
@@ -536,6 +603,97 @@ func backendAttemptable(status string) bool {
 	}
 }
 
+func RelayAbsent(result Result) bool {
+	for _, backend := range requiredBackends {
+		if result.BackendStrata[backend] != contracts.RelayLaunchStatusAbsent {
+			return false
+		}
+	}
+	return len(result.BackendStrata) > 0
+}
+
+func relayMissing(err error) bool {
+	var commandError *relayclient.CommandError
+	return errors.As(err, &commandError) && commandError.Kind == relayclient.ErrorRelayMissing
+}
+
+func relayAbsentBackendStrata() map[string]string {
+	strata := make(map[string]string, len(requiredBackends))
+	for _, backend := range requiredBackends {
+		strata[backend] = contracts.RelayLaunchStatusAbsent
+	}
+	return strata
+}
+
+func relayAbsentCapabilitiesPayload(relayPath string, err error) map[string]any {
+	payload := relayAbsentPayload("witness-relay-absent-capabilities-v1", relayPath, err)
+	payload["capabilities"] = relayAbsentCapabilities()
+	return payload
+}
+
+func relayAbsentRecipesListPayload(relayPath string, err error) map[string]any {
+	payload := relayAbsentPayload("witness-relay-absent-recipes-list-v1", relayPath, err)
+	payload["recipes"] = []any{}
+	return payload
+}
+
+func relayAbsentBackendStatusPayload(relayPath string, err error) map[string]any {
+	payload := relayAbsentPayload("witness-relay-absent-backend-status-v1", relayPath, err)
+	backends := make([]map[string]string, 0, len(requiredBackends))
+	for _, backend := range requiredBackends {
+		backends = append(backends, map[string]string{
+			"backend": backend,
+			"status":  contracts.RelayLaunchStatusAbsent,
+		})
+	}
+	payload["backends"] = backends
+	return payload
+}
+
+func relayAbsentCompileReportPayload(requirement RecipeRequirement, relayPath string, err error) map[string]any {
+	payload := relayAbsentPayload("witness-relay-absent-compile-report-v1", relayPath, err)
+	payload["recipe_id"] = requirement.ID
+	payload["contract_id"] = requirement.ContractID
+	payload["status"] = contracts.RelayLaunchStatusAbsent
+	return payload
+}
+
+func relayAbsentPayload(schemaVersion string, relayPath string, err error) map[string]any {
+	payload := map[string]any{
+		"schema_version":       schemaVersion,
+		"digest_profile":       digest.Profile,
+		"relay_launch_status":  contracts.RelayLaunchStatusAbsent,
+		"relay_error_kind":     relayclient.ErrorRelayMissing,
+		"relay_error_message":  err.Error(),
+		"relay_executable":     relayExecutable(relayPath),
+		"verification_effect":  contracts.DispositionPendingVerification,
+		"verification_status":  contracts.RecordStatusUnavailable,
+		"verification_reason":  "relay_verification_unavailable",
+		"recorded_degradation": true,
+	}
+	var commandError *relayclient.CommandError
+	if errors.As(err, &commandError) {
+		payload["relay_command"] = commandError.Command
+		payload["relay_args"] = append([]string(nil), commandError.Args...)
+	}
+	return payload
+}
+
+func relayAbsentCapabilities() map[string]bool {
+	capabilities := make(map[string]bool, len(contracts.RequiredRelayCapabilityClosureV3))
+	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+		capabilities[requirement.Key] = false
+	}
+	return capabilities
+}
+
+func relayExecutable(path string) string {
+	if strings.TrimSpace(path) != "" {
+		return path
+	}
+	return relayclient.DefaultExecutable
+}
+
 func integrationBindingFailure(code string) bool {
 	switch strings.ToLower(code) {
 	case "invalid_integration_bundle",
@@ -635,6 +793,99 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 	return digests, diagnostics
 }
 
+func selectedContractDigestsFromBundle(bundlePayload any) (map[string]string, []diag.Diagnostic) {
+	wanted := map[string]bool{}
+	for _, requirement := range RequiredRecipes {
+		wanted[requirement.ContractID] = true
+	}
+	digests := map[string]string{}
+	var diagnostics []diag.Diagnostic
+	var scan func(any)
+	scan = func(value any) {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				scan(item)
+			}
+		case map[string]any:
+			if contractsMap, ok := typed["contracts"].(map[string]any); ok {
+				keys := make([]string, 0, len(contractsMap))
+				for key := range contractsMap {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				for _, contractID := range keys {
+					contractPayload := contractsMap[contractID]
+					if wanted[contractID] {
+						recordContractDigest(digests, &diagnostics, contractID, contractPayload)
+					}
+					scan(contractPayload)
+				}
+			}
+			if id := contractID(typed); wanted[id] {
+				recordContractDigest(digests, &diagnostics, id, typed)
+			}
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				if key == "contracts" {
+					continue
+				}
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				scan(typed[key])
+			}
+		}
+	}
+	scan(bundlePayload)
+	for _, contractID := range sortedBoolMapKeys(wanted) {
+		if digests[contractID] == "" {
+			diagnostics = append(diagnostics, diag.FromError(diag.New(
+				CodeRecipeContractMismatch,
+				"integration bundle does not contain a required Witness contract.",
+				diag.WithDetail("contract_id", contractID),
+			)))
+		}
+	}
+	return digests, diagnostics
+}
+
+func recordContractDigest(digests map[string]string, diagnostics *[]diag.Diagnostic, contractID string, payload any) {
+	if digests[contractID] != "" {
+		return
+	}
+	object, ok := payload.(map[string]any)
+	if !ok {
+		*diagnostics = append(*diagnostics, diag.FromError(diag.New(
+			CodeRecipeContractMismatch,
+			"integration bundle required Witness contract must be a JSON object.",
+			diag.WithDetail("contract_id", contractID),
+		)))
+		return
+	}
+	if bodyID := contractIDValue(object); bodyID != "" && bodyID != contractID {
+		*diagnostics = append(*diagnostics, diag.FromError(diag.New(
+			CodeRecipeContractMismatch,
+			"integration bundle contract body id does not match the contract map key.",
+			diag.WithDetail("contract_id", contractID),
+			diag.WithDetail("body_id", bodyID),
+		)))
+		return
+	}
+	contractDigest, err := digest.SemanticJSON(object)
+	if err != nil {
+		*diagnostics = append(*diagnostics, diag.FromError(diag.Wrap(
+			err,
+			CodeContractDigestMissing,
+			"integration bundle required Witness contract digest could not be computed.",
+			diag.WithDetail("contract_id", contractID),
+		)))
+		return
+	}
+	digests[contractID] = contractDigest
+}
+
 func scanContracts(value any, wanted map[string]bool, found map[string]bool) {
 	switch typed := value.(type) {
 	case []any:
@@ -668,6 +919,13 @@ func scanContracts(value any, wanted map[string]bool, found map[string]bool) {
 }
 
 func contractID(object map[string]any) string {
+	if id := contractIDValue(object); id != "" {
+		return id
+	}
+	return ""
+}
+
+func contractIDValue(object map[string]any) string {
 	for _, key := range []string{"id", "contract_id"} {
 		if value, ok := object[key].(string); ok {
 			return value
@@ -883,6 +1141,7 @@ func typedCompileFailureDiagnostic(recipeID string, relayDiagnostic diag.Diagnos
 }
 
 func compatibilityManifest(result *Result, diagnostics []diag.Diagnostic) contracts.RelayCompatibility {
+	relayAbsent := RelayAbsent(*result)
 	capabilities := make(map[string]bool, len(contracts.RequiredRelayCapabilityClosureV3))
 	missing := map[string]bool{}
 	for _, diagnostic := range diagnostics {
@@ -897,7 +1156,7 @@ func compatibilityManifest(result *Result, diagnostics []diag.Diagnostic) contra
 		}
 	}
 	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
-		capabilities[requirement.Key] = !missing[requirement.Key]
+		capabilities[requirement.Key] = !relayAbsent && !missing[requirement.Key]
 	}
 	return contracts.RelayCompatibility{
 		SchemaVersion:           contracts.RelayCompatibilityV3,
@@ -907,8 +1166,8 @@ func compatibilityManifest(result *Result, diagnostics []diag.Diagnostic) contra
 		CapabilitiesDigest:      result.ArtifactDigests["relay-capabilities.json"],
 		IntegrationBundleDigest: result.ContractDigests["integration_bundle"],
 		SelectedContracts:       relayCompatibilitySelectedContracts(result.ContractDigests),
-		RecipePlans:             relayCompatibilityRecipePlans(result.RecipePlanDigests),
-		CompileReports:          relayCompatibilityCompileReports(result.CompileReportDigests),
+		RecipePlans:             relayCompatibilityRecipePlans(result.RecipePlanDigests, relayAbsent),
+		CompileReports:          relayCompatibilityCompileReports(result.CompileReportDigests, relayAbsent),
 		BackendStatus:           relayCompatibilityBackendStatus(result.BackendStrata),
 		ConsumerIdentity:        consumerIdentity(result.ConsumerIdentity),
 	}
@@ -930,7 +1189,10 @@ func relayCompatibilitySelectedContracts(contractDigests map[string]string) []co
 	return selected
 }
 
-func relayCompatibilityRecipePlans(recipePlanDigests map[string]string) []contracts.RecipePlanDigest {
+func relayCompatibilityRecipePlans(recipePlanDigests map[string]string, relayAbsent bool) []contracts.RecipePlanDigest {
+	if relayAbsent {
+		return nil
+	}
 	plans := make([]contracts.RecipePlanDigest, 0, len(contracts.RequiredWitnessRecipeContractsV2))
 	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
 		plans = append(plans, contracts.RecipePlanDigest{
@@ -942,13 +1204,17 @@ func relayCompatibilityRecipePlans(recipePlanDigests map[string]string) []contra
 	return plans
 }
 
-func relayCompatibilityCompileReports(compileReportDigests map[string]string) []contracts.CompileReportRef {
+func relayCompatibilityCompileReports(compileReportDigests map[string]string, relayAbsent bool) []contracts.CompileReportRef {
 	reports := make([]contracts.CompileReportRef, 0, len(contracts.RequiredWitnessRecipeContractsV2))
 	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
 		reportDigest := compileReportDigests[requirement.RecipeID]
+		status := "retained"
+		if relayAbsent {
+			status = contracts.RelayLaunchStatusAbsent
+		}
 		reports = append(reports, contracts.CompileReportRef{
 			RecipeID: requirement.RecipeID,
-			Status:   "retained",
+			Status:   status,
 			Ref: contracts.ArtifactRef{
 				Kind:          "compile-report",
 				ID:            requirement.RecipeID,

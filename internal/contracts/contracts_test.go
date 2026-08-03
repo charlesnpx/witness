@@ -388,6 +388,37 @@ func TestManifestCanonicalResultDigestBindsEmbeddedRelayVerdicts(t *testing.T) {
 	assertDiagnosticCode(t, diagnostics, CodeDigestMismatch)
 }
 
+func TestVerificationManifestRejectsInvalidRelayLaunchStatusMarkers(t *testing.T) {
+	_, batch := validRoleOutputAndBatch(t)
+	verdicts := validSurvivedVerdicts(batch)
+	manifest := validVerificationManifest(t, batch, verdicts)
+	manifest.Batches[0].Status = RecordStatusUnavailable
+	manifest.Batches[0].PortableExportRef = nil
+	manifest.Batches[0].PortableExportDigest = ""
+	manifest.Batches[0].CanonicalResultDigest = ""
+	manifest.Batches[0].RelayVerdicts = nil
+	manifest.Batches[0].FailureReason = "relay_verification_unavailable"
+	manifest.ConsumerIdentity = map[string]any{
+		"kind": "test",
+		"id":   "consumer",
+		VerificationManifestRelayBatchesKey: map[string]any{
+			batch.BatchID: map[string]any{
+				"recipe_family": "witness-falsify-v2",
+				"backend":       "codex",
+				"finding_ids":   []string{batch.Findings[0].FindingID},
+			},
+		},
+	}
+
+	diagnostics := ValidateVerificationManifest(manifest)
+	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
+
+	manifest.ConsumerIdentity[VerificationManifestRelayLaunchStatusKey] = RelayLaunchStatusAbsent
+	manifest.ConsumerIdentity[VerificationManifestRelayBatchesKey].(map[string]any)[batch.BatchID].(map[string]any)[VerificationManifestBatchRelayLaunchStatusKey] = RelayLaunchStatusPresent
+	diagnostics = ValidateVerificationManifest(manifest)
+	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
+}
+
 func TestReviewRulesRejectReorderedAdjudicationSequence(t *testing.T) {
 	rules := DefaultReviewRules()
 	rules.AdjudicationOrder[0], rules.AdjudicationOrder[1] = rules.AdjudicationOrder[1], rules.AdjudicationOrder[0]

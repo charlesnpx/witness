@@ -174,6 +174,67 @@ func TestVerificationPreflightCLIWiredToRun(t *testing.T) {
 	}
 }
 
+func TestVerificationPreflightRelayAbsentWritesPassingResult(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	outPath := filepath.Join(dir, "preflight.json")
+	missingRelay := filepath.Join(dir, "missing-convo-relay")
+	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
+
+	if err := route([]string{
+		"verification", "preflight",
+		"-relay", missingRelay,
+		"-integration-bundle", bundlePath,
+		"-state-dir", stateDir,
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("relay-absent preflight: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || len(result.Diagnostics) != 0 {
+		t.Fatalf("preflight result = %#v, want ok degraded result without blocking diagnostics", result)
+	}
+	if !preflight.RelayAbsent(result) {
+		t.Fatalf("backend strata = %#v, want relay_absent", result.BackendStrata)
+	}
+	for _, required := range []string{
+		"compatibility-manifest.json",
+		"relay-capabilities.json",
+		"integration-bundle.json",
+		filepath.ToSlash(filepath.Join("compile-reports", "witness-falsify-v2.json")),
+	} {
+		if result.ArtifactDigests[required] == "" {
+			t.Fatalf("artifact digests = %#v, missing %s", result.ArtifactDigests, required)
+		}
+	}
+	compatibilityBytes, err := os.ReadFile(filepath.Join(stateDir, "compatibility-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBytes, err := retainedPayloadCanonicalBytes(compatibilityBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compatibility, err := contracts.ReadRelayCompatibilityBytes(payloadBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contracts.RelayCompatibilityRelayAbsent(compatibility) {
+		t.Fatalf("compatibility backend status = %#v, want relay_absent", compatibility.BackendStatus)
+	}
+	if diagnostics := contracts.ValidateRelayCompatibility(compatibility); len(diagnostics) != 0 {
+		t.Fatalf("compatibility diagnostics = %#v", diagnostics)
+	}
+}
+
 func TestVerificationPreflightRejectsOutputAliasingInputBeforeWrite(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")

@@ -8,10 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"witness/internal/adjudicate"
 	"witness/internal/canonjson"
 	"witness/internal/charter"
+	"witness/internal/contracts"
 	"witness/internal/digest"
 	"witness/internal/ledger"
+	"witness/internal/preflight"
 	"witness/internal/strictjson"
 )
 
@@ -86,6 +89,51 @@ func TestMetricsGolden(t *testing.T) {
 				t.Fatalf("metrics mismatch\nactual:\n%s\nexpected:\n%s", actual, expected)
 			}
 		})
+	}
+}
+
+func TestPendingVerificationMetricsStratifyRelayAbsent(t *testing.T) {
+	dir := t.TempDir()
+	preflightPath := writeMetricsJSON(t, dir, "preflight.json", preflight.Result{
+		SchemaVersion: preflight.SchemaVersion,
+		OK:            true,
+		BackendStrata: map[string]string{
+			"codex":  contracts.RelayLaunchStatusAbsent,
+			"claude": contracts.RelayLaunchStatusAbsent,
+		},
+	})
+	runResultPath := writeMetricsJSON(t, dir, "run-result.json", adjudicate.Result{
+		SchemaVersion: adjudicate.ResultSchemaVersion,
+		Summary: adjudicate.Summary{
+			PendingVerification: 1,
+		},
+		Findings: []adjudicate.FindingVerdict{{
+			FindingID:   "finding-high",
+			Disposition: contracts.DispositionPendingVerification,
+			Relay: &adjudicate.RelayMetadata{
+				Required:      true,
+				Status:        contracts.RecordStatusUnavailable,
+				FailureReason: "relay_verification_unavailable",
+			},
+		}},
+	})
+
+	document, err := Run(Options{
+		PreflightPath:  preflightPath,
+		RunResultPaths: []string{runResultPath},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if document.PendingVerification.Total != 1 {
+		t.Fatalf("pending total = %d, want 1", document.PendingVerification.Total)
+	}
+	if len(document.PendingVerification.Strata) != 1 {
+		t.Fatalf("pending strata = %#v, want one relay_absent stratum", document.PendingVerification.Strata)
+	}
+	stratum := document.PendingVerification.Strata[0]
+	if stratum.BackendAuthStatus != BackendAuthStatusRelayAbsent || stratum.Count != 1 {
+		t.Fatalf("pending stratum = %#v, want relay_absent count 1", stratum)
 	}
 }
 
@@ -205,6 +253,16 @@ func TestSkillLint(t *testing.T) {
 			t.Fatalf("skill contains forbidden role/gate addition phrase %q", phrase)
 		}
 	}
+}
+
+func writeMetricsJSON(t *testing.T, dir string, name string, value any) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	data := append(canonjson.MustMarshal(value), '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func assertDeltaExclusionStratum(t *testing.T, metrics DeltaComparisonMetrics, reason string, count int) {

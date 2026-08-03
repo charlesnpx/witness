@@ -50,6 +50,8 @@ const (
 	RecordStatusFailed                 = "failed"
 	RecordStatusUnavailable            = "unavailable"
 	RecordStatusNotRequired            = "not-required"
+	RelayLaunchStatusAbsent            = "relay_absent"
+	RelayLaunchStatusPresent           = "relay_present"
 	ExecutionStatusSatisfied           = "satisfied"
 	ExecutionStatusContradicted        = "contradicted"
 	ExecutionStatusFailed              = "failed"
