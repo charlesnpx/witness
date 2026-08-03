@@ -78,6 +78,30 @@ func TestCharterCLIInitFreezeAmendShow(t *testing.T) {
 	}
 }
 
+func TestCharterInitTemplatesValidateAndFreeze(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range charter.TemplateNames() {
+		charterPath := filepath.Join(dir, name+".json")
+		if err := route([]string{"charter", "init", "-template", name, "-out", charterPath, "-actor", "owner"}); err != nil {
+			t.Fatalf("init template %s: %v", name, err)
+		}
+		document, err := charter.ReadFile(charterPath)
+		if err != nil {
+			t.Fatalf("read template %s: %v", name, err)
+		}
+		if diagnostics := charter.Validate(document, nil); len(diagnostics) != 0 {
+			t.Fatalf("template %s diagnostics = %#v", name, diagnostics)
+		}
+		frozen, err := charter.Freeze(document, nil)
+		if err != nil {
+			t.Fatalf("freeze template %s: %v", name, err)
+		}
+		if frozen.CharterHash == "" {
+			t.Fatalf("template %s froze without charter hash", name)
+		}
+	}
+}
+
 func TestCharterAmendRejectsOutputAliasingAmendments(t *testing.T) {
 	dir := t.TempDir()
 	charterPath := filepath.Join(dir, "charter.json")

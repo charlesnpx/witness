@@ -42,17 +42,21 @@ const (
 	CodeContractDigestMissing       = "preflight_contract_digest_missing"
 	CodeInvalidRecipeID             = "preflight_invalid_recipe_id"
 	CodeMissingFreezeInput          = "preflight_missing_freeze_input"
+	CodeSnapshotDigestMismatch      = "preflight_snapshot_digest_mismatch"
+	CodeInvalidSnapshotManifest     = "preflight_invalid_snapshot_manifest"
 )
 
 type Options struct {
-	RelayPath             string
-	IntegrationBundlePath string
-	StateDir              string
-	SourceDir             string
-	SnapshotDir           string
-	AllowNonGitSource     bool
-	ConsumerIdentity      map[string]any
-	Runner                relayclient.Runner
+	RelayPath              string
+	IntegrationBundlePath  string
+	StateDir               string
+	SourceDir              string
+	SnapshotDir            string
+	SnapshotManifestPath   string
+	ExpectedSnapshotDigest string
+	AllowNonGitSource      bool
+	ConsumerIdentity       map[string]any
+	Runner                 relayclient.Runner
 }
 
 type Result struct {
@@ -150,7 +154,15 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		return result, err
 	}
 
-	if options.SourceDir != "" || options.SnapshotDir != "" {
+	if options.SnapshotManifestPath != "" {
+		snapshotDigest, err := existingSnapshotDigest(options.SnapshotManifestPath, options.ExpectedSnapshotDigest)
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(err))
+		} else {
+			result.SnapshotDigest = snapshotDigest
+			result.ArtifactDigests["source-snapshot-manifest"] = snapshotDigest
+		}
+	} else if options.SourceDir != "" || options.SnapshotDir != "" {
 		if options.SourceDir == "" || options.SnapshotDir == "" {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(CodeMissingFreezeInput, "source_dir and snapshot_dir must be provided together.")))
 		} else {
@@ -285,6 +297,90 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	}
 
 	return finish(result, diagnostics)
+}
+
+func existingSnapshotDigest(path string, expectedDigest string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", diag.Wrap(
+			err,
+			CodeInvalidSnapshotManifest,
+			"existing snapshot manifest could not be read.",
+			diag.WithDetail("path", path),
+			diag.WithDetail("error", err.Error()),
+		)
+	}
+	manifest, err := strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return "", diag.Wrap(
+			err,
+			CodeInvalidSnapshotManifest,
+			"existing snapshot manifest could not be decoded.",
+			diag.WithDetail("path", path),
+			diag.WithDetail("error", err.Error()),
+		)
+	}
+	if manifest.SchemaVersion != freeze.SchemaVersion {
+		return "", diag.New(
+			CodeInvalidSnapshotManifest,
+			"existing snapshot manifest schema_version is unsupported.",
+			diag.WithDetail("path", path),
+			diag.WithDetail("actual", manifest.SchemaVersion),
+			diag.WithDetail("expected", freeze.SchemaVersion),
+		)
+	}
+	if manifest.DigestProfile != digest.Profile {
+		return "", diag.New(
+			CodeInvalidSnapshotManifest,
+			"existing snapshot manifest digest_profile is unsupported.",
+			diag.WithDetail("path", path),
+			diag.WithDetail("actual", manifest.DigestProfile),
+			diag.WithDetail("expected", digest.Profile),
+		)
+	}
+	actualDigest, err := freeze.ManifestDigest(manifest)
+	if err != nil {
+		return "", diag.Wrap(
+			err,
+			CodeInvalidSnapshotManifest,
+			"existing snapshot manifest digest could not be recomputed.",
+			diag.WithDetail("path", path),
+		)
+	}
+	for label, embedded := range map[string]string{
+		"source":    manifest.Source.ManifestDigest,
+		"workspace": manifest.Workspace.ManifestDigest,
+	} {
+		if strings.TrimSpace(embedded) == "" {
+			return "", diag.New(
+				CodeSnapshotDigestMismatch,
+				"existing snapshot manifest is missing an embedded digest.",
+				diag.WithDetail("path", path),
+				diag.WithDetail("location", label),
+				diag.WithDetail("expected_digest", actualDigest),
+			)
+		}
+		if embedded != actualDigest {
+			return "", diag.New(
+				CodeSnapshotDigestMismatch,
+				"existing snapshot manifest embedded digest does not match its content.",
+				diag.WithDetail("path", path),
+				diag.WithDetail("location", label),
+				diag.WithDetail("actual_digest", actualDigest),
+				diag.WithDetail("expected_digest", embedded),
+			)
+		}
+	}
+	if expectedDigest != "" && actualDigest != expectedDigest {
+		return "", diag.New(
+			CodeSnapshotDigestMismatch,
+			"existing snapshot manifest digest does not match the expected frozen snapshot.",
+			diag.WithDetail("path", path),
+			diag.WithDetail("actual_digest", actualDigest),
+			diag.WithDetail("expected_digest", expectedDigest),
+		)
+	}
+	return actualDigest, nil
 }
 
 func runRelayAbsentPreflight(result *Result, options Options, launchErr error, diagnostics []diag.Diagnostic) (*Result, error) {
