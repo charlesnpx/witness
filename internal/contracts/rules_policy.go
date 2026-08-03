@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"io"
+	"strings"
 
 	"witness/internal/diag"
 	"witness/internal/strictjson"
@@ -20,6 +21,7 @@ type ReviewRules struct {
 type ReviewPolicy struct {
 	SchemaVersion                  string            `json:"schema_version"`
 	PolicyID                       string            `json:"policy_id"`
+	ScopePolicy                    string            `json:"scope_policy,omitempty"`
 	DefectAdditiveAutoApplyEnabled bool              `json:"defect_additive_auto_apply_enabled"`
 	ProductionCap                  *int              `json:"production_cap,omitempty"`
 	TestCap                        *int              `json:"test_cap,omitempty"`
@@ -78,6 +80,16 @@ var requiredAdjudicationOrderV2 = []string{
 	"application_class",
 }
 
+var requiredAdjudicationOrderV3 = []string{
+	"change_surface_scope",
+	"charter_role_goal_scope_witness_recurrence",
+	"execution_receipt",
+	"strength_severity_cap",
+	"pending_verification",
+	"relay_result",
+	"application_class",
+}
+
 func ReadReviewRules(reader io.Reader) (ReviewRules, error) {
 	return strictjson.Decode[ReviewRules](reader, strictjson.DefaultMaxBytes)
 }
@@ -96,8 +108,8 @@ func ReadReviewPolicyBytes(data []byte) (ReviewPolicy, error) {
 
 func DefaultReviewRules() ReviewRules {
 	return ReviewRules{
-		SchemaVersion: ReviewRulesV2,
-		RulesID:       "default-review-rules-v2",
+		SchemaVersion: ReviewRulesV3,
+		RulesID:       "default-review-rules-v3",
 		SeverityCaps: map[string]string{
 			WitnessStrengthExecutable:  SeverityCritical,
 			WitnessStrengthConstructed: SeverityHigh,
@@ -114,14 +126,16 @@ func DefaultReviewRules() ReviewRules {
 			ApplicationClassCallerDecision,
 			ApplicationClassNone,
 		},
-		AdjudicationOrder: append([]string(nil), requiredAdjudicationOrderV2...),
+		AdjudicationOrder: append([]string(nil), requiredAdjudicationOrderV3...),
+		AdvisoryReasons:   []string{ReasonOutOfDelta},
 	}
 }
 
 func DefaultReviewPolicy() ReviewPolicy {
 	return ReviewPolicy{
-		SchemaVersion:                  ReviewPolicyV2,
-		PolicyID:                       "bootstrap-review-policy-v2",
+		SchemaVersion:                  ReviewPolicyV3,
+		PolicyID:                       "bootstrap-review-policy-v3",
+		ScopePolicy:                    ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: false,
 	}
 }
@@ -132,8 +146,11 @@ func RequireValidReviewRules(document ReviewRules) error {
 
 func ValidateReviewRules(document ReviewRules) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != ReviewRulesV2 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, "review rules schema_version must be review-rules-v2.", "/schema_version", map[string]any{"expected": ReviewRulesV2, "actual": document.SchemaVersion}))
+	requiredOrder := requiredAdjudicationOrderV3
+	if document.SchemaVersion == ReviewRulesV2 {
+		requiredOrder = requiredAdjudicationOrderV2
+	} else if document.SchemaVersion != ReviewRulesV3 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, "review rules schema_version must be review-rules-v3.", "/schema_version", map[string]any{"expected": ReviewRulesV3, "actual": document.SchemaVersion}))
 	}
 	requireStableID(&diagnostics, "/rules_id", "rules ID", document.RulesID)
 	expectedCaps := []struct {
@@ -147,24 +164,27 @@ func ValidateReviewRules(document ReviewRules) []diag.Diagnostic {
 	for _, expected := range expectedCaps {
 		path := "/severity_caps/" + expected.strength
 		if document.SeverityCaps[expected.strength] != expected.cap {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, "review-rules-v2 severity caps must match the versioned contract.", path, map[string]any{"expected": expected.cap, "actual": document.SeverityCaps[expected.strength]}))
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, reviewRulesLabel(document.SchemaVersion)+" severity caps must match the versioned contract.", path, map[string]any{"expected": expected.cap, "actual": document.SeverityCaps[expected.strength]}))
 		}
 	}
 	requireStringSet(&diagnostics, "/dispositions", "disposition", document.Dispositions, []string{DispositionAdmitted, DispositionAdvisory, DispositionPendingVerification, DispositionOwnerOverride}, CodeInvalidRules)
 	requireStringSet(&diagnostics, "/application_classes", "application class", document.ApplicationClasses, []string{ApplicationClassAutomaticCandidate, ApplicationClassCallerDecision, ApplicationClassNone}, CodeInvalidRules)
-	if len(document.AdjudicationOrder) != len(requiredAdjudicationOrderV2) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, "review-rules-v2 must declare the fixed six-step adjudication order.", "/adjudication_order", map[string]any{"actual_count": len(document.AdjudicationOrder), "expected_count": len(requiredAdjudicationOrderV2)}))
+	if len(document.AdjudicationOrder) != len(requiredOrder) {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, reviewRulesLabel(document.SchemaVersion)+" must declare the fixed adjudication order.", "/adjudication_order", map[string]any{"actual_count": len(document.AdjudicationOrder), "expected_count": len(requiredOrder)}))
 	} else {
-		for index, expected := range requiredAdjudicationOrderV2 {
+		for index, expected := range requiredOrder {
 			if document.AdjudicationOrder[index] != expected {
 				diagnostics = append(diagnostics, diagnostic(
 					CodeInvalidRules,
-					"review-rules-v2 adjudication order must match the versioned sequence exactly.",
+					reviewRulesLabel(document.SchemaVersion)+" adjudication order must match the versioned sequence exactly.",
 					"/adjudication_order/"+itoa(index),
 					map[string]any{"actual": document.AdjudicationOrder[index], "expected": expected},
 				))
 			}
 		}
+	}
+	if document.SchemaVersion == ReviewRulesV3 {
+		requireStringSet(&diagnostics, "/advisory_reasons", "advisory reason", document.AdvisoryReasons, []string{ReasonOutOfDelta}, CodeInvalidRules)
 	}
 	return diagnostics
 }
@@ -172,10 +192,13 @@ func ValidateReviewRules(document ReviewRules) []diag.Diagnostic {
 func ValidateReviewPolicy(document ReviewPolicy, context *PolicyValidationContext) PolicyValidationResult {
 	var diagnostics []diag.Diagnostic
 	result := PolicyValidationResult{}
-	if document.SchemaVersion != ReviewPolicyV2 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidPolicy, "review policy schema_version must be review-policy-v2.", "/schema_version", map[string]any{"expected": ReviewPolicyV2, "actual": document.SchemaVersion}))
+	if document.SchemaVersion != ReviewPolicyV2 && document.SchemaVersion != ReviewPolicyV3 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidPolicy, "review policy schema_version must be review-policy-v3.", "/schema_version", map[string]any{"expected": ReviewPolicyV3, "actual": document.SchemaVersion}))
 	}
 	requireStableID(&diagnostics, "/policy_id", "policy ID", document.PolicyID)
+	if !validScopePolicy(document.ScopePolicy) {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidPolicy, "scope_policy must be delta_obligating or whole_tree when set.", "/scope_policy", map[string]any{"value": document.ScopePolicy}))
+	}
 	if document.ProductionCap != nil && *document.ProductionCap <= 0 {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidPolicy, "production_cap must be positive when set.", "/production_cap", map[string]any{"value": *document.ProductionCap}))
 	}
@@ -252,6 +275,13 @@ func deltaEstimateKnown(delta DeltaEstimate) bool {
 	return delta.Status == DeltaStatusKnown
 }
 
+func EffectiveScopePolicy(document ReviewPolicy) string {
+	if strings.TrimSpace(document.ScopePolicy) == ScopePolicyDeltaObligating {
+		return ScopePolicyDeltaObligating
+	}
+	return ScopePolicyWholeTree
+}
+
 func ReviewRulesDigest(document ReviewRules) (string, error) {
 	return SemanticDigest(document)
 }
@@ -308,7 +338,7 @@ func validateCapRelease(release CapReleaseRecord, policy ReviewPolicy, context *
 
 func requireStringSet(diagnostics *[]diag.Diagnostic, path string, label string, actual []string, expected []string, code string) {
 	if len(actual) != len(expected) {
-		*diagnostics = append(*diagnostics, diagnostic(code, "review-rules-v2 must declare the complete "+label+" set.", path, map[string]any{"actual_count": len(actual), "expected_count": len(expected)}))
+		*diagnostics = append(*diagnostics, diagnostic(code, "review rules must declare the complete "+label+" set.", path, map[string]any{"actual_count": len(actual), "expected_count": len(expected)}))
 		return
 	}
 	actualSet := map[string]bool{}
@@ -317,7 +347,23 @@ func requireStringSet(diagnostics *[]diag.Diagnostic, path string, label string,
 	}
 	for _, value := range expected {
 		if !actualSet[value] {
-			*diagnostics = append(*diagnostics, diagnostic(code, "review-rules-v2 is missing a required "+label+".", path, map[string]any{"value": value}))
+			*diagnostics = append(*diagnostics, diagnostic(code, "review rules are missing a required "+label+".", path, map[string]any{"value": value}))
 		}
 	}
+}
+
+func validScopePolicy(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "", ScopePolicyDeltaObligating, ScopePolicyWholeTree:
+		return true
+	default:
+		return false
+	}
+}
+
+func reviewRulesLabel(schemaVersion string) string {
+	if schemaVersion == "" {
+		return "review rules"
+	}
+	return schemaVersion
 }

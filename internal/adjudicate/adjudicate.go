@@ -8,16 +8,19 @@ import (
 	"sort"
 	"strings"
 
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/harness"
 	"witness/internal/strictjson"
 )
 
 const (
-	ResultSchemaVersion = "witness-adjudication-run-result-v1"
+	ResultSchemaVersionV1 = "witness-adjudication-run-result-v1"
+	ResultSchemaVersion   = "witness-adjudication-run-result-v2"
 
 	CodeInvalidInput              = "adjudicate_invalid_input"
 	CodeInvalidFrozenCharter      = "adjudicate_invalid_frozen_charter"
@@ -45,12 +48,15 @@ const (
 	ReasonRelayWeakened                = "relay_weakened"
 	ReasonRelayBroken                  = "relay_broken"
 	ReasonWitnessWeakenedBelowFloor    = "witness_weakened_below_floor"
+	ReasonOutOfDelta                   = contracts.ReasonOutOfDelta
 )
 
 type Options struct {
 	FrozenCharter *charter.FrozenCharter
 	RoleOutputs   []RoleOutputInput
 	Manifest      contracts.VerificationManifest
+	BaseManifest  *freeze.Manifest
+	HeadManifest  *freeze.Manifest
 
 	ReceiptOutputDir   string
 	ReceiptHMACKey     []byte
@@ -107,12 +113,13 @@ type Result struct {
 }
 
 type Summary struct {
-	Admitted            int `json:"admitted"`
-	Advisory            int `json:"advisory"`
-	PendingVerification int `json:"pending_verification"`
-	AutomaticCandidate  int `json:"automatic_candidate"`
-	CallerDecision      int `json:"caller_decision"`
-	None                int `json:"none"`
+	Admitted            int  `json:"admitted"`
+	Advisory            int  `json:"advisory"`
+	PendingVerification int  `json:"pending_verification"`
+	AutomaticCandidate  int  `json:"automatic_candidate"`
+	CallerDecision      int  `json:"caller_decision"`
+	None                int  `json:"none"`
+	FixpointEligible    bool `json:"fixpoint_eligible"`
 }
 
 type FindingVerdict struct {
@@ -202,6 +209,15 @@ func Run(options Options) (*Result, error) {
 	if !options.PolicyCapReleaseLedgerBacked {
 		policy.CapRelease = nil
 	}
+	scopePolicy := contracts.EffectiveScopePolicy(policy)
+	if scopePolicy == contracts.ScopePolicyDeltaObligating {
+		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
+			return nil, validationError(CodeInvalidPolicy, []diag.Diagnostic{diagnostic(contracts.CodeInvalidPolicy, "delta_obligating scope policy requires review-policy-v3.", "/schema_version", map[string]any{"actual": policy.SchemaVersion, "expected": contracts.ReviewPolicyV3})})
+		}
+		if rules.SchemaVersion != contracts.ReviewRulesV3 {
+			return nil, validationError(CodeInvalidRules, []diag.Diagnostic{diagnostic(contracts.CodeInvalidRules, "delta_obligating scope policy requires review-rules-v3.", "/schema_version", map[string]any{"actual": rules.SchemaVersion, "expected": contracts.ReviewRulesV3})})
+		}
+	}
 	validationContext := policyContext(rules, policy, options.FrozenCharter)
 	policyValidation := contracts.ValidateReviewPolicy(policy, validationContext)
 	if len(policyValidation.Diagnostics) > 0 {
@@ -225,6 +241,10 @@ func Run(options Options) (*Result, error) {
 		global = append(global, ValidatePriorLineage(options.PriorLineage)...)
 	}
 	global = append(global, validateManifestEnvelope(options.Manifest, options.FrozenCharter)...)
+	global = append(global, validateManifestScopePolicy(options.Manifest, scopePolicy)...)
+	global = append(global, validateManifestChangeSurfaceDerivation(options.Manifest, options.BaseManifest, options.HeadManifest)...)
+	global = append(global, validateManifestExclusionChangeSurface(options.Manifest, scopePolicy)...)
+	global = append(global, validateManifestExclusionCoverage(options.Manifest, options.RoleOutputs)...)
 	if len(global) > 0 {
 		return nil, &ValidationError{Diagnostics: global}
 	}
@@ -241,9 +261,9 @@ func Run(options Options) (*Result, error) {
 	result := &Result{
 		SchemaVersion:             ResultSchemaVersion,
 		DigestProfile:             digest.Profile,
-		RulesVersion:              contracts.ReviewRulesV2,
+		RulesVersion:              rules.SchemaVersion,
 		RulesID:                   rules.RulesID,
-		PolicyVersion:             contracts.ReviewPolicyV2,
+		PolicyVersion:             policy.SchemaVersion,
 		PolicyID:                  policy.PolicyID,
 		PolicyDigest:              validationContext.PolicyDigest,
 		RulesDigest:               validationContext.RulesDigest,
@@ -255,7 +275,7 @@ func Run(options Options) (*Result, error) {
 		Diagnostics:               append([]diag.Diagnostic(nil), documentDiagnostics...),
 	}
 	for _, finding := range loadedFindings {
-		verdict := adjudicateFinding(finding, receipts, relay, options, rules, policy)
+		verdict := adjudicateFinding(finding, receipts, relay, options, rules, policy, scopePolicy)
 		result.Findings = append(result.Findings, verdict)
 		result.Diagnostics = append(result.Diagnostics, verdict.Diagnostics...)
 	}
@@ -409,10 +429,103 @@ func validateManifestEnvelope(manifest contracts.VerificationManifest, frozen *c
 	return diagnostics
 }
 
+func validateManifestScopePolicy(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	manifestScopePolicy := contracts.EffectiveScopePolicy(contracts.ReviewPolicy{ScopePolicy: manifest.ScopePolicy})
+	if manifest.ScopePolicy != "" && manifestScopePolicy != scopePolicy {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest scope_policy does not match the loaded review policy.", "/manifest/scope_policy", map[string]any{"actual": manifestScopePolicy, "expected": scopePolicy}))
+	}
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ScopePolicy == "" {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires the verification manifest to declare scope_policy.", "/manifest/scope_policy", map[string]any{"expected": scopePolicy}))
+	}
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface == nil && manifest.BaselinePass == nil {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires a verification manifest with a change_surface or explicit baseline_pass.", "/manifest/change_surface", map[string]any{"scope_policy": scopePolicy}))
+	}
+	return diagnostics
+}
+
+func validateManifestChangeSurfaceDerivation(manifest contracts.VerificationManifest, base *freeze.Manifest, head *freeze.Manifest) []diag.Diagnostic {
+	if manifest.ChangeSurface == nil {
+		return nil
+	}
+	diagnostics := changesurface.ValidateDeclaredDerivation(*manifest.ChangeSurface, manifest.ChangeSurfaceDigest, base, head, manifest.ArtifactDigest)
+	return prefixDiagnostics("/manifest/change_surface", diagnostics)
+}
+
+func validateManifestExclusionChangeSurface(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
+	if len(manifest.ExcludedFindings) == 0 {
+		return nil
+	}
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
+		return nil
+	}
+	diagnostics := make([]diag.Diagnostic, 0, len(manifest.ExcludedFindings))
+	for index := range manifest.ExcludedFindings {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidManifest,
+			"excluded findings require delta_obligating scope policy with a derived change surface.",
+			"/manifest/excluded_findings/"+itoa(index),
+			map[string]any{
+				"scope_policy":       scopePolicy,
+				"has_change_surface": manifest.ChangeSurface != nil,
+			},
+		))
+	}
+	return diagnostics
+}
+
+type exclusionCoverageFinding struct {
+	role    string
+	finding contracts.Finding
+}
+
+func validateManifestExclusionCoverage(manifest contracts.VerificationManifest, inputs []RoleOutputInput) []diag.Diagnostic {
+	if len(manifest.ExcludedFindings) == 0 {
+		return nil
+	}
+	byDigest := map[string]map[string]exclusionCoverageFinding{}
+	for _, input := range inputs {
+		roleDigest, err := contracts.RoleOutputDigest(input.Document)
+		if err != nil {
+			continue
+		}
+		findings := byDigest[roleDigest]
+		if findings == nil {
+			findings = map[string]exclusionCoverageFinding{}
+			byDigest[roleDigest] = findings
+		}
+		for _, finding := range input.Document.Findings {
+			findings[finding.ID] = exclusionCoverageFinding{role: input.Document.Role, finding: finding}
+		}
+	}
+	var diagnostics []diag.Diagnostic
+	for index, record := range manifest.ExcludedFindings {
+		path := "/manifest/excluded_findings/" + itoa(index)
+		findings := byDigest[record.SourceRoleOutputDigest]
+		if findings == nil {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding source role-output is not supplied to adjudication.", path+"/source_role_output_digest", map[string]any{"finding_id": record.FindingID, "source_role_output_digest": record.SourceRoleOutputDigest}))
+			continue
+		}
+		covered, exists := findings[record.FindingID]
+		if !exists {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding is not present in its supplied source role-output.", path+"/finding_id", map[string]any{"finding_id": record.FindingID, "source_role_output_digest": record.SourceRoleOutputDigest}))
+			continue
+		}
+		if covered.role != record.Role {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding role does not match its supplied source role-output.", path+"/role", map[string]any{"actual": record.Role, "expected": covered.role, "finding_id": record.FindingID}))
+		}
+		if manifest.ChangeSurface != nil && contracts.FindingInChangeSurface(covered.finding, *manifest.ChangeSurface) {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded out-of-delta finding touches the verified change surface.", path+"/finding_id", map[string]any{"finding_id": record.FindingID, "reason": record.Reason}))
+		}
+	}
+	return diagnostics
+}
+
 type loadedFinding struct {
 	sourceIndex      int
 	findingIndex     int
 	sourceRoleOutput string
+	sourceDigest     string
 	role             string
 	document         contracts.RoleOutputDocument
 	finding          contracts.Finding
@@ -425,6 +538,10 @@ func collectFindings(inputs []RoleOutputInput, frozen *charter.FrozenCharter, ma
 	var findings []loadedFinding
 	var documentDiagnostics []diag.Diagnostic
 	for sourceIndex, input := range inputs {
+		roleDigest, err := contracts.RoleOutputDigest(input.Document)
+		if err != nil {
+			documentDiagnostics = append(documentDiagnostics, diagnostic(CodeInvalidRoleOutput, "role-output digest could not be computed.", "/role_outputs/"+itoa(sourceIndex), map[string]any{"error": err.Error(), "role_output": input.Path}))
+		}
 		roleOutputDiagnostics := contracts.ValidateRoleOutput(input.Document, frozen)
 		byFinding, documentLevel := splitFindingDiagnostics(roleOutputDiagnostics)
 		documentDiagnostics = append(documentDiagnostics, appendRoleOutputContext(documentLevel, sourceIndex, input.Path)...)
@@ -433,6 +550,7 @@ func collectFindings(inputs []RoleOutputInput, frozen *charter.FrozenCharter, ma
 				sourceIndex:      sourceIndex,
 				findingIndex:     findingIndex,
 				sourceRoleOutput: input.Path,
+				sourceDigest:     roleDigest,
 				role:             input.Document.Role,
 				document:         input.Document,
 				finding:          finding,
@@ -697,7 +815,7 @@ func stringMapValue(object map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, rules contracts.ReviewRules, policy contracts.ReviewPolicy) FindingVerdict {
+func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, rules contracts.ReviewRules, policy contracts.ReviewPolicy, scopePolicy string) FindingVerdict {
 	finding := item.finding
 	verdict := FindingVerdict{
 		FindingID:        finding.ID,
@@ -720,6 +838,20 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		verdict.Disposition = contracts.DispositionAdvisory
 		verdict.ApplicationClass = contracts.ApplicationClassNone
 		verdict.Reasons = appendValidationReasons(verdict.Reasons, item.diagnostics)
+		return verdict
+	}
+
+	if excluded, ok := manifestExcludedFinding(options.Manifest, item); ok {
+		verdict.Disposition = excluded.Disposition
+		verdict.ApplicationClass = excluded.ApplicationClass
+		verdict.Reasons = appendReason(verdict.Reasons, excluded.Reason)
+		return verdict
+	}
+
+	if scopePolicy == contracts.ScopePolicyDeltaObligating && options.Manifest.ChangeSurface != nil && !contracts.FindingInChangeSurface(finding, *options.Manifest.ChangeSurface) {
+		verdict.Disposition = contracts.DispositionAdvisory
+		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
+		verdict.Reasons = appendReason(verdict.Reasons, ReasonOutOfDelta)
 		return verdict
 	}
 
@@ -1141,6 +1273,11 @@ func summarize(findings []FindingVerdict) Summary {
 			summary.None++
 		}
 	}
+	summary.FixpointEligible = summary.Admitted == 0 &&
+		summary.Advisory == 0 &&
+		summary.PendingVerification == 0 &&
+		summary.AutomaticCandidate == 0 &&
+		summary.CallerDecision == 0
 	return summary
 }
 
@@ -1170,6 +1307,15 @@ func appendValidationReasons(reasons []string, diagnostics []diag.Diagnostic) []
 		reasons = appendReason(reasons, ReasonValidationFailed)
 	}
 	return reasons
+}
+
+func manifestExcludedFinding(manifest contracts.VerificationManifest, item loadedFinding) (contracts.ExcludedFindingRecord, bool) {
+	for _, excluded := range manifest.ExcludedFindings {
+		if excluded.FindingID == item.finding.ID && excluded.SourceRoleOutputDigest == item.sourceDigest {
+			return excluded, true
+		}
+	}
+	return contracts.ExcludedFindingRecord{}, false
 }
 
 func appendRoleOutputContext(diagnostics []diag.Diagnostic, sourceIndex int, roleOutputPath string) []diag.Diagnostic {

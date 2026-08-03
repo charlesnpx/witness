@@ -1,6 +1,7 @@
 package preflight
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"witness/internal/canonjson"
 	"witness/internal/contracts"
 	"witness/internal/diag"
+	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/relayclient"
 	"witness/internal/strictjson"
 )
@@ -295,6 +298,125 @@ func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 	}
 }
 
+func TestRunRelayPresentRetainsFixtureCapabilitiesByteIdentical(t *testing.T) {
+	fixtures := filepath.Join("..", "..", "testdata", "preflight")
+	stateDir := t.TempDir()
+	result, err := Run(context.Background(), Options{
+		RelayPath:             "fake-relay",
+		IntegrationBundlePath: filepath.Join(fixtures, "integration-bundle-v2.fixture.json"),
+		StateDir:              stateDir,
+		Runner:                fakeRunner{t: t, fixtures: fixtures},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
+	}
+	if RelayAbsent(*result) {
+		t.Fatalf("backend strata = %#v, unexpectedly relay_absent", result.BackendStrata)
+	}
+	retainedCapabilities, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "relay-capabilities.json"))
+	expectedCapabilities, err := canonjson.Marshal(loadFixture[any](t, "relay-capabilities-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(retainedCapabilities, expectedCapabilities) {
+		t.Fatalf("retained capabilities payload changed\nactual: %s\nwant:   %s", retainedCapabilities, expectedCapabilities)
+	}
+	compatibilityBytes, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "compatibility-manifest.json"))
+	compatibility, err := contracts.ReadRelayCompatibilityBytes(compatibilityBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contracts.RelayCompatibilityRelayAbsent(compatibility) {
+		t.Fatalf("compatibility backend status = %#v, unexpectedly relay_absent", compatibility.BackendStatus)
+	}
+}
+
+func TestRunBindsExistingSnapshotManifestAndRejectsForgedReference(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	snapshotDir := filepath.Join(root, "snapshot")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "app.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := freeze.Create(context.Background(), freeze.Options{
+		SourceDir:   sourceDir,
+		OutputDir:   snapshotDir,
+		AllowNonGit: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureBundle := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
+	result, err := Run(context.Background(), Options{
+		RelayPath:              filepath.Join(root, "missing-convo-relay"),
+		IntegrationBundlePath:  fixtureBundle,
+		StateDir:               filepath.Join(root, "state-ok"),
+		SnapshotManifestPath:   snapshot.ManifestPath,
+		ExpectedSnapshotDigest: snapshot.ManifestDigest,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
+	}
+	if result.SnapshotDigest != snapshot.ManifestDigest || result.ArtifactDigests["source-snapshot-manifest"] != snapshot.ManifestDigest {
+		t.Fatalf("snapshot binding digest=%s artifact=%s want %s", result.SnapshotDigest, result.ArtifactDigests["source-snapshot-manifest"], snapshot.ManifestDigest)
+	}
+
+	forgedDigest := digest.RawBytes([]byte("forged snapshot"))
+	result, err = Run(context.Background(), Options{
+		RelayPath:              filepath.Join(root, "missing-convo-relay"),
+		IntegrationBundlePath:  fixtureBundle,
+		StateDir:               filepath.Join(root, "state-forged"),
+		SnapshotManifestPath:   snapshot.ManifestPath,
+		ExpectedSnapshotDigest: forgedDigest,
+	})
+	if err == nil {
+		t.Fatal("Run accepted forged snapshot reference")
+	}
+	if !hasDiagnostic(result.Diagnostics, CodeSnapshotDigestMismatch) {
+		t.Fatalf("diagnostics = %#v, want %s", result.Diagnostics, CodeSnapshotDigestMismatch)
+	}
+}
+
+func TestRunRejectsSnapshotManifestMissingEmbeddedDigest(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	snapshotDir := filepath.Join(root, "snapshot")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "app.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := freeze.Create(context.Background(), freeze.Options{
+		SourceDir:   sourceDir,
+		OutputDir:   snapshotDir,
+		AllowNonGit: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := readJSONForTest[freeze.Manifest](t, snapshot.ManifestPath)
+	manifest.Source.ManifestDigest = ""
+	writeCanonicalForTest(t, snapshot.ManifestPath, manifest)
+
+	result, err := Run(context.Background(), Options{
+		RelayPath:              filepath.Join(root, "missing-convo-relay"),
+		IntegrationBundlePath:  filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json"),
+		StateDir:               filepath.Join(root, "state"),
+		SnapshotManifestPath:   snapshot.ManifestPath,
+		ExpectedSnapshotDigest: snapshot.ManifestDigest,
+	})
+	if err == nil {
+		t.Fatal("Run accepted a snapshot manifest missing an embedded digest")
+	}
+	if !hasDiagnostic(result.Diagnostics, CodeSnapshotDigestMismatch) {
+		t.Fatalf("diagnostics = %#v, want %s", result.Diagnostics, CodeSnapshotDigestMismatch)
+	}
+}
+
 func TestRunRejectsStateDirInsideSourceBeforeMkdirAll(t *testing.T) {
 	sourceDir := t.TempDir()
 	stateDir := filepath.Join(sourceDir, "state")
@@ -349,6 +471,30 @@ func loadFixture[T any](t *testing.T, name string) T {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func readJSONForTest[T any](t *testing.T, path string) T {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := strictjson.DecodeBytes[T](data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func writeCanonicalForTest(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := canonjson.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func retainedPreflightPayloadBytes(t *testing.T, path string) ([]byte, string) {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"witness/internal/changesurface"
 	"witness/internal/charter"
 	"witness/internal/diag"
 	"witness/internal/digest"
@@ -344,6 +345,40 @@ func TestVerificationBatchPreservesExplicitEmptyWitnessArtifactRefs(t *testing.T
 	}
 }
 
+func TestFindingInChangeSurfaceUsesExecutableTransformationRef(t *testing.T) {
+	surface := changesurface.Document{
+		SchemaVersion:      changesurface.SchemaVersion,
+		DigestProfile:      digest.Profile,
+		BaseArtifactDigest: testDigest("base"),
+		HeadArtifactDigest: testDigest("head"),
+		ChangedPaths: []changesurface.PathChange{{
+			Path:        "changed.go",
+			ChangeKinds: []string{changesurface.ChangeKindModified},
+		}},
+	}
+	finding := Finding{
+		ID: "finding-transform",
+		Witness: Witness{
+			Strength: WitnessStrengthExecutable,
+			Executable: &ExecutableSpec{
+				Argv:                []string{"go", "test"},
+				CWD:                 ".",
+				ExpectedObservation: "tests pass",
+				TransformationRef: &ArtifactRef{
+					Kind:          "patch",
+					ID:            "changed.go",
+					Digest:        testDigest("patch"),
+					DigestProfile: digest.Profile,
+					MediaType:     "text/plain",
+				},
+			},
+		},
+	}
+	if !FindingInChangeSurface(finding, surface) {
+		t.Fatal("FindingInChangeSurface returned false for executable transformation_ref path")
+	}
+}
+
 func TestManifestCanonicalResultDigestBindsEmbeddedRelayVerdicts(t *testing.T) {
 	_, batch := validRoleOutputAndBatch(t)
 	verdicts := validSurvivedVerdicts(batch)
@@ -351,6 +386,37 @@ func TestManifestCanonicalResultDigestBindsEmbeddedRelayVerdicts(t *testing.T) {
 	manifest.Batches[0].CanonicalResultDigest = testDigest("wrong canonical result")
 	diagnostics := ValidateVerificationManifest(manifest)
 	assertDiagnosticCode(t, diagnostics, CodeDigestMismatch)
+}
+
+func TestVerificationManifestRejectsInvalidRelayLaunchStatusMarkers(t *testing.T) {
+	_, batch := validRoleOutputAndBatch(t)
+	verdicts := validSurvivedVerdicts(batch)
+	manifest := validVerificationManifest(t, batch, verdicts)
+	manifest.Batches[0].Status = RecordStatusUnavailable
+	manifest.Batches[0].PortableExportRef = nil
+	manifest.Batches[0].PortableExportDigest = ""
+	manifest.Batches[0].CanonicalResultDigest = ""
+	manifest.Batches[0].RelayVerdicts = nil
+	manifest.Batches[0].FailureReason = "relay_verification_unavailable"
+	manifest.ConsumerIdentity = map[string]any{
+		"kind": "test",
+		"id":   "consumer",
+		VerificationManifestRelayBatchesKey: map[string]any{
+			batch.BatchID: map[string]any{
+				"recipe_family": "witness-falsify-v2",
+				"backend":       "codex",
+				"finding_ids":   []string{batch.Findings[0].FindingID},
+			},
+		},
+	}
+
+	diagnostics := ValidateVerificationManifest(manifest)
+	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
+
+	manifest.ConsumerIdentity[VerificationManifestRelayLaunchStatusKey] = RelayLaunchStatusAbsent
+	manifest.ConsumerIdentity[VerificationManifestRelayBatchesKey].(map[string]any)[batch.BatchID].(map[string]any)[VerificationManifestBatchRelayLaunchStatusKey] = RelayLaunchStatusPresent
+	diagnostics = ValidateVerificationManifest(manifest)
+	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
 }
 
 func TestReviewRulesRejectReorderedAdjudicationSequence(t *testing.T) {
@@ -488,8 +554,9 @@ func validCounterWitness() *CounterWitness {
 
 func validAutoApplyPolicy(productionCap int, testCap int) ReviewPolicy {
 	return ReviewPolicy{
-		SchemaVersion:                  ReviewPolicyV2,
+		SchemaVersion:                  ReviewPolicyV3,
 		PolicyID:                       "policy-1",
+		ScopePolicy:                    ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -563,7 +630,7 @@ func validVerificationManifest(t *testing.T, batch VerificationBatchDocument, ve
 	portableExportDigest := testDigest("portable-export")
 	portableExportRef := testArtifactRef("portable-export", "portable-export-1", portableExportDigest)
 	return VerificationManifest{
-		SchemaVersion:         VerificationManifestV3,
+		SchemaVersion:         VerificationManifestV4,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           batch.CharterHash,
 		ArtifactDigest:        batch.ArtifactDigest,

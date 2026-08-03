@@ -44,6 +44,7 @@ const (
 	BackendAuthStatusAuthenticated           = "authenticated"
 	BackendAuthStatusInstalledAuthUnknown    = "installed_auth_unknown"
 	BackendAuthStatusFailed                  = "failed"
+	BackendAuthStatusRelayAbsent             = "relay_absent"
 	BackendAuthStatusUnattributed            = "unattributed"
 	VerdictClassNone                         = "none"
 	MetricStatusReceiptBasedContradiction    = "receipt_based_contradiction"
@@ -303,12 +304,12 @@ func readRunResults(paths []string) ([]runResultInput, error) {
 		if err != nil {
 			return nil, validationError(CodeInvalidRunResult, "run-result document could not be decoded.", "/run_results/"+itoa(index), path, err)
 		}
-		if result.SchemaVersion != adjudicate.ResultSchemaVersion {
+		if result.SchemaVersion != adjudicate.ResultSchemaVersion && result.SchemaVersion != adjudicate.ResultSchemaVersionV1 {
 			return nil, &ValidationError{Diagnostics: []diag.Diagnostic{{
 				Code:    CodeInvalidRunResult,
 				Message: "run-result document schema_version is unsupported.",
 				Path:    "/run_results/" + itoa(index) + "/schema_version",
-				Details: map[string]any{"expected": adjudicate.ResultSchemaVersion, "actual": result.SchemaVersion, "path": path},
+				Details: map[string]any{"expected": []string{adjudicate.ResultSchemaVersion, adjudicate.ResultSchemaVersionV1}, "actual": result.SchemaVersion, "path": path},
 			}}}
 		}
 		results = append(results, runResultInput{result: result})
@@ -364,6 +365,14 @@ func pendingVerificationMetrics(results []runResultInput, preflightResult prefli
 		for index := range metrics.Strata {
 			metrics.Strata[index].Reason = ReasonPreflightMissing
 		}
+		return metrics
+	}
+	if preflight.RelayAbsent(preflightResult) {
+		metrics.Strata = []PendingVerificationStratum{{
+			Backend:           "relay",
+			BackendAuthStatus: BackendAuthStatusRelayAbsent,
+			Count:             metrics.Total,
+		}}
 		return metrics
 	}
 	if len(pending) == 0 {
@@ -451,10 +460,12 @@ func backendAuthStatusRank(status string) int {
 		return 1
 	case BackendAuthStatusFailed:
 		return 2
-	case BackendAuthStatusUnattributed:
+	case BackendAuthStatusRelayAbsent:
 		return 3
-	default:
+	case BackendAuthStatusUnattributed:
 		return 4
+	default:
+		return 5
 	}
 }
 

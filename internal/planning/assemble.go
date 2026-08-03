@@ -5,9 +5,11 @@ import (
 	"sort"
 	"strings"
 
+	"witness/internal/changesurface"
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/harness"
 	"witness/internal/portable"
 )
@@ -29,6 +31,8 @@ type AssembleOptions struct {
 	RelayResults []RelayEvidence
 	Receipts     []contracts.ExecutionReceipt
 	EvidenceRefs ManifestEvidenceRefs
+	BaseManifest *freeze.Manifest
+	HeadManifest *freeze.Manifest
 
 	ReceiptOutputDir   string
 	ReceiptHMACKey     []byte
@@ -81,22 +85,35 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	if diagnostics := validatePlanDigest(options.Plan); len(diagnostics) > 0 {
 		return nil, &ValidationError{Diagnostics: diagnostics}
 	}
+	if diagnostics := validatePlanChangeSurfaceDerivation(options.Plan, options.BaseManifest, options.HeadManifest); len(diagnostics) > 0 {
+		return nil, &ValidationError{Diagnostics: diagnostics}
+	}
+	if diagnostics := validatePlanExclusionChangeSurface(options.Plan); len(diagnostics) > 0 {
+		return nil, &ValidationError{Diagnostics: diagnostics}
+	}
 	result := &AssembleResult{}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV3,
+		SchemaVersion:         contracts.VerificationManifestV4,
 		PlanDigest:            options.Plan.PlanDigest,
 		CharterHash:           options.Plan.CharterHash,
 		ArtifactDigest:        options.Plan.ArtifactDigest,
+		ScopePolicy:           options.Plan.ScopePolicy,
+		ChangeSurface:         options.Plan.ChangeSurface,
+		ChangeSurfaceDigest:   options.Plan.ChangeSurfaceDigest,
+		BaselinePass:          options.Plan.BaselinePass,
 		CompatibilityManifest: options.EvidenceRefs.CompatibilityManifest,
 		RelayCapabilities:     options.EvidenceRefs.RelayCapabilities,
 		IntegrationBundle:     options.EvidenceRefs.IntegrationBundle,
 		SelectedContracts:     append([]contracts.ArtifactRef(nil), options.EvidenceRefs.SelectedContracts...),
-		ConsumerIdentity:      cloneIdentity(options.EvidenceRefs.ConsumerIdentity),
+		ExcludedFindings:      manifestExcludedFindings(options.Plan.ExcludedFindings),
+		ConsumerIdentity:      sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
 	}
 	if len(manifest.ConsumerIdentity) == 0 {
-		manifest.ConsumerIdentity = cloneIdentity(options.Plan.ConsumerIdentity)
+		manifest.ConsumerIdentity = sanitizedManifestConsumerIdentity(options.Plan.ConsumerIdentity)
 	}
+	relayLaunchStatus := relayLaunchStatusForCompatibility(options.EvidenceRefs.RelayCompatibility)
+	attachRelayLaunchStatus(&manifest, relayLaunchStatus)
 	if refDiagnostics := validateManifestEvidenceRefs(options.Plan, options.EvidenceRefs); len(refDiagnostics) > 0 {
 		diagnostics = append(diagnostics, refDiagnostics...)
 		for _, planned := range options.Plan.Batches {
@@ -140,7 +157,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			BatchDigest: planned.BatchDigest,
 		}
 		relay, hasRelay := relayByID[planned.BatchID]
-		attachRelayBatchMetadata(&manifest, planned, relay)
+		attachRelayBatchMetadata(&manifest, planned, relay, relayLaunchStatus)
 		batchEvidence, hasBatch := batchesByID[planned.BatchID]
 		if !hasBatch {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
@@ -380,14 +397,24 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	return result, nil
 }
 
-func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned BatchPlan, relay RelayEvidence) {
+func attachRelayLaunchStatus(manifest *contracts.VerificationManifest, status string) {
+	if strings.TrimSpace(status) == "" {
+		return
+	}
 	if manifest.ConsumerIdentity == nil {
 		manifest.ConsumerIdentity = map[string]any{}
 	}
-	raw, _ := manifest.ConsumerIdentity["witness_relay_batches"].(map[string]any)
+	manifest.ConsumerIdentity[contracts.VerificationManifestRelayLaunchStatusKey] = status
+}
+
+func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned BatchPlan, relay RelayEvidence, relayLaunchStatus string) {
+	if manifest.ConsumerIdentity == nil {
+		manifest.ConsumerIdentity = map[string]any{}
+	}
+	raw, _ := manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
 	if raw == nil {
 		raw = map[string]any{}
-		manifest.ConsumerIdentity["witness_relay_batches"] = raw
+		manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey] = raw
 	}
 	recipeFamily := strings.TrimSpace(relay.RecipeFamily)
 	if recipeFamily == "" {
@@ -397,10 +424,53 @@ func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned 
 		"recipe_family": recipeFamily,
 		"finding_ids":   append([]string(nil), planned.FindingIDs...),
 	}
+	if strings.TrimSpace(relayLaunchStatus) != "" {
+		entry[contracts.VerificationManifestBatchRelayLaunchStatusKey] = relayLaunchStatus
+	}
 	if backend := strings.TrimSpace(relay.Backend); backend != "" {
 		entry["backend"] = backend
 	}
 	raw[planned.BatchID] = entry
+}
+
+func relayLaunchStatusForCompatibility(compatibility *contracts.RelayCompatibility) string {
+	if compatibility == nil {
+		return ""
+	}
+	if contracts.RelayCompatibilityRelayAbsent(*compatibility) {
+		return contracts.RelayLaunchStatusAbsent
+	}
+	return contracts.RelayLaunchStatusPresent
+}
+
+func sanitizedManifestConsumerIdentity(input map[string]any) map[string]any {
+	identity := cloneIdentity(input)
+	if len(identity) == 0 {
+		return nil
+	}
+	delete(identity, contracts.VerificationManifestRelayLaunchStatusKey)
+	rawBatches, ok := identity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	if !ok {
+		return identity
+	}
+	batches := make(map[string]any, len(rawBatches))
+	for batchID, raw := range rawBatches {
+		object, ok := raw.(map[string]any)
+		if !ok {
+			batches[batchID] = raw
+			continue
+		}
+		copied := make(map[string]any, len(object))
+		for key, value := range object {
+			if key == contracts.VerificationManifestBatchRelayLaunchStatusKey {
+				continue
+			}
+			copied[key] = value
+		}
+		batches[batchID] = copied
+	}
+	identity[contracts.VerificationManifestRelayBatchesKey] = batches
+	return identity
 }
 
 func validateBatchEvidenceMatchesPlan(planned BatchPlan, evidence BatchEvidence) []diag.Diagnostic {
@@ -453,6 +523,24 @@ func batchEvidenceDigest(evidence BatchEvidence) (string, error) {
 }
 
 func validatePlanDigest(plan PlanDocument) []diag.Diagnostic {
+	if plan.SchemaVersion != SchemaVersion {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeInvalidPlanDigest,
+			"verification plan schema_version is unsupported.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("actual", plan.SchemaVersion),
+			diag.WithDetail("expected", SchemaVersion),
+		))}
+	}
+	if plan.DigestProfile != digest.Profile {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeInvalidPlanDigest,
+			"verification plan digest_profile is unsupported.",
+			diag.WithPath("/digest_profile"),
+			diag.WithDetail("actual", plan.DigestProfile),
+			diag.WithDetail("expected", digest.Profile),
+		))}
+	}
 	if plan.PlanDigest == "" {
 		return []diag.Diagnostic{diag.FromError(diag.New(CodeInvalidPlanDigest, "assemble requires a digest-stamped verification plan."))}
 	}
@@ -471,6 +559,69 @@ func validatePlanDigest(plan PlanDocument) []diag.Diagnostic {
 		))}
 	}
 	return nil
+}
+
+func validatePlanChangeSurfaceDerivation(plan PlanDocument, base *freeze.Manifest, head *freeze.Manifest) []diag.Diagnostic {
+	if plan.ChangeSurface == nil {
+		return nil
+	}
+	diagnostics := changesurface.ValidateDeclaredDerivation(*plan.ChangeSurface, plan.ChangeSurfaceDigest, base, head, plan.ArtifactDigest)
+	return prefixDiagnosticPaths("/change_surface", diagnostics)
+}
+
+func validatePlanExclusionChangeSurface(plan PlanDocument) []diag.Diagnostic {
+	if plan.ScopePolicy == contracts.ScopePolicyDeltaObligating && plan.ChangeSurface != nil {
+		return nil
+	}
+	var diagnostics []diag.Diagnostic
+	for index, item := range plan.ExcludedFindings {
+		if item.Reason != contracts.ReasonOutOfDelta {
+			continue
+		}
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidManifest,
+			"out_of_delta excluded findings require delta_obligating scope policy with a derived change surface.",
+			diag.WithPath(fmt.Sprintf("/excluded_findings/%d", index)),
+			diag.WithDetail("scope_policy", plan.ScopePolicy),
+			diag.WithDetail("has_change_surface", plan.ChangeSurface != nil),
+		)))
+	}
+	return diagnostics
+}
+
+func manifestExcludedFindings(excluded []ExcludedFinding) []contracts.ExcludedFindingRecord {
+	records := make([]contracts.ExcludedFindingRecord, 0, len(excluded))
+	for _, item := range excluded {
+		if item.Reason != contracts.ReasonOutOfDelta {
+			continue
+		}
+		records = append(records, contracts.ExcludedFindingRecord{
+			Role:                   item.Role,
+			FindingID:              item.FindingID,
+			SourceRoleOutputRef:    item.SourceRoleOutputRef,
+			SourceRoleOutputDigest: item.SourceRoleOutputDigest,
+			Reason:                 item.Reason,
+			Disposition:            item.Disposition,
+			ApplicationClass:       item.ApplicationClass,
+		})
+	}
+	return records
+}
+
+func prefixDiagnosticPaths(prefix string, diagnostics []diag.Diagnostic) []diag.Diagnostic {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	result := make([]diag.Diagnostic, len(diagnostics))
+	for index, item := range diagnostics {
+		result[index] = item
+		if result[index].Path == "" {
+			result[index].Path = prefix
+		} else {
+			result[index].Path = prefix + result[index].Path
+		}
+	}
+	return result
 }
 
 func decodeExportVerdicts(value any) (contracts.RelayWitnessVerdictsDocument, error) {

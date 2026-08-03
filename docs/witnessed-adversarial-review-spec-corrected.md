@@ -985,3 +985,115 @@ without evidence of interaction.
   Witness.
 - Existing hidden files, IDE state, `.DS_Store`, and unrelated dirty worktree
   changes remain untouched.
+
+---
+
+## 19. Delta Change-Surface Addendum
+
+Witness change-surface review is a first-class pass input, not a Charter
+amendment. A delta-scoped pass records a `witness-change-surface-v1` document
+with `base_artifact_digest`, `head_artifact_digest`, and a sorted
+`changed_paths` set. Each changed path carries one or more change kinds from
+`added`, `modified`, `removed`, and `mode_changed`. Witness derives this
+document only by comparing two `witness-source-snapshot-v1` freeze manifests;
+caller-supplied changed-path lists are not valid input. The derived change
+surface is canonical JSON under the normal digest profile and is stored in pass
+state under its own digest.
+
+`witness-verification-plan-v2` records the standing scope policy, the derived
+change surface, its digest, or an explicit `baseline_pass` marker. Assembly
+promotes those fields into `review-verification-manifest-v4`, so adjudication
+uses the same pass input that planning used. The head freeze manifest digest
+must equal the authoritative preflight snapshot digest for the pass; mismatch
+fails closed before a plan is produced.
+
+Standing scope policy lives in `review-policy-v3` as `scope_policy`, with
+values `delta_obligating` and `whole_tree`. Omitted scope policy and
+`whole_tree` preserve existing whole-tree behavior. `delta_obligating` requires
+either a derived change surface or an explicit `baseline_pass` marker. The
+marker records a whole-tree baseline pass on purpose and is visible in plan and
+manifest outputs; there is no silent fallback from delta scope to whole-tree
+scope.
+
+`review-rules-v3` adds the `change_surface_scope` adjudication step and
+declares `out_of_delta` as an advisory reason. A finding is in delta iff at
+least one scope anchor or witness artifact reference resolves exactly to a
+changed path; removed paths count as changed. Findings with global/component
+loci or no overlap are routed, not erased: planning records them as advisory
+excluded findings with `application_class: caller_decision`, and adjudication
+emits them as advisory/caller-decision verdicts with reason `out_of_delta`.
+
+---
+
+## 20. Relay-Absent Degraded-Mode Addendum
+
+Relay-absent degraded mode is triggered automatically only when the configured
+relay executable cannot be launched and the relay client reports
+`relay_missing`. No CLI flag enables degraded mode, and other relay command
+failures remain normal blocking preflight diagnostics.
+
+A relay-absent preflight remains manifest-shaped. It writes retained
+capabilities, backend-status, recipes-list, compile-report, contract-digest,
+integration-bundle, and compatibility artifacts. Required backend strata are
+recorded as `relay_absent`, required capabilities are explicitly recorded as
+unavailable, compile reports use status `relay_absent`, and no recipe-plan
+digest is claimed. The integration bundle and selected contract digests remain
+strictly bound; an invalid or missing bundle still fails preflight.
+
+Assembly carries the degraded launch status into the verification manifest's
+existing consumer identity fields, including per-batch relay metadata, and
+records relay batches as `unavailable`. Adjudication still validates the
+verification manifest unconditionally. Findings that require relay evidence in
+a relay-absent pass use the existing `pending_verification` disposition and do
+not introduce a new disposition kind.
+
+Pending-verification metrics distinguish bootstrap relay absence from normal
+backend authentication strata by reporting a `relay_absent` stratum when the
+loaded preflight recorded relay absence.
+
+Version impact: `witness-adjudication-run-result-v2` adds
+`summary.fixpoint_eligible`. It is false whenever any finding remains admitted,
+advisory, pending verification, automatic candidate, or caller decision.
+Historical `witness-adjudication-run-result-v1` inputs remain accepted by the
+metrics reader.
+
+---
+
+## 21. Pass Driver and Charter Bootstrap Addendum
+
+`witness pass begin` and `witness pass resume` provide the deterministic pass
+driver CLI surface. The driver sequences only deterministic Witness stages:
+Charter/source freeze, preflight, planning after caller-produced role outputs,
+assembly after caller-produced relay evidence when required, adjudication, and
+metrics. It never calls models, never launches relay verification batches,
+never applies findings, and owns no iteration or convergence loop.
+
+The driver persists `witness-pass-state-v1` as canonical JSON under the pass
+state directory. The state document records completed stages, exact input and
+output artifact paths and digests, relay batch evidence locations when batches
+exist, the next action, and a `state_digest` computed over the state document
+with `state_digest` blank. Every resume verifies the state digest and all
+recorded artifact digests before advancing; drift fails closed with a typed
+diagnostic.
+
+After each invocation the driver writes a canonical
+`witness-pass-next-action-v1` JSON document to stdout and a concise human
+summary to stderr. The next action is either the next `witness pass resume`
+command, a caller instruction to produce role outputs for named roles at the
+recorded snapshot digest into recorded paths, a caller instruction to run one
+relay batch with the recorded recipe and portable-export directory, or
+`complete`. Relay-absent degraded passes keep the existing degraded preflight,
+manifest, adjudication, and metrics behavior; the driver reports the degraded
+backend strata and skips relay-batch caller actions when relay evidence is not
+required.
+
+`witness charter init -template` adds embedded owner-editable template data:
+`minimal`, `delta-review`, and `whole-tree-audit`. Templates emit ordinary
+`review-charter-v2` documents and do not add freezing, hashing, or judgment
+semantics.
+
+Version impact: one new persisted surface,
+`witness-pass-state-v1`, and one driver invocation output surface,
+`witness-pass-next-action-v1`. Existing Charter, freeze, preflight, plan,
+manifest, adjudication, metrics, receipt, pending, DELTA1, and DEGRADE1
+surfaces are not bumped.

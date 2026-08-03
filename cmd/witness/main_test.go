@@ -78,6 +78,30 @@ func TestCharterCLIInitFreezeAmendShow(t *testing.T) {
 	}
 }
 
+func TestCharterInitTemplatesValidateAndFreeze(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range charter.TemplateNames() {
+		charterPath := filepath.Join(dir, name+".json")
+		if err := route([]string{"charter", "init", "-template", name, "-out", charterPath, "-actor", "owner"}); err != nil {
+			t.Fatalf("init template %s: %v", name, err)
+		}
+		document, err := charter.ReadFile(charterPath)
+		if err != nil {
+			t.Fatalf("read template %s: %v", name, err)
+		}
+		if diagnostics := charter.Validate(document, nil); len(diagnostics) != 0 {
+			t.Fatalf("template %s diagnostics = %#v", name, diagnostics)
+		}
+		frozen, err := charter.Freeze(document, nil)
+		if err != nil {
+			t.Fatalf("freeze template %s: %v", name, err)
+		}
+		if frozen.CharterHash == "" {
+			t.Fatalf("template %s froze without charter hash", name)
+		}
+	}
+}
+
 func TestCharterAmendRejectsOutputAliasingAmendments(t *testing.T) {
 	dir := t.TempDir()
 	charterPath := filepath.Join(dir, "charter.json")
@@ -174,6 +198,67 @@ func TestVerificationPreflightCLIWiredToRun(t *testing.T) {
 	}
 }
 
+func TestVerificationPreflightRelayAbsentWritesPassingResult(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	outPath := filepath.Join(dir, "preflight.json")
+	missingRelay := filepath.Join(dir, "missing-convo-relay")
+	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
+
+	if err := route([]string{
+		"verification", "preflight",
+		"-relay", missingRelay,
+		"-integration-bundle", bundlePath,
+		"-state-dir", stateDir,
+		"-out", outPath,
+	}); err != nil {
+		t.Fatalf("relay-absent preflight: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || len(result.Diagnostics) != 0 {
+		t.Fatalf("preflight result = %#v, want ok degraded result without blocking diagnostics", result)
+	}
+	if !preflight.RelayAbsent(result) {
+		t.Fatalf("backend strata = %#v, want relay_absent", result.BackendStrata)
+	}
+	for _, required := range []string{
+		"compatibility-manifest.json",
+		"relay-capabilities.json",
+		"integration-bundle.json",
+		filepath.ToSlash(filepath.Join("compile-reports", "witness-falsify-v2.json")),
+	} {
+		if result.ArtifactDigests[required] == "" {
+			t.Fatalf("artifact digests = %#v, missing %s", result.ArtifactDigests, required)
+		}
+	}
+	compatibilityBytes, err := os.ReadFile(filepath.Join(stateDir, "compatibility-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBytes, err := retainedPayloadCanonicalBytes(compatibilityBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compatibility, err := contracts.ReadRelayCompatibilityBytes(payloadBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contracts.RelayCompatibilityRelayAbsent(compatibility) {
+		t.Fatalf("compatibility backend status = %#v, want relay_absent", compatibility.BackendStatus)
+	}
+	if diagnostics := contracts.ValidateRelayCompatibility(compatibility); len(diagnostics) != 0 {
+		t.Fatalf("compatibility diagnostics = %#v", diagnostics)
+	}
+}
+
 func TestVerificationPreflightRejectsOutputAliasingInputBeforeWrite(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
@@ -230,6 +315,21 @@ func TestVerificationPlanRequiresPreflight(t *testing.T) {
 	diagnostic := diag.FromError(err)
 	if diagnostic.Code != verificationPlanMissingPreflight {
 		t.Fatalf("diagnostic code = %s, want %s", diagnostic.Code, verificationPlanMissingPreflight)
+	}
+}
+
+func TestVerificationPlanDoesNotAcceptCallerChangedPathList(t *testing.T) {
+	err := route([]string{
+		"verification", "plan",
+		"-changed-path", "internal/changed.go",
+	})
+	if err == nil {
+		t.Fatal("verification plan accepted a caller-supplied changed path")
+	}
+	diagnostic := diag.FromError(err)
+	errorText, _ := diagnostic.Details["error"].(string)
+	if diagnostic.Code != diag.CodeInvalidCommand || !strings.Contains(errorText, "flag provided but not defined: -changed-path") {
+		t.Fatalf("diagnostic = %#v, want invalid unknown changed-path flag", diagnostic)
 	}
 }
 
@@ -542,8 +642,9 @@ func TestPolicyAndLedgerCLI(t *testing.T) {
 	productionCap := 5
 	testCap := 5
 	document := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -836,8 +937,9 @@ func TestAdjudicateCLIIgnoresEmbeddedCapReleaseWithoutLedger(t *testing.T) {
 	productionCap := 5
 	testCap := 5
 	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -986,8 +1088,9 @@ func TestAdjudicateCLILedgerBackedPolicyAppendsLineageAndRefusesDuplicate(t *tes
 	productionCap := 5
 	testCap := 5
 	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -2210,8 +2313,9 @@ func writeCLIAutoPolicy(t *testing.T, frozen charter.FrozenCharter, frozenPath s
 	productionCap := 5
 	testCap := 5
 	document := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-cli",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
@@ -2276,7 +2380,7 @@ func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, ro
 	batchRef := artifactRef("verification-batch", "batch-1", digest.RawBytes([]byte("batch")))
 	exportRef := artifactRef("relay-root-portable-export", "batch-1", digest.RawBytes([]byte("export")))
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV3,
+		SchemaVersion:         contracts.VerificationManifestV4,
 		PlanDigest:            digest.RawBytes([]byte("plan")),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        roleOutput.ArtifactDigest,

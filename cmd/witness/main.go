@@ -19,8 +19,10 @@ import (
 	"witness/internal/contracts"
 	"witness/internal/diag"
 	"witness/internal/digest"
+	"witness/internal/freeze"
 	"witness/internal/ledger"
 	"witness/internal/metrics"
+	passdriver "witness/internal/pass"
 	"witness/internal/planning"
 	"witness/internal/policy"
 	"witness/internal/preflight"
@@ -55,6 +57,10 @@ var witnessCommands = map[string]map[string]bool{
 		"show":              true,
 		"release-caps":      true,
 		"check-application": true,
+	},
+	"pass": {
+		"begin":  true,
+		"resume": true,
 	},
 }
 
@@ -116,6 +122,9 @@ func route(args []string) error {
 			}
 			if args[0] == "policy" {
 				return runPolicy(args[1], args[2:])
+			}
+			if args[0] == "pass" {
+				return runPass(args[1], args[2:])
 			}
 			return notImplemented(strings.Join(args[:2], " "))
 		}
@@ -182,6 +191,10 @@ func runVerificationPlan(args []string) error {
 	flags := newFlagSet("witness verification plan")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	preflightPath := flags.String("preflight", "", "verification preflight result path")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface derivation")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface derivation")
+	baselinePass := flags.Bool("baseline-pass", false, "record an explicit whole-tree baseline pass under delta_obligating scope")
 	stateDir := flags.String("state-dir", "", "verification state directory")
 	out := flags.String("out", "", "verification plan output path")
 	var roleOutputPaths repeatedStrings
@@ -204,7 +217,14 @@ func runVerificationPlan(args []string) error {
 	if *preflightPath == "" {
 		return diag.New(verificationPlanMissingPreflight, "witness verification plan requires -preflight.")
 	}
-	protected := []protectedInput{{role: "charter-freeze", path: *frozenPath}, {role: "preflight", path: *preflightPath}, {role: "state-dir", path: *stateDir}}
+	protected := []protectedInput{
+		{role: "charter-freeze", path: *frozenPath},
+		{role: "preflight", path: *preflightPath},
+		{role: "policy", path: *policyPath},
+		{role: "base-manifest", path: *baseManifestPath},
+		{role: "head-manifest", path: *headManifestPath},
+		{role: "state-dir", path: *stateDir},
+	}
 	protected = append(protected, protectedInputsForPaths("role-output", roleOutputPaths)...)
 	if err := rejectOutputPathAliases(*out, protected...); err != nil {
 		return err
@@ -224,6 +244,17 @@ func runVerificationPlan(args []string) error {
 	if err := validatePlanningPreflightBinding(preflightBinding); err != nil {
 		return err
 	}
+	policyDocument := contracts.DefaultReviewPolicy()
+	if *policyPath != "" {
+		policyDocument, err = readReviewPolicyFile(*policyPath)
+		if err != nil {
+			return err
+		}
+	}
+	changeSurfaceInput, err := readPlanningChangeSurfaceInput(*baseManifestPath, *headManifestPath, *baselinePass)
+	if err != nil {
+		return err
+	}
 	inputs := make([]planning.RoleOutputInput, 0, len(roleOutputPaths))
 	for _, path := range roleOutputPaths {
 		document, err := readRoleOutputFile(path)
@@ -241,7 +272,9 @@ func runVerificationPlan(args []string) error {
 		CharterDigest: digest.RawBytes(frozenBytes),
 		RoleOutputs:   inputs,
 		StateDir:      *stateDir,
+		Policy:        policyDocument,
 		Preflight:     preflightBinding,
+		ChangeSurface: changeSurfaceInput,
 	})
 	if err != nil {
 		return err
@@ -255,6 +288,8 @@ func runVerificationPlan(args []string) error {
 func runVerificationAssemble(args []string) error {
 	flags := newFlagSet("witness verification assemble")
 	planPath := flags.String("plan", "", "verification plan path")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface verification")
 	compatibilityPath := flags.String("compatibility-manifest", "", "retained compatibility manifest path")
 	capabilitiesPath := flags.String("relay-capabilities", "", "retained relay capabilities path")
 	integrationBundlePath := flags.String("integration-bundle", "", "retained integration bundle path")
@@ -294,6 +329,8 @@ func runVerificationAssemble(args []string) error {
 	}
 	protected := []protectedInput{
 		{role: "plan", path: *planPath},
+		{role: "base-manifest", path: *baseManifestPath},
+		{role: "head-manifest", path: *headManifestPath},
 		{role: "compatibility-manifest", path: *compatibilityPath},
 		{role: "relay-capabilities", path: *capabilitiesPath},
 		{role: "integration-bundle", path: *integrationBundlePath},
@@ -313,6 +350,10 @@ func runVerificationAssemble(args []string) error {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble -run-relay cannot be combined with pre-produced relay evidence flags.")
 	}
 	plan, err := readPlanFile(*planPath)
+	if err != nil {
+		return err
+	}
+	changeSurfaceInput, err := readPlanningChangeSurfaceInput(*baseManifestPath, *headManifestPath, false)
 	if err != nil {
 		return err
 	}
@@ -363,6 +404,8 @@ func runVerificationAssemble(args []string) error {
 		RelayResults: relayEvidence,
 		Receipts:     receipts,
 		EvidenceRefs: evidenceRefs,
+		BaseManifest: changeSurfaceInput.BaseManifest,
+		HeadManifest: changeSurfaceInput.HeadManifest,
 
 		ReceiptOutputDir:   *receiptOutputDir,
 		ReceiptHMACKeyFile: *receiptHMACKeyFile,
@@ -389,11 +432,13 @@ func runAdjudicate(args []string) error {
 	flags := newFlagSet("witness adjudicate")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	manifestPath := flags.String("manifest", "", "verification manifest path")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface verification")
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	out := flags.String("out", "", "adjudication run-result output path")
 	var roleOutputPaths repeatedStrings
@@ -416,6 +461,8 @@ func runAdjudicate(args []string) error {
 	protected := []protectedInput{
 		{role: "charter-freeze", path: *frozenPath},
 		{role: "manifest", path: *manifestPath},
+		{role: "base-manifest", path: *baseManifestPath},
+		{role: "head-manifest", path: *headManifestPath},
 		{role: "receipt-hmac-key-file", path: *receiptHMACKeyFile},
 		{role: "prior-lineage", path: *priorLineagePath},
 		{role: "rules", path: *rulesPath},
@@ -431,6 +478,10 @@ func runAdjudicate(args []string) error {
 		return err
 	}
 	manifest, err := readVerificationManifestFile(*manifestPath)
+	if err != nil {
+		return err
+	}
+	changeSurfaceInput, err := readPlanningChangeSurfaceInput(*baseManifestPath, *headManifestPath, false)
 	if err != nil {
 		return err
 	}
@@ -457,10 +508,13 @@ func runAdjudicate(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := adjudicate.Run(adjudicate.Options{
-		FrozenCharter:                &frozen,
+	service, err := passdriver.RunAdjudicationService(passdriver.AdjudicationOptions{
+		FrozenCharter:                frozen,
 		RoleOutputs:                  inputs,
 		Manifest:                     manifest,
+		BaseManifest:                 changeSurfaceInput.BaseManifest,
+		HeadManifest:                 changeSurfaceInput.HeadManifest,
+		LedgerPath:                   *ledgerPath,
 		ReceiptOutputDir:             *receiptOutputDir,
 		ReceiptHMACKeyFile:           *receiptHMACKeyFile,
 		Rules:                        effective.Rules,
@@ -469,18 +523,16 @@ func runAdjudicate(args []string) error {
 		PriorLineage:                 priorLineage,
 		PriorLineageProvided:         priorLineageProvided,
 	})
-	if result != nil {
-		if *ledgerPath != "" {
-			if _, appendErr := appendAdjudicationLineage(*ledgerPath, result, inputs, frozen); appendErr != nil {
-				return appendErr
-			}
-		}
-		if writeErr := writeCanonical(*out, result); writeErr != nil {
+	if err != nil {
+		return err
+	}
+	if service.Result != nil {
+		if writeErr := writeCanonical(*out, service.Result); writeErr != nil {
 			return writeErr
 		}
 	}
-	if err != nil {
-		return err
+	if service.RunErr != nil {
+		return service.RunErr
 	}
 	return nil
 }
@@ -515,130 +567,11 @@ func runMetrics(args []string) error {
 }
 
 func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) ([]ledger.Record, error) {
-	if result == nil || result.ResultDigest == "" {
-		return nil, diag.New(diag.CodeInvalidCommand, "adjudication result is missing a run digest.")
-	}
-	records, err := readLedgerRecordsIfSet(path)
-	if err != nil {
-		return nil, err
-	}
-	duplicate, err := ledger.ContainsRunDigest(records, result.ResultDigest)
-	if err != nil {
-		return nil, err
-	}
-	if duplicate {
-		return nil, ledger.DuplicateRunDigestError(result.ResultDigest)
-	}
-	return ledger.AppendEvents(path, adjudicationLedgerEvents(result, inputs, frozen))
+	return passdriver.AppendAdjudicationLineage(path, result, inputs, frozen)
 }
 
 func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) []ledger.EventToAppend {
-	questions := adjudicationMissingGoalQuestions(inputs)
-	events := []ledger.EventToAppend{{
-		Kind: ledger.EventKindAdjudicationRun,
-		Payload: ledger.AdjudicationRunEvent{
-			RunDigest:                 result.ResultDigest,
-			ResultSchemaVersion:       result.SchemaVersion,
-			PolicyID:                  result.PolicyID,
-			PolicyDigest:              result.PolicyDigest,
-			RulesDigest:               result.RulesDigest,
-			CharterHash:               result.CharterHash,
-			ArtifactDigest:            result.ArtifactDigest,
-			ManifestDigest:            result.ManifestDigest,
-			CapReleaseCharterMismatch: result.CapReleaseCharterMismatch,
-			FindingCount:              len(result.Findings),
-			PendingVerificationCount:  result.Summary.PendingVerification,
-			AutomaticCandidateCount:   result.Summary.AutomaticCandidate,
-			CallerDecisionCount:       result.Summary.CallerDecision,
-			PolicyDecisionRecordCount: len(result.Findings),
-			MissingGoalQuestionCount:  len(questions),
-		},
-	}}
-	for _, finding := range result.Findings {
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindFinding,
-			Payload: ledger.FindingEvent{
-				FindingID:      finding.FindingID,
-				FindingKey:     finding.FindingKey,
-				WitnessDigest:  finding.WitnessDigest,
-				CharterHash:    result.CharterHash,
-				ArtifactDigest: result.ArtifactDigest,
-				Finding:        findingPayloadForLedger(finding),
-			},
-		})
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindVerdict,
-			Payload: ledger.VerdictEvent{
-				RunDigest:         result.ResultDigest,
-				FindingID:         finding.FindingID,
-				Role:              finding.Role,
-				Kind:              finding.Kind,
-				Disposition:       finding.Disposition,
-				ApplicationClass:  finding.ApplicationClass,
-				ClaimedSeverity:   finding.ClaimedSeverity,
-				EffectiveSeverity: finding.EffectiveSeverity,
-				SeverityCap:       finding.SeverityCap,
-				Reasons:           finding.Reasons,
-				FindingDigest:     finding.FindingDigest,
-				WitnessDigest:     finding.WitnessDigest,
-				VerdictClass:      finding.VerdictClass,
-			},
-		})
-	}
-	for _, question := range questions {
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindQuestion,
-			Payload: ledger.QuestionEvent{
-				RunDigest:        result.ResultDigest,
-				QuestionID:       question.ID,
-				FindingID:        question.FindingID,
-				Dimension:        question.Dimension,
-				AnchorIndex:      ledger.IntPtr(question.AnchorIndex),
-				Property:         question.Property,
-				Value:            question.Value,
-				AffectedDecision: question.AffectedDecision,
-				CharterHash:      result.CharterHash,
-				Statement:        question.Statement,
-			},
-		})
-	}
-	for _, finding := range result.Findings {
-		if finding.Disposition != contracts.DispositionPendingVerification {
-			continue
-		}
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindPendingVerification,
-			Payload: ledger.PendingVerificationEvent{
-				RunDigest:      result.ResultDigest,
-				FindingID:      finding.FindingID,
-				VerificationID: pendingVerificationID(result.ResultDigest, finding.FindingID),
-				Status:         finding.Disposition,
-			},
-		})
-	}
-	operationalEnvelopePresent := frozen.Charter.OperationalEnvelope != nil
-	for _, finding := range result.Findings {
-		allow := finding.ApplicationClass == contracts.ApplicationClassAutomaticCandidate
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindPolicyDecision,
-			Payload: ledger.PolicyDecisionEvent{
-				RunDigest:                  result.ResultDigest,
-				Allow:                      ledger.BoolPtr(allow),
-				Reasons:                    policyDecisionReasons(finding),
-				PolicyID:                   result.PolicyID,
-				PolicyDigest:               result.PolicyDigest,
-				RulesDigest:                result.RulesDigest,
-				CharterHash:                result.CharterHash,
-				CapReleaseCharterMismatch:  result.CapReleaseCharterMismatch,
-				CapReleaseUnit:             result.CapReleaseUnit,
-				PositiveCapAllowanceUsed:   false,
-				FindingID:                  finding.FindingID,
-				ApplicationClass:           finding.ApplicationClass,
-				OperationalEnvelopePresent: operationalEnvelopePresent,
-			},
-		})
-	}
-	return events
+	return passdriver.AdjudicationLedgerEvents(result, inputs, frozen)
 }
 
 func findingPayloadForLedger(finding adjudicate.FindingVerdict) map[string]any {
@@ -846,8 +779,8 @@ func runPolicy(command string, args []string) error {
 
 func runPolicyShow(args []string) error {
 	flags := newFlagSet("witness policy show")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
@@ -877,7 +810,7 @@ func runPolicyReleaseCaps(args []string) error {
 	flags := newFlagSet("witness policy release-caps")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	unit := flags.String("unit", "lines", "cap unit")
@@ -948,8 +881,8 @@ func runPolicyReleaseCaps(args []string) error {
 func runPolicyCheckApplication(args []string) error {
 	flags := newFlagSet("witness policy check-application")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v2")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v2")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	role := flags.String("role", contracts.RoleDefect, "application role")
@@ -1318,6 +1251,33 @@ func readReviewPolicyFile(path string) (contracts.ReviewPolicy, error) {
 		return contracts.ReviewPolicy{}, fileReadError(err, path, "open review policy")
 	}
 	return contracts.ReadReviewPolicyBytes(data)
+}
+
+func readPlanningChangeSurfaceInput(baseManifestPath string, headManifestPath string, baselinePass bool) (planning.ChangeSurfaceInput, error) {
+	input := planning.ChangeSurfaceInput{BaselinePass: baselinePass}
+	if baseManifestPath != "" {
+		manifest, err := readFreezeManifestFile(baseManifestPath)
+		if err != nil {
+			return planning.ChangeSurfaceInput{}, err
+		}
+		input.BaseManifest = &manifest
+	}
+	if headManifestPath != "" {
+		manifest, err := readFreezeManifestFile(headManifestPath)
+		if err != nil {
+			return planning.ChangeSurfaceInput{}, err
+		}
+		input.HeadManifest = &manifest
+	}
+	return input, nil
+}
+
+func readFreezeManifestFile(path string) (freeze.Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return freeze.Manifest{}, fileReadError(err, path, "open freeze manifest")
+	}
+	return strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*4)
 }
 
 func readPreflightFile(path string) (preflight.Result, error) {
@@ -1832,6 +1792,114 @@ func notImplemented(command string) error {
 	)
 }
 
+func runPass(command string, args []string) error {
+	switch command {
+	case "begin":
+		return runPassBegin(args)
+	case "resume":
+		return runPassResume(args)
+	default:
+		return notImplemented("pass " + command)
+	}
+}
+
+func runPassBegin(args []string) error {
+	flags := newFlagSet("witness pass begin")
+	stateDir := flags.String("state-dir", "", "pass state directory")
+	charterPath := flags.String("charter", "", "charter JSON path")
+	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
+	sourceDir := flags.String("source-dir", "", "reviewed source directory")
+	snapshotDir := flags.String("snapshot-dir", "", "source snapshot directory; defaults under -state-dir")
+	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
+	relayPath := flags.String("relay", "", "convo-relay executable path")
+	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
+	backend := flags.String("backend", "", "relay backend suffix for reported verification recipes")
+	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
+	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
+	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
+	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface derivation")
+	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface derivation")
+	baselinePass := flags.Bool("baseline-pass", false, "record an explicit whole-tree baseline pass under delta_obligating scope")
+	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
+	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
+	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
+	var roleOutputSpecs repeatedStrings
+	var receiptPaths repeatedStrings
+	flags.Var(&roleOutputSpecs, "role-output", "role=path for caller-produced role output; may be repeated")
+	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	roleOutputs, err := passRoleOutputs(roleOutputSpecs)
+	if err != nil {
+		return err
+	}
+	invocation, err := passdriver.Begin(context.Background(), passdriver.BeginOptions{
+		StateDir:              *stateDir,
+		CharterPath:           *charterPath,
+		AmendmentsPath:        *amendmentsPath,
+		SourceDir:             *sourceDir,
+		SnapshotDir:           *snapshotDir,
+		AllowNonGitSource:     *allowNonGitSource,
+		RelayPath:             *relayPath,
+		IntegrationBundlePath: *integrationBundlePath,
+		Backend:               *backend,
+		PolicyPath:            *policyPath,
+		RulesPath:             *rulesPath,
+		LedgerPath:            *ledgerPath,
+		BaseManifestPath:      *baseManifestPath,
+		HeadManifestPath:      *headManifestPath,
+		BaselinePass:          *baselinePass,
+		PriorLineagePath:      *priorLineagePath,
+		ReceiptOutputDir:      *receiptOutputDir,
+		ReceiptHMACKeyFile:    *receiptHMACKeyFile,
+		RoleOutputs:           roleOutputs,
+		ReceiptPaths:          append([]string(nil), receiptPaths...),
+	})
+	if err != nil {
+		return err
+	}
+	return writePassInvocation(invocation)
+}
+
+func runPassResume(args []string) error {
+	flags := newFlagSet("witness pass resume")
+	stateDir := flags.String("state-dir", "", "pass state directory")
+	if err := flags.Parse(args); err != nil {
+		return invalidFlagError(err)
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	invocation, err := passdriver.Resume(context.Background(), passdriver.ResumeOptions{StateDir: *stateDir})
+	if err != nil {
+		return err
+	}
+	return writePassInvocation(invocation)
+}
+
+func writePassInvocation(invocation *passdriver.Invocation) error {
+	if invocation != nil && invocation.HumanSummary() != "" {
+		fmt.Fprintln(os.Stderr, invocation.HumanSummary())
+	}
+	return diag.WriteCanonical(os.Stdout, invocation)
+}
+
+func passRoleOutputs(values []string) ([]passdriver.RoleOutputSpec, error) {
+	outputs := make([]passdriver.RoleOutputSpec, 0, len(values))
+	for _, value := range values {
+		role, path, ok := splitKeyValueSpec(value)
+		if !ok || role == "" || path == "" {
+			return nil, diag.New(passdriver.CodeInvalidRoleOutputSpec, "pass -role-output values must use role=path.", diag.WithDetail("value", value))
+		}
+		outputs = append(outputs, passdriver.RoleOutputSpec{Role: role, Path: path})
+	}
+	return outputs, nil
+}
+
 func runCharter(command string, args []string) error {
 	switch command {
 	case "init":
@@ -1850,6 +1918,7 @@ func runCharter(command string, args []string) error {
 func runCharterInit(args []string) error {
 	flags := newFlagSet("witness charter init")
 	out := flags.String("out", "", "charter skeleton path")
+	template := flags.String("template", charter.TemplateMinimal, "charter template name")
 	actor := flags.String("actor", "owner", "owner actor")
 	eventID := flags.String("event-id", "initial-charter", "initial owner event ID")
 	summary := flags.String("summary", "Initial owner-authorized charter skeleton.", "initial owner event summary")
@@ -1862,7 +1931,15 @@ func runCharterInit(args []string) error {
 	if *out == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness charter init requires -out.")
 	}
-	skeleton := charter.InitSkeleton(*actor, *eventID, *summary)
+	skeleton, ok := charter.InitTemplate(*template, *actor, *eventID, *summary)
+	if !ok {
+		return diag.New(
+			diag.CodeInvalidCommand,
+			"unknown charter template.",
+			diag.WithDetail("template", *template),
+			diag.WithDetail("available_templates", charter.TemplateNames()),
+		)
+	}
 	if _, err := charter.Normalize(skeleton, nil); err != nil {
 		return err
 	}
@@ -2326,6 +2403,10 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var metricsValidation *metrics.ValidationError
 	if errors.As(err, &metricsValidation) {
 		return metricsValidation.Diagnostics
+	}
+	var passValidation *passdriver.ValidationError
+	if errors.As(err, &passValidation) {
+		return passValidation.Diagnostics
 	}
 	var preflightError *preflight.Error
 	if errors.As(err, &preflightError) {

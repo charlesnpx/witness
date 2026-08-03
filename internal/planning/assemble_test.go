@@ -6,9 +6,14 @@ import (
 	"sort"
 	"testing"
 
+	"witness/internal/adjudicate"
 	"witness/internal/canonjson"
+	"witness/internal/changesurface"
+	"witness/internal/charter"
 	"witness/internal/contracts"
 	"witness/internal/digest"
+	"witness/internal/metrics"
+	"witness/internal/preflight"
 	"witness/internal/strictjson"
 )
 
@@ -52,6 +57,152 @@ func TestAssembleInvalidReceiptAndMissingRelayRemainPending(t *testing.T) {
 	}
 	if len(result.Manifest.ExecutionReceipts) != 1 || result.Manifest.ExecutionReceipts[0].Status != contracts.ExecutionStatusFailed {
 		t.Fatalf("execution receipt records = %#v, want failed", result.Manifest.ExecutionReceipts)
+	}
+}
+
+func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	refs := relayAbsentManifestEvidenceRefs()
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBindingForRefs(t, refs),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  planResult.Batches[0].Plan.BatchID,
+			Document: planResult.Batches[0].Document,
+		}},
+		EvidenceRefs: refs,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if result.Manifest.ConsumerIdentity["witness_relay_launch_status"] != contracts.RelayLaunchStatusAbsent {
+		t.Fatalf("consumer identity = %#v, want relay_absent launch status", result.Manifest.ConsumerIdentity)
+	}
+	rawBatches, ok := result.Manifest.ConsumerIdentity["witness_relay_batches"].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", result.Manifest.ConsumerIdentity)
+	}
+	batch, ok := rawBatches[planResult.Plan.Batches[0].BatchID].(map[string]any)
+	if !ok || batch["relay_launch_status"] != contracts.RelayLaunchStatusAbsent {
+		t.Fatalf("batch metadata = %#v, want relay_absent launch status", rawBatches)
+	}
+	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("manifest batches = %#v, want unavailable relay-absent batch", result.Manifest.Batches)
+	}
+}
+
+func TestAssembleSanitizesForgedRelayLaunchStatusOnRelayPresent(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	refs := validManifestEvidenceRefs()
+	refs.ConsumerIdentity = map[string]any{
+		"kind": "test",
+		"id":   "consumer",
+		contracts.VerificationManifestRelayLaunchStatusKey: contracts.RelayLaunchStatusAbsent,
+		contracts.VerificationManifestRelayBatchesKey: map[string]any{
+			batch.Plan.BatchID: map[string]any{
+				"recipe_family": "forged-family",
+				"backend":       "forged-backend",
+				"finding_ids":   []string{"forged-finding"},
+				contracts.VerificationManifestBatchRelayLaunchStatusKey: contracts.RelayLaunchStatusAbsent,
+			},
+		},
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
+		}},
+		EvidenceRefs: refs,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayLaunchStatusKey] != contracts.RelayLaunchStatusPresent {
+		t.Fatalf("consumer identity = %#v, want synthesized relay_present launch status", result.Manifest.ConsumerIdentity)
+	}
+	rawBatches, ok := result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", result.Manifest.ConsumerIdentity)
+	}
+	batchMetadata, ok := rawBatches[batch.Plan.BatchID].(map[string]any)
+	if !ok {
+		t.Fatalf("relay batch metadata = %#v, missing batch %s", rawBatches, batch.Plan.BatchID)
+	}
+	if batchMetadata[contracts.VerificationManifestBatchRelayLaunchStatusKey] != contracts.RelayLaunchStatusPresent {
+		t.Fatalf("batch metadata = %#v, want synthesized relay_present launch status", batchMetadata)
+	}
+	if batchMetadata["backend"] != "codex" || batchMetadata["recipe_family"] != batch.Plan.RecipeFamily {
+		t.Fatalf("batch metadata = %#v, want codex %s", batchMetadata, batch.Plan.RecipeFamily)
+	}
+	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("manifest batches = %#v, want unavailable relay-present batch", result.Manifest.Batches)
+	}
+	if diagnostics := contracts.ValidateVerificationManifest(result.Manifest); len(diagnostics) > 0 {
+		t.Fatalf("manifest diagnostics = %#v", diagnostics)
+	}
+
+	adjudicated, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Manifest:      result.Manifest,
+	})
+	if err != nil {
+		t.Fatalf("adjudicate: %v", err)
+	}
+	dir := t.TempDir()
+	preflightPath := filepath.Join(dir, "preflight.json")
+	if err := os.WriteFile(preflightPath, append(canonjson.MustMarshal(preflight.Result{
+		SchemaVersion: preflight.SchemaVersion,
+		OK:            true,
+		BackendStrata: map[string]string{"codex": metrics.BackendAuthStatusAuthenticated},
+	}), '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runResultPath := filepath.Join(dir, "run-result.json")
+	if err := os.WriteFile(runResultPath, append(canonjson.MustMarshal(adjudicated), '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metricDocument, err := metrics.Run(metrics.Options{
+		PreflightPath:  preflightPath,
+		RunResultPaths: []string{runResultPath},
+	})
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if len(metricDocument.PendingVerification.Strata) != 1 {
+		t.Fatalf("pending strata = %#v, want one relay-present backend stratum", metricDocument.PendingVerification.Strata)
+	}
+	stratum := metricDocument.PendingVerification.Strata[0]
+	if stratum.Backend != "codex" || stratum.BackendAuthStatus != metrics.BackendAuthStatusAuthenticated || stratum.Count != 1 {
+		t.Fatalf("pending stratum = %#v, want codex authenticated count 1", stratum)
 	}
 }
 
@@ -434,6 +585,263 @@ func TestAssembleRejectsPlanDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestAssembleRederivesDeclaredChangeSurface(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	finding := planningTestFinding("in-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/changed.go"}}
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	roleOutput.ArtifactDigest = headDigest
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tamperedPlan := planResult.Plan
+	tamperedSurface := *tamperedPlan.ChangeSurface
+	tamperedSurface.ChangedPaths = []changesurface.PathChange{{Path: "internal/unchanged.go", ChangeKinds: []string{changesurface.ChangeKindModified}}}
+	tamperedDigest, err := changesurface.Digest(tamperedSurface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedPlan.ChangeSurface = &tamperedSurface
+	tamperedPlan.ChangeSurfaceDigest = tamperedDigest
+	if err := stampPlanDigest(&tamperedPlan); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan:         tamperedPlan,
+		EvidenceRefs: validManifestEvidenceRefs(),
+		BaseManifest: &baseManifest,
+		HeadManifest: &headManifest,
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a tampered but self-consistent change surface")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for input-level change surface mismatch", result)
+	}
+	if planningErrorCode(err) != changesurface.CodeInvalidChangeSurface {
+		t.Fatalf("err = %v, want %s", err, changesurface.CodeInvalidChangeSurface)
+	}
+}
+
+func TestAssembleDeclaredChangeSurfaceRequiresDerivationManifests(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	finding := planningTestFinding("in-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/changed.go"}}
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	roleOutput.ArtifactDigest = headDigest
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan:         planResult.Plan,
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a declared change surface without derivation manifests")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for missing derivation manifests", result)
+	}
+	if planningErrorCode(err) != changesurface.CodeMissingDerivationManifest {
+		t.Fatalf("err = %v, want %s", err, changesurface.CodeMissingDerivationManifest)
+	}
+}
+
+func TestAssembleRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("included", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     planningTestPreflightBinding(t),
+		ChangeSurface: ChangeSurfaceInput{BaselinePass: true},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) != 1 || len(planResult.Plan.ExcludedFindings) != 0 || planResult.Plan.ChangeSurface != nil || planResult.Plan.BaselinePass == nil {
+		t.Fatalf("plan = %#v, want baseline-pass plan with included finding", planResult.Plan)
+	}
+	batch := planResult.Batches[0]
+	tamperedPlan := planResult.Plan
+	tamperedPlan.ExcludedFindings = []ExcludedFinding{{
+		Role:                   contracts.RoleDefect,
+		FindingID:              finding.ID,
+		SourceRoleOutputRef:    batch.Plan.SourceRoleOutputRef,
+		SourceRoleOutputDigest: batch.Plan.SourceRoleOutputDigest,
+		Disposition:            contracts.DispositionAdvisory,
+		ApplicationClass:       contracts.ApplicationClassCallerDecision,
+		Reason:                 contracts.ReasonOutOfDelta,
+	}}
+	if err := stampPlanDigest(&tamperedPlan); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: tamperedPlan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a baseline-pass plan with a fabricated out_of_delta exclusion")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for input-level exclusion rejection", result)
+	}
+	if planningErrorCode(err) != CodeInvalidManifest {
+		t.Fatalf("err = %v, want %s", err, CodeInvalidManifest)
+	}
+}
+
+func TestAssembleRejectsV1PlanBeforeDigestAcceptance(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	legacyPlan := planResult.Plan
+	legacyPlan.SchemaVersion = "witness-verification-plan-v1"
+	if err := stampPlanDigest(&legacyPlan); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan:         legacyPlan,
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a digest-valid v1 verification plan")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil for unsupported plan schema", result)
+	}
+	if planningErrorCode(err) != CodeInvalidPlanDigest {
+		t.Fatalf("err = %v, want %s", err, CodeInvalidPlanDigest)
+	}
+}
+
+func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	outOfDelta := planningTestFinding("out-of-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	outOfDelta.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/unchanged.go"}}
+	inDelta := planningTestFinding("in-delta", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	inDelta.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/changed.go"}}
+	outRoleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{outOfDelta})
+	outRoleOutput.ArtifactDigest = headDigest
+	inRoleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{inDelta})
+	inRoleOutput.ArtifactDigest = headDigest
+	preflight := planningTestPreflightBinding(t)
+	preflight.SnapshotDigest = headDigest
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "role-a.json", RefID: "role-a", Document: outRoleOutput},
+			{Path: "role-b.json", RefID: "role-b", Document: inRoleOutput},
+		},
+		Policy:        planningDeltaPolicy(),
+		Preflight:     preflight,
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.ExcludedFindings) != 1 || planResult.Plan.ExcludedFindings[0].SourceRoleOutputDigest == "" {
+		t.Fatalf("plan exclusions = %#v, want one bound out-of-delta exclusion", planResult.Plan.ExcludedFindings)
+	}
+
+	assembled, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  planResult.Batches[0].Plan.BatchID,
+			Document: planResult.Batches[0].Document,
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+		BaseManifest: &baseManifest,
+		HeadManifest: &headManifest,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	manifest := assembled.Manifest
+	if len(manifest.ExcludedFindings) != 1 || manifest.ExcludedFindings[0].FindingID != outOfDelta.ID {
+		t.Fatalf("manifest exclusions = %#v, want out-of-delta record", manifest.ExcludedFindings)
+	}
+
+	_, err = adjudicate.Run(adjudicate.Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "role-b.json", Document: inRoleOutput}},
+		Manifest:      manifest,
+		Policy:        planningDeltaPolicy(),
+		BaseManifest:  &baseManifest,
+		HeadManifest:  &headManifest,
+	})
+	if err == nil {
+		t.Fatal("adjudication accepted manifest exclusions without the excluding role output")
+	}
+	if got := adjudicationErrorCode(err); got != adjudicate.CodeInvalidManifest {
+		t.Fatalf("adjudication err = %v, want %s", err, adjudicate.CodeInvalidManifest)
+	}
+
+	adjudicated, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []adjudicate.RoleOutputInput{
+			{Path: "role-a.json", Document: outRoleOutput},
+			{Path: "role-b.json", Document: inRoleOutput},
+		},
+		Manifest:     manifest,
+		Policy:       planningDeltaPolicy(),
+		BaseManifest: &baseManifest,
+		HeadManifest: &headManifest,
+	})
+	if err != nil {
+		t.Fatalf("adjudicate with exclusion coverage: %v", err)
+	}
+	byID := map[string]adjudicate.FindingVerdict{}
+	for _, finding := range adjudicated.Findings {
+		byID[finding.FindingID] = finding
+	}
+	excluded := byID[outOfDelta.ID]
+	if excluded.Disposition != contracts.DispositionAdvisory || excluded.ApplicationClass != contracts.ApplicationClassCallerDecision {
+		t.Fatalf("excluded verdict = %#v, want advisory caller_decision", excluded)
+	}
+	if !stringSliceContains(excluded.Reasons, contracts.ReasonOutOfDelta) {
+		t.Fatalf("excluded reasons = %#v, want out_of_delta", excluded.Reasons)
+	}
+	if excluded.Relay != nil || excluded.Execution != nil {
+		t.Fatalf("excluded verdict used verification evidence: %#v", excluded)
+	}
+}
+
 func TestAssembleRejectsSelectedContractManifestEvidenceMismatch(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
@@ -478,6 +886,11 @@ func TestAssembleRejectsSelectedContractManifestEvidenceMismatch(t *testing.T) {
 func planningTestPreflightBinding(t *testing.T) PreflightBinding {
 	t.Helper()
 	refs := validManifestEvidenceRefs()
+	return planningTestPreflightBindingForRefs(t, refs)
+}
+
+func planningTestPreflightBindingForRefs(t *testing.T, refs ManifestEvidenceRefs) PreflightBinding {
+	t.Helper()
 	return PreflightBinding{
 		SnapshotDigest:          testDigest("artifact"),
 		CompatibilityDigest:     refs.CompatibilityManifest.Digest,
@@ -578,6 +991,27 @@ func validManifestEvidenceRefs() ManifestEvidenceRefs {
 		SelectedContractEvidence: selectedContractEvidence,
 		ConsumerIdentity:         map[string]any{"kind": "test", "id": "consumer"},
 	}
+}
+
+func relayAbsentManifestEvidenceRefs() ManifestEvidenceRefs {
+	refs := validManifestEvidenceRefs()
+	compatibility := *refs.RelayCompatibility
+	compatibility.ConvoRelayVersion = ""
+	for key := range compatibility.Capabilities {
+		compatibility.Capabilities[key] = false
+	}
+	compatibility.RecipePlans = nil
+	for index := range compatibility.CompileReports {
+		compatibility.CompileReports[index].Status = contracts.RelayLaunchStatusAbsent
+	}
+	compatibility.BackendStatus = []contracts.BackendStatus{
+		{Backend: "codex", Status: contracts.RelayLaunchStatusAbsent},
+		{Backend: "claude", Status: contracts.RelayLaunchStatusAbsent},
+	}
+	compatibilityDigest, _ := contracts.RelayCompatibilityDigest(compatibility)
+	refs.CompatibilityManifest.Digest = compatibilityDigest
+	refs.RelayCompatibility = &compatibility
+	return refs
 }
 
 func removePlanningRenderedPromptRef(t *testing.T, portableDir string, kind string, id string) {
@@ -801,6 +1235,14 @@ func validContradictoryReceipt(plan PlanDocument, findingID string) contracts.Ex
 		ObservedObservation:      "test failed",
 		ExecutionStatus:          contracts.ExecutionStatusContradicted,
 	}
+}
+
+func adjudicationErrorCode(err error) string {
+	validation, ok := err.(*adjudicate.ValidationError)
+	if !ok || len(validation.Diagnostics) == 0 {
+		return ""
+	}
+	return validation.Diagnostics[0].Code
 }
 
 func testArtifactRef(kind string, id string, seed string) contracts.ArtifactRef {

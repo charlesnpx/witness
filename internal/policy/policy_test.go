@@ -43,7 +43,7 @@ func TestPolicyLoadAndApplicationBranches(t *testing.T) {
 		},
 		{
 			name:          "enabled with missing cap rejects on load",
-			policy:        contracts.ReviewPolicy{SchemaVersion: contracts.ReviewPolicyV2, PolicyID: "policy-1", DefectAdditiveAutoApplyEnabled: true},
+			policy:        contracts.ReviewPolicy{SchemaVersion: contracts.ReviewPolicyV3, PolicyID: "policy-1", ScopePolicy: contracts.ScopePolicyWholeTree, DefectAdditiveAutoApplyEnabled: true},
 			charterHash:   charterHash,
 			check:         positiveCheck(1, 1, 1, 1),
 			wantLoadError: true,
@@ -251,8 +251,9 @@ func releaseFor(t *testing.T, document contracts.ReviewPolicy, rules contracts.R
 
 func autoPolicy(productionCap int, testCap int) contracts.ReviewPolicy {
 	return contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV2,
+		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-1",
+		ScopePolicy:                    contracts.ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: true,
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,

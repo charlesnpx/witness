@@ -18,10 +18,13 @@ const (
 	VerificationBatchV2                = "review-verification-batch-v2"
 	RelayWitnessVerdictsV2             = "relay-witness-verdicts-v2"
 	VerificationManifestV3             = "review-verification-manifest-v3"
+	VerificationManifestV4             = "review-verification-manifest-v4"
 	ExecutionReceiptV2                 = "review-execution-receipt-v2"
 	RelayCompatibilityV3               = "review-relay-compatibility-v3"
 	ReviewRulesV2                      = "review-rules-v2"
+	ReviewRulesV3                      = "review-rules-v3"
 	ReviewPolicyV2                     = "review-policy-v2"
+	ReviewPolicyV3                     = "review-policy-v3"
 	RoleDefect                         = "defect"
 	RoleEconomy                        = "economy"
 	RoleGoalFit                        = "goal_fit"
@@ -47,6 +50,8 @@ const (
 	RecordStatusFailed                 = "failed"
 	RecordStatusUnavailable            = "unavailable"
 	RecordStatusNotRequired            = "not-required"
+	RelayLaunchStatusAbsent            = "relay_absent"
+	RelayLaunchStatusPresent           = "relay_present"
 	ExecutionStatusSatisfied           = "satisfied"
 	ExecutionStatusContradicted        = "contradicted"
 	ExecutionStatusFailed              = "failed"
@@ -69,6 +74,9 @@ const (
 	DispositionOwnerOverride           = "owner_override"
 	CapReleaseBasisMeasuredHistory     = "measured_history"
 	CapReleaseBasisOwnerJudgment       = "explicit_owner_judgment"
+	ScopePolicyDeltaObligating         = "delta_obligating"
+	ScopePolicyWholeTree               = "whole_tree"
+	ReasonOutOfDelta                   = "out_of_delta"
 )
 
 const (
