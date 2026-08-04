@@ -162,7 +162,7 @@ emit_target() {
 }
 
 emit_report() {
-	printf '{"schema":1,"name":"%s","version":"%s","operation":"%s","kind":"delegated","capabilities":["review"],"setup":[{"kind":"executable","executable":"convo-relay","required_for":["review"],"remediation":"Install convo-relay (mise-en-place install convo-relay); witness verification recipes run through it."}],"targets":{' \
+	printf '{"schema":1,"name":"%s","version":"%s","operation":"%s","kind":"delegated","capabilities":["query"],"setup":[{"kind":"executable","executable":"convo-relay","required_for":["query"],"remediation":"Install convo-relay (mise-en-place install convo-relay); witness verification recipes run through it."}],"targets":{' \
 		"$(json_escape "$NAME")" "$(json_escape "$VERSION")" "$(json_escape "$OPERATION")"
 
 	local first_target="true"

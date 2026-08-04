@@ -15,12 +15,20 @@ import (
 )
 
 type installSkillReport struct {
-	Schema    int                           `json:"schema"`
-	Name      string                        `json:"name"`
-	Version   string                        `json:"version"`
-	Operation string                        `json:"operation"`
-	Kind      string                        `json:"kind"`
-	Targets   map[string]installSkillTarget `json:"targets"`
+	Schema       int                           `json:"schema"`
+	Name         string                        `json:"name"`
+	Version      string                        `json:"version"`
+	Operation    string                        `json:"operation"`
+	Kind         string                        `json:"kind"`
+	Capabilities []string                      `json:"capabilities"`
+	Setup        []installSkillSetup           `json:"setup"`
+	Targets      map[string]installSkillTarget `json:"targets"`
+}
+
+type installSkillSetup struct {
+	Kind        string   `json:"kind"`
+	Executable  string   `json:"executable"`
+	RequiredFor []string `json:"required_for"`
 }
 
 type installSkillTarget struct {
@@ -54,6 +62,16 @@ func TestInstallSkillScriptPlanIsJSONOnlyAndSideEffectFree(t *testing.T) {
 	}
 	if report.Kind != "delegated" {
 		t.Fatalf("kind = %q, want delegated", report.Kind)
+	}
+	if len(report.Capabilities) != 1 || report.Capabilities[0] != "query" {
+		t.Fatalf("capabilities = %#v, want [query]", report.Capabilities)
+	}
+	if len(report.Setup) != 1 {
+		t.Fatalf("setup = %#v, want one convo-relay requirement", report.Setup)
+	}
+	setup := report.Setup[0]
+	if setup.Kind != "executable" || setup.Executable != "convo-relay" || len(setup.RequiredFor) != 1 || setup.RequiredFor[0] != "query" {
+		t.Fatalf("setup = %#v, want convo-relay executable required for query", setup)
 	}
 	for _, target := range []string{"tools", "codex", "claude"} {
 		if _, ok := report.Targets[target]; !ok {
