@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/charlesnpx/witness/internal/canonjson"
 	"github.com/charlesnpx/witness/internal/contracts"
@@ -355,17 +356,27 @@ func AppendEvents(path string, events []EventToAppend) ([]Record, error) {
 
 func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
-	perm := mode
-	if info, err := os.Stat(path); err == nil {
+	perm := mode.Perm()
+	preserveMode := false
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return diag.New(
+				CodeInvalidLedger,
+				"refusing atomic write over non-regular file.",
+				diag.WithPath(path),
+				diag.WithDetail("mode", info.Mode().String()),
+			)
+		}
 		perm = info.Mode().Perm()
+		preserveMode = true
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	temp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-")
+
+	temp, tempPath, err := openAtomicTempFile(dir, filepath.Base(path), perm)
 	if err != nil {
 		return err
 	}
-	tempPath := temp.Name()
 	closed := false
 	cleanup := true
 	defer func() {
@@ -376,8 +387,10 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 			_ = os.Remove(tempPath)
 		}
 	}()
-	if err := temp.Chmod(perm); err != nil {
-		return err
+	if preserveMode {
+		if err := temp.Chmod(perm); err != nil {
+			return err
+		}
 	}
 	if _, err := temp.Write(data); err != nil {
 		return err
@@ -390,11 +403,48 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	closed = true
+	if err := rejectNonRegularDestination(path); err != nil {
+		return err
+	}
 	if err := os.Rename(tempPath, path); err != nil {
 		return err
 	}
 	cleanup = false
 	return syncDirectory(dir)
+}
+
+func openAtomicTempFile(dir string, base string, perm os.FileMode) (*os.File, string, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		tempPath := filepath.Join(dir, fmt.Sprintf("%s.tmp-%d-%d-%d", base, os.Getpid(), time.Now().UnixNano(), attempt))
+		temp, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, perm)
+		if err == nil {
+			return temp, tempPath, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", err
+	}
+	return nil, "", fmt.Errorf("create unique temporary file in %s: %w", dir, os.ErrExist)
+}
+
+func rejectNonRegularDestination(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode().IsRegular() {
+		return nil
+	}
+	return diag.New(
+		CodeInvalidLedger,
+		"refusing atomic write over non-regular file.",
+		diag.WithPath(path),
+		diag.WithDetail("mode", info.Mode().String()),
+	)
 }
 
 func syncDirectory(dir string) error {
