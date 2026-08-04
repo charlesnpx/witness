@@ -95,6 +95,20 @@ func assembleOutputSpecs(config Config, result *planning.AssembleResult) []artif
 	return specs
 }
 
+func preflightInputSpecs(config Config) []artifactInput {
+	specs := []artifactInput{
+		{role: "integration-bundle", path: config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
+		{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
+	}
+	if roleOutputChangeSurfaceExpected(config) {
+		specs = append(specs, artifactInput{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest})
+		if strings.TrimSpace(config.HeadManifestPath) != "" {
+			specs = append(specs, artifactInput{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest})
+		}
+	}
+	return specs
+}
+
 func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInput {
 	specs := []artifactInput{{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes}}
 	if roleOutputChangeSurfaceExpected(config) {

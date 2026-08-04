@@ -503,10 +503,7 @@ func runPreflight(ctx context.Context, state *State) error {
 	if err := writeRoleOutputChangeSurface(config, result.SnapshotDigest); err != nil {
 		return err
 	}
-	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
-		{role: "integration-bundle", path: config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
-		{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
-	})
+	inputs, err := artifactRecordsForExistingFiles(preflightInputSpecs(config))
 	if err != nil {
 		return err
 	}
@@ -1833,8 +1830,15 @@ func nextActionScopePolicy(config Config) (string, error) {
 }
 
 func roleOutputChangeSurfaceActionRef(state *State, scopePolicy string) (string, string, error) {
-	if state == nil || scopePolicy != contracts.ScopePolicyDeltaObligating || !roleOutputChangeSurfaceExpected(state.Config) {
+	if state == nil || scopePolicy != contracts.ScopePolicyDeltaObligating || state.Config.BaselinePass {
 		return "", "", nil
+	}
+	input, err := readDriverChangeSurfaceInput(state.Config, false)
+	if err != nil {
+		return "", "", err
+	}
+	if input.BaseManifest == nil || input.HeadManifest == nil {
+		return "", "", missingChangeSurfaceDiagnostic(input)
 	}
 	path := roleOutputChangeSurfacePath(state.Config)
 	document, err := readChangeSurfaceDocument(path)
@@ -1865,18 +1869,22 @@ func deriveRoleOutputChangeSurface(config Config, passArtifactDigest string) (*c
 		return nil, "", err
 	}
 	if input.BaseManifest == nil || input.HeadManifest == nil {
-		return nil, "", diag.New(
-			planning.CodeMissingChangeSurface,
-			"change surface derivation requires both a base manifest and the derived head manifest.",
-			diag.WithDetail("base_manifest", input.BaseManifest != nil),
-			diag.WithDetail("head_manifest", input.HeadManifest != nil),
-		)
+		return nil, "", missingChangeSurfaceDiagnostic(input)
 	}
 	surface, surfaceDigest, err := changesurface.Derive(*input.BaseManifest, *input.HeadManifest, passArtifactDigest)
 	if err != nil {
 		return nil, "", err
 	}
 	return &surface, surfaceDigest, nil
+}
+
+func missingChangeSurfaceDiagnostic(input planning.ChangeSurfaceInput) error {
+	return diag.New(
+		planning.CodeMissingChangeSurface,
+		"change surface derivation requires both a base manifest and the derived head manifest.",
+		diag.WithDetail("base_manifest", input.BaseManifest != nil),
+		diag.WithDetail("head_manifest", input.HeadManifest != nil),
+	)
 }
 
 func roleOutputChangeSurfaceExpected(config Config) bool {

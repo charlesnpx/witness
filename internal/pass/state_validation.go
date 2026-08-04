@@ -129,10 +129,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		if decoded, err := readPreflightResult(config.Outputs.PreflightPath); err == nil {
 			result = &decoded
 		}
-		return []artifactInput{
-			{role: "integration-bundle", path: config.IntegrationBundlePath, digestClass: digestClassRaw()},
-			{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
-		}, preflightOutputSpecs(config, result)
+		return preflightInputSpecs(config), preflightOutputSpecs(config, result)
 	case stagePlan:
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
