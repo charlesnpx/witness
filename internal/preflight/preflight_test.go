@@ -244,89 +244,137 @@ func TestRelayAbsentRejectsMalformedWitnessIntegrationBundle(t *testing.T) {
 func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *testing.T) {
 	tests := []struct {
 		name     string
-		mutate   func(map[string]any)
+		mutate   func(string, map[string]any, map[string]any)
 		wantPath string
 	}{
 		{
-			name: "empty contract id",
-			mutate: func(contract map[string]any) {
-				contract["id"] = ""
-			},
-			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/id",
-		},
-		{
-			name: "non-string contract id",
-			mutate: func(contract map[string]any) {
-				contract["id"] = json.Number("123")
+			name: "body contract id matching map key",
+			mutate: func(contractID string, _ map[string]any, contract map[string]any) {
+				contract["id"] = contractID
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/id",
 		},
 		{
 			name: "missing reducer object",
-			mutate: func(contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				delete(contract, "reducer")
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer",
 		},
 		{
 			name: "empty reducer instructions",
-			mutate: func(contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["reducer"].(map[string]any)["instructions"] = ""
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer/instructions",
 		},
 		{
 			name: "empty turn slot",
-			mutate: func(contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["turns"].([]any)[0].(map[string]any)["slot"] = ""
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/slot",
 		},
 		{
 			name: "empty turn instructions",
-			mutate: func(contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["turns"].([]any)[0].(map[string]any)["instructions"] = " "
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/instructions",
+		},
+		{
+			name: "turn slots do not match alternating schedule",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				slots := []string{"slot_0", "slot_0", "slot_0", "slot_1"}
+				for index, slot := range slots {
+					contract["turns"].([]any)[index].(map[string]any)["slot"] = slot
+				}
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/1/slot",
+		},
+		{
+			name: "unknown bundle root field",
+			mutate: func(_ string, bundle map[string]any, _ map[string]any) {
+				bundle["extra"] = true
+			},
+			wantPath: "/extra",
+		},
+		{
+			name: "unknown contract field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/extra",
+		},
+		{
+			name: "unknown result field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["result"].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/result/extra",
+		},
+		{
+			name: "unknown turn field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["turns"].([]any)[0].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/extra",
+		},
+		{
+			name: "unknown reducer field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["reducer"].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer/extra",
+		},
+		{
+			name: "unknown prompt context field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["prompt_context"].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/prompt_context/extra",
+		},
+		{
+			name: "unknown input field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["inputs"].(map[string]any)["charter"].(map[string]any)["path"] = "/tmp/value"
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/inputs/charter/path",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			contractID, contract := requiredContractForTest(t)
-			contract["id"] = contractID
-			test.mutate(contract)
 
-			_, diagnostics := validateWitnessIntegrationBundle(map[string]any{
+			bundle := map[string]any{
 				"schema_version": relayIntegrationBundleV2,
 				"id":             "test-bundle",
 				"contracts": map[string]any{
 					contractID: contract,
 				},
-			})
+			}
+			test.mutate(contractID, bundle, contract)
+
+			_, diagnostics := validateWitnessIntegrationBundle(bundle)
 			requireContractMismatchAtPath(t, diagnostics, test.wantPath)
 		})
 	}
 
-	t.Run("absent contract id is accepted", func(t *testing.T) {
+	t.Run("canonical fixture is accepted unchanged", func(t *testing.T) {
 		fixture := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
 		contracts, ok := fixture["contracts"].(map[string]any)
 		if !ok {
 			t.Fatalf("contracts = %T, want object", fixture["contracts"])
 		}
-		for _, payload := range contracts {
-			if contract, ok := payload.(map[string]any); ok {
-				delete(contract, "id")
-			}
-		}
 
 		contractsByID, diagnostics := validateWitnessIntegrationBundle(fixture)
 		if len(diagnostics) > 0 {
-			t.Fatalf("expected no diagnostics for absent contract body ids, got %v", diagnostics)
+			t.Fatalf("expected no diagnostics for canonical fixture, got %v", diagnostics)
 		}
 		for contractID := range contracts {
 			if _, ok := contractsByID[contractID]; !ok {
-				t.Fatalf("expected contract %q to be accepted without a body id", contractID)
+				t.Fatalf("expected contract %q to be accepted from canonical fixture", contractID)
 			}
 		}
 	})
@@ -397,7 +445,7 @@ func TestCompileCommandDiagnosticUsesTypedRelayCodes(t *testing.T) {
 func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	stateDir := t.TempDir()
-	bundlePath := writeFixtureIntegrationBundleWithContractIDsForTest(t, t.TempDir())
+	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
 	result, err := Run(context.Background(), Options{
 		RelayPath:             "fake-relay",
 		IntegrationBundlePath: bundlePath,
@@ -451,7 +499,7 @@ func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 func TestRunRelayPresentRetainsFixtureCapabilitiesByteIdentical(t *testing.T) {
 	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	stateDir := t.TempDir()
-	bundlePath := writeFixtureIntegrationBundleWithContractIDsForTest(t, t.TempDir())
+	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
 	result, err := Run(context.Background(), Options{
 		RelayPath:             "fake-relay",
 		IntegrationBundlePath: bundlePath,
@@ -500,7 +548,7 @@ func TestRunBindsExistingSnapshotManifestAndRejectsForgedReference(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureBundle := writeFixtureIntegrationBundleWithContractIDsForTest(t, root)
+	fixtureBundle := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
 	result, err := Run(context.Background(), Options{
 		RelayPath:              filepath.Join(root, "missing-convo-relay"),
 		IntegrationBundlePath:  fixtureBundle,
@@ -622,31 +670,6 @@ func loadFixture[T any](t *testing.T, name string) T {
 		t.Fatal(err)
 	}
 	return value
-}
-
-func writeFixtureIntegrationBundleWithContractIDsForTest(t *testing.T, dir string) string {
-	t.Helper()
-	bundle := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
-	contracts, ok := bundle["contracts"].(map[string]any)
-	if !ok {
-		t.Fatalf("contracts = %T, want object", bundle["contracts"])
-	}
-	for _, contractID := range requiredWitnessContractIDs() {
-		contract, ok := contracts[contractID].(map[string]any)
-		if !ok {
-			t.Fatalf("%s contract = %T, want object", contractID, contracts[contractID])
-		}
-		contract["id"] = contractID
-	}
-	path := filepath.Join(dir, "integration-bundle-v2.fixture-with-contract-ids.json")
-	data, err := json.MarshalIndent(bundle, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 func requiredContractForTest(t *testing.T) (string, map[string]any) {
