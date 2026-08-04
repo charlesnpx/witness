@@ -41,6 +41,9 @@ func applyOutputDefaults(config *Config) {
 	if strings.TrimSpace(config.Outputs.AssembleResultPath) == "" {
 		config.Outputs.AssembleResultPath = assembleResultPath(*config)
 	}
+	if strings.TrimSpace(config.Outputs.RoleOutputChangeSurfacePath) == "" {
+		config.Outputs.RoleOutputChangeSurfacePath = roleOutputChangeSurfacePath(*config)
+	}
 	if strings.TrimSpace(config.Outputs.RunResultPath) == "" {
 		config.Outputs.RunResultPath = filepath.Join(config.StateDir, "verdict.json")
 	}
@@ -62,6 +65,13 @@ func retainedIntegrationBundlePath(config Config) string {
 
 func roleOutputDir(config Config) string {
 	return filepath.Join(config.StateDir, "role-outputs")
+}
+
+func roleOutputChangeSurfacePath(config Config) string {
+	if strings.TrimSpace(config.Outputs.RoleOutputChangeSurfacePath) != "" {
+		return config.Outputs.RoleOutputChangeSurfacePath
+	}
+	return filepath.Join(config.StateDir, "role-output-change-surface.json")
 }
 
 func writeAssembleArtifacts(config Config, result *planning.AssembleResult) error {
@@ -87,6 +97,9 @@ func assembleOutputSpecs(config Config, result *planning.AssembleResult) []artif
 
 func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInput {
 	specs := []artifactInput{{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes}}
+	if roleOutputChangeSurfaceExpected(config) {
+		specs = append(specs, artifactInput{role: roleOutputChangeSurfaceRole, path: roleOutputChangeSurfacePath(config), digestClass: digest.ClassRawBytes})
+	}
 	if result == nil {
 		return append(specs,
 			artifactInput{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},

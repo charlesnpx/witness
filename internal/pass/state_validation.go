@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/charlesnpx/witness/internal/adjudicate"
+	"github.com/charlesnpx/witness/internal/changesurface"
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/diag"
@@ -127,7 +128,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
 			{role: "policy", path: config.PolicyPath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-			{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest},
+			{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
 		}
 		for _, item := range config.RoleOutputs {
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
@@ -153,7 +154,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digestClassRaw()},
 			{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config), digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-			{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest},
+			{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
 		}
 		for _, batch := range relayBatches {
 			inputs = append(inputs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digestClassRaw()})
@@ -183,7 +184,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
 			{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-			{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest},
+			{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
 		}
 		for _, item := range config.RoleOutputs {
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
@@ -312,6 +313,8 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 		}
 	case isPreflightRetainedOutputRole(artifact.Role):
 		err = validatePreflightRetainedOutput(state.Config, artifact)
+	case artifact.Role == roleOutputChangeSurfaceRole:
+		err = validateRoleOutputChangeSurfaceOutput(state, artifact)
 	case artifact.Role == "verification-plan":
 		err = validatePlanStageOutputs(state)
 	case artifact.Role == "change-surface":
@@ -702,6 +705,53 @@ func validatePreflightRetainedOutput(config Config, artifact ArtifactRecord) err
 		}
 	}
 	return diag.New(CodeStateInvalid, "preflight retained output is not part of the derived artifact set.", diag.WithDetail("role", artifact.Role), diag.WithDetail("path", artifact.Path))
+}
+
+func validateRoleOutputChangeSurfaceOutput(state *State, artifact ArtifactRecord) error {
+	if state == nil {
+		return diag.New(CodeStateInvalid, "pass state is empty.")
+	}
+	expectedPath := roleOutputChangeSurfacePath(state.Config)
+	if !recordedPathsEqual(artifact.Path, expectedPath) {
+		return diag.New(
+			CodeStateInvalid,
+			"role-output change surface output path does not match the driver output path.",
+			diag.WithDetail("actual_path", artifact.Path),
+			diag.WithDetail("expected_path", expectedPath),
+		)
+	}
+	preflightResult, err := readPreflightResult(state.Config.Outputs.PreflightPath)
+	if err != nil {
+		return err
+	}
+	expected, expectedDigest, err := deriveRoleOutputChangeSurface(state.Config, preflightResult.SnapshotDigest)
+	if err != nil {
+		return err
+	}
+	if expected == nil {
+		return diag.New(
+			CodeStateInvalid,
+			"role-output change surface output is present but no early change surface is expected.",
+			diag.WithDetail("path", artifact.Path),
+		)
+	}
+	actual, err := readChangeSurfaceDocument(artifact.Path)
+	if err != nil {
+		return err
+	}
+	actualDigest, err := changesurface.Digest(actual)
+	if err != nil {
+		return err
+	}
+	if actualDigest != expectedDigest {
+		return diag.New(
+			CodeStateInvalid,
+			"role-output change surface digest does not match the surface derived from authoritative manifests.",
+			diag.WithDetail("actual_digest", actualDigest),
+			diag.WithDetail("expected_digest", expectedDigest),
+		)
+	}
+	return requireSemanticMatch("role-output change surface", actual, *expected)
 }
 
 func preflightRetainedArtifactPath(stateDir string, relativePath string) (string, error) {
@@ -1322,7 +1372,7 @@ func expectedPlanningResult(state *State) (*planning.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	changeSurface, err := readChangeSurfaceInput(config.BaseManifestPath, config.HeadManifestPath, config.BaselinePass)
+	changeSurface, err := readDriverChangeSurfaceInput(config, config.BaselinePass)
 	if err != nil {
 		return nil, err
 	}
@@ -1392,7 +1442,7 @@ func expectedAssembleResult(state *State) (*planning.AssembleResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	changeSurface, err := readChangeSurfaceInput(config.BaseManifestPath, config.HeadManifestPath, false)
+	changeSurface, err := readDriverChangeSurfaceInput(config, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1468,7 +1518,7 @@ func expectedAdjudicationResult(state *State) (*adjudicate.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	changeSurface, err := readChangeSurfaceInput(config.BaseManifestPath, config.HeadManifestPath, false)
+	changeSurface, err := readDriverChangeSurfaceInput(config, false)
 	if err != nil {
 		return nil, err
 	}
