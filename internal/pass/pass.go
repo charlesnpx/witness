@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -31,19 +32,20 @@ const (
 
 	StateFileName = "pass-state.json"
 
-	CodeMissingStateDir       = "pass_missing_state_dir"
-	CodeMissingCharter        = "pass_missing_charter"
-	CodeMissingSource         = "pass_missing_source"
-	CodeMissingBundle         = "pass_missing_integration_bundle"
-	CodeStateExistsInvalid    = "pass_state_exists_invalid"
-	CodeStateUnsupported      = "pass_state_unsupported"
-	CodeStateDigestMismatch   = "pass_state_digest_mismatch"
-	CodeStateInvalid          = "pass_state_invalid"
-	CodeStateDrift            = "pass_state_drift"
-	CodeStateDirInsideSource  = "pass_state_dir_inside_source"
-	CodeInvalidRoleOutputSpec = "pass_invalid_role_output_spec"
-	CodeInvalidPreflight      = "pass_invalid_preflight"
-	CodeInvalidState          = "pass_invalid_state"
+	CodeMissingStateDir         = "pass_missing_state_dir"
+	CodeMissingCharter          = "pass_missing_charter"
+	CodeMissingSource           = "pass_missing_source"
+	CodeMissingBundle           = "pass_missing_integration_bundle"
+	CodeStateExistsInvalid      = "pass_state_exists_invalid"
+	CodeStateUnsupported        = "pass_state_unsupported"
+	CodeStateDigestMismatch     = "pass_state_digest_mismatch"
+	CodeStateInvalid            = "pass_state_invalid"
+	CodeStateDrift              = "pass_state_drift"
+	CodeStateDirInsideSource    = "pass_state_dir_inside_source"
+	CodeInvalidRoleOutputSpec   = "pass_invalid_role_output_spec"
+	CodeInvalidPreflight        = "pass_invalid_preflight"
+	CodeInvalidState            = "pass_invalid_state"
+	CodePassStateConfigMismatch = "pass_state_config_mismatch"
 
 	stageFreeze     = "freeze"
 	stagePreflight  = "preflight"
@@ -63,6 +65,8 @@ const (
 	digestClassFreezeManifest = "freeze-manifest"
 	digestClassPassState      = "pass-state"
 )
+
+var atomicWriteFile = ledger.WriteFileAtomic
 
 var orderedStages = []string{
 	stageFreeze,
@@ -246,7 +250,20 @@ func Begin(ctx context.Context, options BeginOptions) (*Invocation, error) {
 		return nil, err
 	}
 	if _, err := os.Stat(config.Outputs.StatePath); err == nil {
-		return Resume(ctx, ResumeOptions{StateDir: config.StateDir})
+		state, err := readState(config.Outputs.StatePath)
+		if err != nil {
+			return nil, err
+		}
+		applyOutputDefaults(&state.Config)
+		if mismatches := configMismatchPaths(state.Config, config); len(mismatches) > 0 {
+			return nil, validationError(
+				CodePassStateConfigMismatch,
+				"existing pass state config does not match the requested begin options.",
+				"/config",
+				map[string]any{"mismatched_field_paths": mismatches},
+			)
+		}
+		return resumeLoadedState(ctx, state, config.StateDir, config.Outputs.StatePath)
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, fileError(err, config.Outputs.StatePath, "open pass state")
 	}
@@ -267,11 +284,19 @@ func Resume(ctx context.Context, options ResumeOptions) (*Invocation, error) {
 	if err != nil {
 		return nil, err
 	}
-	state, err := readState(filepath.Join(stateDir, StateFileName))
+	statePath := filepath.Join(stateDir, StateFileName)
+	state, err := readState(statePath)
 	if err != nil {
 		return nil, err
 	}
+	return resumeLoadedState(ctx, state, stateDir, statePath)
+}
+
+func resumeLoadedState(ctx context.Context, state *State, stateDir string, statePath string) (*Invocation, error) {
 	applyOutputDefaults(&state.Config)
+	if err := validateResumeStateBinding(state, stateDir, statePath); err != nil {
+		return nil, err
+	}
 	if err := rejectDriverOutputAliases(state.Config); err != nil {
 		return nil, err
 	}
@@ -279,6 +304,29 @@ func Resume(ctx context.Context, options ResumeOptions) (*Invocation, error) {
 		return nil, err
 	}
 	return advance(ctx, state)
+}
+
+func validateResumeStateBinding(state *State, stateDir string, statePath string) error {
+	if state == nil {
+		return validationError(CodeStateInvalid, "pass state is empty.", "", nil)
+	}
+	if filepath.Clean(stateDir) != filepath.Clean(state.Config.StateDir) {
+		return validationError(
+			CodeStateInvalid,
+			"resolved resume state directory does not match the persisted pass config.",
+			"/config/state_dir",
+			map[string]any{"actual_state_dir": filepath.Clean(stateDir), "persisted_state_dir": filepath.Clean(state.Config.StateDir)},
+		)
+	}
+	if filepath.Clean(statePath) != filepath.Clean(state.Config.Outputs.StatePath) {
+		return validationError(
+			CodeStateInvalid,
+			"resolved pass state file path does not match the persisted pass config.",
+			"/config/outputs/state_path",
+			map[string]any{"actual_state_path": filepath.Clean(statePath), "persisted_state_path": filepath.Clean(state.Config.Outputs.StatePath)},
+		)
+	}
+	return nil
 }
 
 func (invocation *Invocation) HumanSummary() string {
@@ -1314,6 +1362,62 @@ func stateDigest(state State) (string, error) {
 	return digest.SemanticJSON(state)
 }
 
+func configMismatchPaths(existing Config, current Config) []string {
+	var paths []string
+	collectConfigMismatches(reflect.ValueOf(existing), reflect.ValueOf(current), reflect.TypeOf(existing), "/config", &paths)
+	sort.Strings(paths)
+	return paths
+}
+
+func collectConfigMismatches(left reflect.Value, right reflect.Value, valueType reflect.Type, path string, paths *[]string) {
+	switch valueType.Kind() {
+	case reflect.Struct:
+		for index := 0; index < valueType.NumField(); index++ {
+			field := valueType.Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			name := jsonFieldName(field)
+			if name == "-" {
+				continue
+			}
+			collectConfigMismatches(left.Field(index), right.Field(index), field.Type, path+"/"+jsonPointerEscape(name), paths)
+		}
+	case reflect.Slice:
+		if left.Len() != right.Len() {
+			*paths = append(*paths, path)
+			return
+		}
+		for index := 0; index < left.Len(); index++ {
+			collectConfigMismatches(left.Index(index), right.Index(index), valueType.Elem(), fmt.Sprintf("%s/%d", path, index), paths)
+		}
+		if left.IsNil() != right.IsNil() && left.Len() == 0 {
+			*paths = append(*paths, path)
+		}
+	default:
+		if !reflect.DeepEqual(left.Interface(), right.Interface()) {
+			*paths = append(*paths, path)
+		}
+	}
+}
+
+func jsonFieldName(field reflect.StructField) string {
+	tag := field.Tag.Get("json")
+	if tag == "" {
+		return field.Name
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "" {
+		return field.Name
+	}
+	return name
+}
+
+func jsonPointerEscape(value string) string {
+	value = strings.ReplaceAll(value, "~", "~0")
+	return strings.ReplaceAll(value, "/", "~1")
+}
+
 type artifactInput struct {
 	role        string
 	path        string
@@ -1717,7 +1821,7 @@ func writeCanonicalFile(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fileError(err, filepath.Dir(path), "create output directory")
 	}
-	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+	if err := atomicWriteFile(path, append(encoded, '\n'), 0o644); err != nil {
 		return fileError(err, path, "write output")
 	}
 	return nil
@@ -1733,7 +1837,7 @@ func writeJSONFile(path string, value any) error {
 	if err := encoder.Encode(value); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, buffer.Bytes(), 0o644); err != nil {
+	if err := atomicWriteFile(path, buffer.Bytes(), 0o644); err != nil {
 		return fileError(err, path, "write output")
 	}
 	return nil

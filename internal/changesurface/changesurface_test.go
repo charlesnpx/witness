@@ -77,6 +77,44 @@ func TestDeriveRejectsHeadDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestDeriveRejectsDuplicateManifestEntriesBeforeIndexing(t *testing.T) {
+	baseDir := t.TempDir()
+	writeFile(t, filepath.Join(baseDir, "app.txt"), []byte("before\n"), 0o644)
+	headDir := t.TempDir()
+	writeFile(t, filepath.Join(headDir, "app.txt"), []byte("after\n"), 0o644)
+	baseSnapshot, err := freeze.Create(context.Background(), freeze.Options{SourceDir: baseDir, OutputDir: filepath.Join(t.TempDir(), "base"), AllowNonGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headSnapshot, err := freeze.Create(context.Background(), freeze.Options{SourceDir: headDir, OutputDir: filepath.Join(t.TempDir(), "head"), AllowNonGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseManifest := baseSnapshot.Manifest
+	baseManifest.Files = []freeze.FileEntry{
+		baseSnapshot.Manifest.Files[0],
+		headSnapshot.Manifest.Files[0],
+	}
+	restampManifest(t, &baseManifest)
+
+	_, _, err = Derive(baseManifest, headSnapshot.Manifest, headSnapshot.ManifestDigest)
+	if diagnosticCode(err) != CodeInvalidManifest {
+		t.Fatalf("err = %v, want %s", err, CodeInvalidManifest)
+	}
+}
+
+func restampManifest(t *testing.T, manifest *freeze.Manifest) {
+	t.Helper()
+	manifest.Source.ManifestDigest = ""
+	manifest.Workspace.ManifestDigest = ""
+	manifestDigest, err := freeze.ManifestDigest(*manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Source.ManifestDigest = manifestDigest
+	manifest.Workspace.ManifestDigest = manifestDigest
+}
+
 func writeFile(t *testing.T, path string, data []byte, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

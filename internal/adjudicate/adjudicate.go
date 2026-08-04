@@ -1160,7 +1160,7 @@ func duplicateRelayBatchDiagnostics(findingID string, selectedBatchID string, ba
 	}
 	return []diag.Diagnostic{diagnostic(
 		CodeDuplicateRelayBatch,
-		"relay verdict finding appears in multiple batches; selected the lexicographically smallest batch.",
+		"relay verdict finding appears in multiple batches; relay metadata failed closed as pending_verification.",
 		"/manifest/batches",
 		map[string]any{
 			"finding_id":        findingID,
