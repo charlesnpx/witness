@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/charlesnpx/witness/internal/canonjson"
 	"github.com/charlesnpx/witness/internal/contracts"
@@ -210,15 +211,26 @@ func ReadFile(path string) ([]Record, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, diag.New(CodeInvalidLedger, "ledger path is required.")
 	}
-	file, err := os.Open(path)
+	data, err := readLedgerBytes(path)
+	if err != nil {
+		return nil, err
+	}
+	return decodeLedgerRecords(data)
+}
+
+func readLedgerBytes(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fileError(err, path, "open ledger")
+		return nil, fileError(err, path, "read ledger")
 	}
-	defer file.Close()
-	records, err := strictjson.DecodeJSONL[Record](file, strictjson.DefaultMaxBytes*8)
+	return data, nil
+}
+
+func decodeLedgerRecords(data []byte) ([]Record, error) {
+	records, err := strictjson.DecodeJSONL[Record](bytes.NewReader(data), strictjson.DefaultMaxBytes*8)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +288,11 @@ func AppendEvents(path string, events []EventToAppend) ([]Record, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, diag.New(CodeInvalidLedger, "ledger path is required.")
 	}
-	existing, err := ReadFile(path)
+	existingBytes, err := readLedgerBytes(path)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := decodeLedgerRecords(existingBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -318,21 +334,126 @@ func AppendEvents(path string, events []EventToAppend) ([]Record, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fileError(err, path, "create ledger directory")
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, fileError(err, path, "append ledger")
-	}
-	defer file.Close()
+	block := make([]byte, 0)
 	for _, record := range appended {
 		encoded, err := marshalRecord(record)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := file.Write(append(encoded, '\n')); err != nil {
-			return nil, fileError(err, path, "write ledger")
-		}
+		block = append(block, encoded...)
+		block = append(block, '\n')
+	}
+	complete := append([]byte(nil), existingBytes...)
+	if len(complete) > 0 && !bytes.HasSuffix(complete, []byte("\n")) {
+		complete = append(complete, '\n')
+	}
+	complete = append(complete, block...)
+	if err := WriteFileAtomic(path, complete, 0o644); err != nil {
+		return nil, fileError(err, path, "write ledger")
 	}
 	return appended, nil
+}
+
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	perm := mode.Perm()
+	preserveMode := false
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return diag.New(
+				CodeInvalidLedger,
+				"refusing atomic write over non-regular file.",
+				diag.WithPath(path),
+				diag.WithDetail("mode", info.Mode().String()),
+			)
+		}
+		perm = info.Mode().Perm()
+		preserveMode = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	temp, tempPath, err := openAtomicTempFile(dir, filepath.Base(path), perm)
+	if err != nil {
+		return err
+	}
+	closed := false
+	cleanup := true
+	defer func() {
+		if !closed {
+			_ = temp.Close()
+		}
+		if cleanup {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if preserveMode {
+		if err := temp.Chmod(perm); err != nil {
+			return err
+		}
+	}
+	if _, err := temp.Write(data); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		closed = true
+		return err
+	}
+	closed = true
+	if err := rejectNonRegularDestination(path); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return syncDirectory(dir)
+}
+
+func openAtomicTempFile(dir string, base string, perm os.FileMode) (*os.File, string, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		tempPath := filepath.Join(dir, fmt.Sprintf("%s.tmp-%d-%d-%d", base, os.Getpid(), time.Now().UnixNano(), attempt))
+		temp, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, perm)
+		if err == nil {
+			return temp, tempPath, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", err
+	}
+	return nil, "", fmt.Errorf("create unique temporary file in %s: %w", dir, os.ErrExist)
+}
+
+func rejectNonRegularDestination(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode().IsRegular() {
+		return nil
+	}
+	return diag.New(
+		CodeInvalidLedger,
+		"refusing atomic write over non-regular file.",
+		diag.WithPath(path),
+		diag.WithDetail("mode", info.Mode().String()),
+	)
+}
+
+func syncDirectory(dir string) error {
+	handle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	return handle.Sync()
 }
 
 func Show(path string, options ShowOptions) (ShowDocument, error) {

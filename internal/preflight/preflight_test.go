@@ -201,6 +201,35 @@ func TestCompileReportMissingDigestRejectedPerRecipe(t *testing.T) {
 	}
 }
 
+func TestRelayAbsentRejectsStubbedRequiredContracts(t *testing.T) {
+	root := t.TempDir()
+	contractBodies := map[string]any{}
+	for _, requirement := range RequiredRecipes {
+		contractBodies[requirement.ContractID] = map[string]any{"id": requirement.ContractID}
+	}
+	bundlePath := filepath.Join(root, "bundle.json")
+	writeCanonicalForTest(t, bundlePath, map[string]any{
+		"schema_version": "relay-integration-bundle-v2",
+		"id":             "witness/stubbed-contracts",
+		"contracts":      contractBodies,
+	})
+
+	result, err := Run(context.Background(), Options{
+		RelayPath:             filepath.Join(root, "missing-convo-relay"),
+		IntegrationBundlePath: bundlePath,
+		StateDir:              filepath.Join(root, "state"),
+	})
+	if err == nil {
+		t.Fatal("relay-absent preflight accepted stubbed required contracts")
+	}
+	if result.OK {
+		t.Fatalf("result.OK = true, diagnostics = %#v", result.Diagnostics)
+	}
+	if !hasDiagnostic(result.Diagnostics, CodeRecipeContractMismatch) {
+		t.Fatalf("diagnostics = %#v, want %s", result.Diagnostics, CodeRecipeContractMismatch)
+	}
+}
+
 func TestEvaluateCompileReportAcceptsRealCompiledPlanShape(t *testing.T) {
 	requirement := RecipeRequirement{ID: "witness-falsify-v2", ContractID: "witnessed-review/witness-falsification-v2"}
 	raw := loadFixture[map[string]any](t, "compile-witness-falsify-v2.json")

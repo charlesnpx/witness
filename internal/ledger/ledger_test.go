@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 )
 
@@ -116,6 +118,91 @@ func TestDigestChainTamperDetection(t *testing.T) {
 	}
 	if len(validation.Diagnostics) == 0 || validation.Diagnostics[0].Code != CodeLedgerTamper {
 		t.Fatalf("diagnostics = %#v", validation.Diagnostics)
+	}
+}
+
+func TestWriteFileAtomicRejectsSymlinkDestination(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "target.jsonl")
+	targetData := []byte("target\n")
+	if err := os.WriteFile(targetPath, targetData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "ledger.jsonl")
+	linkTarget := "target.jsonl"
+	if err := os.Symlink(linkTarget, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	err := WriteFileAtomic(linkPath, []byte("replacement\n"), 0o644)
+	if err == nil {
+		t.Fatal("WriteFileAtomic accepted a symlink destination")
+	}
+	if diagnostic := diag.FromError(err); diagnostic.Code != CodeInvalidLedger {
+		t.Fatalf("diagnostic code = %s, want %s", diagnostic.Code, CodeInvalidLedger)
+	}
+	gotTarget, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("Readlink: %v", err)
+	}
+	if gotTarget != linkTarget {
+		t.Fatalf("link target = %q, want %q", gotTarget, linkTarget)
+	}
+	linkInfo, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("destination mode = %s, want symlink", linkInfo.Mode())
+	}
+	gotData, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(gotData) != string(targetData) {
+		t.Fatalf("target data = %q, want %q", gotData, targetData)
+	}
+}
+
+func TestWriteFileAtomicHonorsUmaskForNewFilesAndPreservesExistingMode(t *testing.T) {
+	oldUmask := syscall.Umask(0o077)
+	t.Cleanup(func() {
+		syscall.Umask(oldUmask)
+	})
+
+	dir := t.TempDir()
+	newPath := filepath.Join(dir, "new-ledger.jsonl")
+	if err := WriteFileAtomic(newPath, []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic new file: %v", err)
+	}
+	newInfo, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatalf("Stat new file: %v", err)
+	}
+	if got, want := newInfo.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Fatalf("new file mode = %o, want %o", got, want)
+	}
+
+	existingPath := filepath.Join(dir, "existing-ledger.jsonl")
+	if err := os.WriteFile(existingPath, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(existingPath, []byte("replacement\n"), 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic existing file: %v", err)
+	}
+	existingInfo, err := os.Stat(existingPath)
+	if err != nil {
+		t.Fatalf("Stat existing file: %v", err)
+	}
+	if got, want := existingInfo.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Fatalf("existing file mode = %o, want %o", got, want)
+	}
+	gotData, err := os.ReadFile(existingPath)
+	if err != nil {
+		t.Fatalf("ReadFile existing file: %v", err)
+	}
+	if string(gotData) != "replacement\n" {
+		t.Fatalf("existing data = %q, want replacement", gotData)
 	}
 }
 

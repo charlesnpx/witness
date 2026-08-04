@@ -254,6 +254,15 @@ func (err *ValidationError) Error() string {
 }
 
 func manifestDigest(manifest freeze.Manifest, label string) (string, error) {
+	if diagnostics := freeze.ValidateManifest(manifest); len(diagnostics) > 0 {
+		first := diagnostics[0]
+		return "", diag.New(
+			CodeInvalidManifest,
+			label+" freeze manifest is invalid.",
+			diag.WithPath("/"+label+first.Path),
+			diag.WithDetails(changeSurfaceManifestDetails(first)),
+		)
+	}
 	if manifest.SchemaVersion != freeze.SchemaVersion {
 		return "", diag.New(
 			CodeInvalidManifest,
@@ -277,6 +286,20 @@ func manifestDigest(manifest freeze.Manifest, label string) (string, error) {
 		return "", diag.Wrap(err, CodeInvalidManifest, label+" freeze manifest digest could not be computed.")
 	}
 	return value, nil
+}
+
+func changeSurfaceManifestDetails(diagnostic diag.Diagnostic) map[string]any {
+	details := map[string]any{
+		"manifest_code":    diagnostic.Code,
+		"manifest_message": diagnostic.Message,
+	}
+	if diagnostic.Path != "" {
+		details["manifest_path"] = diagnostic.Path
+	}
+	for key, value := range diagnostic.Details {
+		details[key] = value
+	}
+	return details
 }
 
 func deriveChangedPaths(baseFiles []freeze.FileEntry, headFiles []freeze.FileEntry) []PathChange {
