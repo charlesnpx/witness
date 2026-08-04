@@ -92,6 +92,11 @@ func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []
 			} else if ok {
 				return existing, nil
 			}
+			if completed, ok, err := completePartialIdenticalLineage(path, records, result.ResultDigest, events); err != nil {
+				return nil, err
+			} else if ok {
+				return completed, nil
+			}
 		}
 		return nil, ledger.DuplicateRunDigestError(result.ResultDigest)
 	}
@@ -132,6 +137,53 @@ func completeIdenticalLineage(records []ledger.Record, runDigest string, events 
 		return append([]ledger.Record(nil), records[start:start+len(expected)]...), true, nil
 	}
 	return nil, false, nil
+}
+
+func completePartialIdenticalLineage(path string, records []ledger.Record, runDigest string, events []ledger.EventToAppend) ([]ledger.Record, bool, error) {
+	expected, err := canonicalLineage(events)
+	if err != nil {
+		return nil, false, err
+	}
+	for prefixLen := minInt(len(records), len(expected)-1); prefixLen > 0; prefixLen-- {
+		start := len(records) - prefixLen
+		matched := true
+		for offset := 0; offset < prefixLen; offset++ {
+			if !ledgerRecordMatchesExpected(records[start+offset], expected[offset]) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		for index, record := range records {
+			if index >= start {
+				continue
+			}
+			recordRunDigest, err := lineageRecordRunDigest(record)
+			if err != nil {
+				return nil, false, err
+			}
+			if recordRunDigest == runDigest {
+				return nil, false, nil
+			}
+		}
+		appended, err := ledger.AppendEvents(path, events[prefixLen:])
+		if err != nil {
+			return nil, false, err
+		}
+		completed := append([]ledger.Record(nil), records[start:]...)
+		completed = append(completed, appended...)
+		return completed, true, nil
+	}
+	return nil, false, nil
+}
+
+func minInt(left int, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 type expectedLedgerRecord struct {

@@ -32,6 +32,7 @@ const (
 	CodeUnsafePath          = "freeze_unsafe_path"
 	CodeUnsafeOutputPath    = "freeze_unsafe_output_path"
 	CodeBlobDigestMismatch  = "freeze_blob_digest_mismatch"
+	CodeInvalidManifest     = "freeze_invalid_manifest"
 )
 
 type Options struct {
@@ -572,6 +573,80 @@ func unsignedManifestDigest(manifest Manifest) (string, error) {
 
 func ManifestDigest(manifest Manifest) (string, error) {
 	return unsignedManifestDigest(manifest)
+}
+
+func ValidateManifest(manifest Manifest) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if manifest.SchemaVersion != SchemaVersion {
+		diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest schema_version is unsupported.", "/schema_version", map[string]any{"actual": manifest.SchemaVersion, "expected": SchemaVersion}))
+	}
+	if manifest.DigestProfile != digest.Profile {
+		diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest digest_profile is unsupported.", "/digest_profile", map[string]any{"actual": manifest.DigestProfile, "expected": digest.Profile}))
+	}
+	seen := map[string]int{}
+	for index, file := range manifest.Files {
+		path := fmt.Sprintf("/files/%d", index)
+		if err := validateRelativePath(file.Path); err != nil {
+			diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest file path must be safe and relative.", path+"/path", map[string]any{"path": file.Path}))
+		}
+		if first, exists := seen[file.Path]; exists {
+			diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest file paths must be unique.", path+"/path", map[string]any{"path": file.Path, "duplicate_of": fmt.Sprintf("/files/%d/path", first)}))
+		}
+		seen[file.Path] = index
+		if !validManifestDigest(file.Digest) {
+			diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest file digest must be a relay-root-digests-v1 sha256 digest.", path+"/digest", map[string]any{"digest": file.Digest}))
+		}
+		if file.Size < 0 {
+			diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest file size must not be negative.", path+"/size", map[string]any{"size": file.Size}))
+		}
+	}
+	actualDigest, err := unsignedManifestDigest(manifest)
+	if err != nil {
+		diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest digest could not be computed.", "", map[string]any{"error": err.Error()}))
+		return diagnostics
+	}
+	for _, embedded := range []struct {
+		path  string
+		value string
+	}{
+		{path: "/source/manifest_digest", value: manifest.Source.ManifestDigest},
+		{path: "/workspace/manifest_digest", value: manifest.Workspace.ManifestDigest},
+	} {
+		if strings.TrimSpace(embedded.value) == "" {
+			continue
+		}
+		if !validManifestDigest(embedded.value) {
+			diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest embedded digest must be a relay-root-digests-v1 sha256 digest.", embedded.path, map[string]any{"digest": embedded.value}))
+			continue
+		}
+		if embedded.value != actualDigest {
+			diagnostics = append(diagnostics, manifestDiagnostic("freeze manifest embedded digest does not match its content.", embedded.path, map[string]any{"actual_digest": actualDigest, "expected_digest": embedded.value}))
+		}
+	}
+	return diagnostics
+}
+
+func manifestDiagnostic(message string, path string, details map[string]any) diag.Diagnostic {
+	return diag.Diagnostic{Code: CodeInvalidManifest, Message: message, Path: path, Details: details}
+}
+
+func validManifestDigest(value string) bool {
+	if !strings.HasPrefix(value, digest.Prefix) {
+		return false
+	}
+	hex := strings.TrimPrefix(value, digest.Prefix)
+	if len(hex) != 64 {
+		return false
+	}
+	for _, char := range hex {
+		switch {
+		case char >= '0' && char <= '9':
+		case char >= 'a' && char <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func writeCanonicalFile(path string, value any) error {

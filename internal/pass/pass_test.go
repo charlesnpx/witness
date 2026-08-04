@@ -103,6 +103,55 @@ func TestDriverDriftFailsClosed(t *testing.T) {
 	}
 }
 
+func TestBeginResumeRejectsStateIdentityMismatch(t *testing.T) {
+	t.Run("begin config mismatch", func(t *testing.T) {
+		options := newBeginOptions(t)
+		if _, err := Begin(context.Background(), options); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		changedSource := filepath.Join(filepath.Dir(options.StateDir), "changed-source")
+		if err := os.MkdirAll(changedSource, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(changedSource, "app.txt"), []byte("changed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		changed := options
+		changed.SourceDir = changedSource
+
+		_, err := Begin(context.Background(), changed)
+		if err == nil {
+			t.Fatal("begin accepted an existing state with a different source_dir")
+		}
+		assertValidationCode(t, err, CodePassStateConfigMismatch)
+		assertValidationDetailPath(t, err, "mismatched_field_paths", "/config/source_dir")
+	})
+
+	t.Run("copied state file", func(t *testing.T) {
+		options := newBeginOptions(t)
+		if _, err := Begin(context.Background(), options); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		copiedDir := filepath.Join(filepath.Dir(options.StateDir), "copied-pass")
+		if err := os.MkdirAll(copiedDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stateBytes, err := os.ReadFile(filepath.Join(options.StateDir, StateFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(copiedDir, StateFileName), stateBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = Resume(context.Background(), ResumeOptions{StateDir: copiedDir})
+		if err == nil {
+			t.Fatal("resume accepted a pass state copied into a different directory")
+		}
+		assertValidationCode(t, err, CodeStateInvalid)
+	})
+}
+
 func TestResumeRejectsSelfConsistentTamperedFrozenCharter(t *testing.T) {
 	options := newBeginOptions(t)
 	if _, err := Begin(context.Background(), options); err != nil {
@@ -662,6 +711,108 @@ func TestDriverResumeAfterDurableLedgerAppendIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertLedgerLineageEqual(t, recordsAfter, recordsBefore)
+}
+
+func TestDriverAtomicPersistenceRecovery(t *testing.T) {
+	t.Run("partial lineage prefix", func(t *testing.T) {
+		options := newBeginOptions(t)
+		options.LedgerPath = filepath.Join(filepath.Dir(options.StateDir), "ledger.jsonl")
+		if _, err := Begin(context.Background(), options); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+			t.Fatalf("resume preflight: %v", err)
+		}
+		writeRoleOutputsForState(t, options.StateDir, true)
+		if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+			t.Fatalf("resume plan: %v", err)
+		}
+		if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+			t.Fatalf("resume assemble: %v", err)
+		}
+		stateBeforeAdjudicate := readPassStateForTest(t, options.StateDir)
+		service, err := runAdjudicationServiceForState(t, stateBeforeAdjudicate, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if service.RunErr != nil {
+			t.Fatal(service.RunErr)
+		}
+		frozen, _, err := readFrozenCharter(stateBeforeAdjudicate.Config.Outputs.CharterFreezePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		events := AdjudicationLedgerEvents(service.Result, adjudicationRoleOutputsForState(t, stateBeforeAdjudicate), frozen)
+		if len(events) < 2 {
+			t.Fatalf("lineage event count = %d, want at least two", len(events))
+		}
+		if _, err := ledger.AppendEvents(options.LedgerPath, events[:1]); err != nil {
+			t.Fatalf("write partial lineage prefix: %v", err)
+		}
+
+		invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+		if err != nil {
+			t.Fatalf("resume adjudicate after partial lineage prefix: %v", err)
+		}
+		if invocation.StageRun != stageAdjudicate {
+			t.Fatalf("stage_run = %s, want %s", invocation.StageRun, stageAdjudicate)
+		}
+		records, err := ledger.ReadFile(options.LedgerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected, err := canonicalLineage(events)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) != len(expected) {
+			t.Fatalf("ledger record count = %d, want %d", len(records), len(expected))
+		}
+		for index := range expected {
+			if !ledgerRecordMatchesExpected(records[index], expected[index]) {
+				t.Fatalf("ledger record %d = %s %s, want %s %s", index, records[index].EventKind, records[index].Event, expected[index].kind, expected[index].event)
+			}
+		}
+	})
+
+	t.Run("state rewrite interruption", func(t *testing.T) {
+		options := newBeginOptions(t)
+		if _, err := Begin(context.Background(), options); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		statePath := filepath.Join(options.StateDir, StateFileName)
+		before, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		injected := errors.New("injected state write interruption")
+		original := atomicWriteFile
+		atomicWriteFile = func(path string, data []byte, mode os.FileMode) error {
+			if filepath.Clean(path) == filepath.Clean(statePath) {
+				return injected
+			}
+			return original(path, data, mode)
+		}
+		defer func() {
+			atomicWriteFile = original
+		}()
+
+		_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+		if !errors.Is(err, injected) {
+			t.Fatalf("resume error = %v, want injected interruption", err)
+		}
+		after, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(after, before) {
+			t.Fatalf("state file changed after interrupted rewrite\nafter: %s\nwant:  %s", after, before)
+		}
+		state := readPassStateForTest(t, options.StateDir)
+		if len(state.Stages) != 1 || state.Stages[0].Name != stageFreeze {
+			t.Fatalf("state stages after interrupted rewrite = %#v, want only freeze", state.Stages)
+		}
+	})
 }
 
 func TestAssembleSupplementaryRelationshipsPersistFullResultOutput(t *testing.T) {
@@ -1342,6 +1493,19 @@ func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath strin
 	})
 }
 
+func adjudicationRoleOutputsForState(t *testing.T, state *State) []adjudicate.RoleOutputInput {
+	t.Helper()
+	roleOutputs := make([]adjudicate.RoleOutputInput, 0, len(state.Config.RoleOutputs))
+	for _, item := range state.Config.RoleOutputs {
+		document, err := readRoleOutput(item.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roleOutputs = append(roleOutputs, adjudicate.RoleOutputInput{Path: item.Path, Document: document})
+	}
+	return roleOutputs
+}
+
 func assertInvocation(t *testing.T, invocation *Invocation, stage string, action string, complete bool) {
 	t.Helper()
 	if invocation.StageRun != stage {
@@ -1367,6 +1531,24 @@ func assertValidationCode(t *testing.T, err error, code string) {
 	if len(validation.Diagnostics) == 0 || validation.Diagnostics[0].Code != code {
 		t.Fatalf("diagnostics = %#v, want first code %s", validation.Diagnostics, code)
 	}
+}
+
+func assertValidationDetailPath(t *testing.T, err error, key string, want string) {
+	t.Helper()
+	var validation *ValidationError
+	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
+		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
+	}
+	paths, ok := validation.Diagnostics[0].Details[key].([]string)
+	if !ok {
+		t.Fatalf("diagnostic details[%s] = %#v, want []string", key, validation.Diagnostics[0].Details[key])
+	}
+	for _, path := range paths {
+		if path == want {
+			return
+		}
+	}
+	t.Fatalf("diagnostic %s = %#v, want %s", key, paths, want)
 }
 
 func diagCode(err error) string {
