@@ -22,6 +22,8 @@ import (
 const (
 	SchemaVersion = "witness-verification-preflight-v1"
 
+	relayIntegrationBundleV2 = "relay-integration-bundle-v2"
+
 	CodeMissingStateDir             = "preflight_missing_state_dir"
 	CodeStateDirInsideSource        = "preflight_state_dir_inside_source"
 	CodeMissingIntegrationBundle    = "preflight_missing_integration_bundle"
@@ -99,6 +101,14 @@ type RecipeRequirement struct {
 	ContractID string `json:"contract_id"`
 }
 
+type requiredContractInput struct {
+	name         string
+	required     bool
+	cardinality  string
+	mediaType    string
+	schemaObject bool
+}
+
 var RequiredCapabilities = []CapabilityRequirement{
 	{Family: "portable_export", Capability: "relay-root-portable-export-v2", Location: "/portable_export"},
 	{Family: "provider_invocation", Capability: "relay-provider-invocation-v2", Location: "/provider_invocation"},
@@ -124,6 +134,12 @@ var RequiredRecipes = []RecipeRequirement{
 	{ID: "economy-equivalence-v2", ContractID: "witnessed-review/economy-equivalence-v2"},
 	{ID: "economy-equivalence-v2-codex", ContractID: "witnessed-review/economy-equivalence-v2"},
 	{ID: "economy-equivalence-v2-claude", ContractID: "witnessed-review/economy-equivalence-v2"},
+}
+
+var requiredWitnessContractInputs = []requiredContractInput{
+	{name: "charter", required: true, cardinality: "one", mediaType: "application/json", schemaObject: true},
+	{name: "findings", required: true, cardinality: "one", mediaType: "application/json", schemaObject: true},
+	{name: "artifact", required: false, cardinality: "many"},
 }
 
 var requiredBackends = []string{"claude", "codex"}
@@ -864,20 +880,11 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 			}
 		}
 	}
-	wanted := map[string]bool{}
-	for _, requirement := range RequiredRecipes {
-		wanted[requirement.ContractID] = true
+	if bundlePayload != nil {
+		_, bundleDiagnostics := validateWitnessIntegrationBundle(bundlePayload)
+		diagnostics = append(diagnostics, bundleDiagnostics...)
 	}
-	foundContracts := map[string]bool{}
-	scanContracts(bundlePayload, wanted, foundContracts)
-	for _, contractID := range sortedBoolMapKeys(wanted) {
-		if bundlePayload != nil && !foundContracts[contractID] {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeRecipeContractMismatch,
-				"integration bundle does not contain a required Witness contract.",
-				diag.WithDetail("contract_id", contractID),
-			)))
-		}
+	for _, contractID := range requiredWitnessContractIDs() {
 		if len(reports) > 0 && digests[contractID] == "" {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
 				CodeContractDigestMissing,
@@ -890,126 +897,124 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 }
 
 func selectedContractDigestsFromBundle(bundlePayload any) (map[string]string, []diag.Diagnostic) {
-	wanted := map[string]bool{}
-	for _, requirement := range RequiredRecipes {
-		wanted[requirement.ContractID] = true
-	}
 	digests := map[string]string{}
-	var diagnostics []diag.Diagnostic
-	var scan func(any)
-	scan = func(value any) {
-		switch typed := value.(type) {
-		case []any:
-			for _, item := range typed {
-				scan(item)
-			}
-		case map[string]any:
-			if contractsMap, ok := typed["contracts"].(map[string]any); ok {
-				keys := make([]string, 0, len(contractsMap))
-				for key := range contractsMap {
-					keys = append(keys, key)
-				}
-				sort.Strings(keys)
-				for _, contractID := range keys {
-					contractPayload := contractsMap[contractID]
-					if wanted[contractID] {
-						recordContractDigest(digests, &diagnostics, contractID, contractPayload, false)
-					}
-					scan(contractPayload)
-				}
-			}
-			if id := contractID(typed); wanted[id] {
-				recordContractDigest(digests, &diagnostics, id, typed, true)
-			}
-			keys := make([]string, 0, len(typed))
-			for key := range typed {
-				if key == "contracts" {
-					continue
-				}
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				scan(typed[key])
-			}
-		}
+	contractsByID, diagnostics := validateWitnessIntegrationBundle(bundlePayload)
+	if len(diagnostics) > 0 {
+		return digests, diagnostics
 	}
-	scan(bundlePayload)
-	for _, contractID := range sortedBoolMapKeys(wanted) {
-		if digests[contractID] == "" {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeRecipeContractMismatch,
-				"integration bundle does not contain a required Witness contract.",
+	for _, contractID := range requiredWitnessContractIDs() {
+		contractDigest, err := digest.SemanticJSON(contractsByID[contractID])
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(
+				err,
+				CodeContractDigestMissing,
+				"integration bundle required Witness contract digest could not be computed.",
 				diag.WithDetail("contract_id", contractID),
 			)))
+			continue
 		}
+		digests[contractID] = contractDigest
 	}
 	return digests, diagnostics
 }
 
-func recordContractDigest(digests map[string]string, diagnostics *[]diag.Diagnostic, contractID string, payload any, bodyIDRequired bool) {
-	if digests[contractID] != "" {
-		return
-	}
-	object, ok := payload.(map[string]any)
+func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]any, []diag.Diagnostic) {
+	contractsByID := map[string]map[string]any{}
+	var diagnostics []diag.Diagnostic
+	root, ok := bundlePayload.(map[string]any)
 	if !ok {
-		*diagnostics = append(*diagnostics, diag.FromError(diag.New(
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
 			CodeRecipeContractMismatch,
-			"integration bundle required Witness contract must be a JSON object.",
-			diag.WithDetail("contract_id", contractID),
+			"integration bundle root must be a JSON object.",
 		)))
-		return
+		return contractsByID, diagnostics
 	}
-	if bodyID := contractIDValue(object); bodyID != "" && bodyID != contractID {
-		*diagnostics = append(*diagnostics, diag.FromError(diag.New(
+	if schemaVersion, _ := root["schema_version"].(string); schemaVersion != relayIntegrationBundleV2 {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
 			CodeRecipeContractMismatch,
-			"integration bundle contract body id does not match the contract map key.",
-			diag.WithDetail("contract_id", contractID),
-			diag.WithDetail("body_id", bodyID),
+			"integration bundle schema_version must be relay-integration-bundle-v2.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("actual", root["schema_version"]),
+			diag.WithDetail("expected", relayIntegrationBundleV2),
 		)))
-		return
 	}
-	if bodyIDRequired && contractIDValue(object) == "" {
-		*diagnostics = append(*diagnostics, diag.FromError(diag.New(
+	if id, _ := root["id"].(string); strings.TrimSpace(id) == "" {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
 			CodeRecipeContractMismatch,
-			"integration bundle required Witness contract must include an id.",
-			diag.WithDetail("contract_id", contractID),
+			"integration bundle id must be a non-empty string.",
+			diag.WithPath("/id"),
 		)))
-		return
 	}
-	if contractDiagnostics := validateRequiredContractStructure(contractID, object); len(contractDiagnostics) > 0 {
-		*diagnostics = append(*diagnostics, contractDiagnostics...)
-		return
-	}
-	contractDigest, err := digest.SemanticJSON(object)
-	if err != nil {
-		*diagnostics = append(*diagnostics, diag.FromError(diag.Wrap(
-			err,
-			CodeContractDigestMissing,
-			"integration bundle required Witness contract digest could not be computed.",
-			diag.WithDetail("contract_id", contractID),
+	contractsMap, ok := root["contracts"].(map[string]any)
+	if !ok {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeRecipeContractMismatch,
+			"integration bundle contracts must be a top-level object.",
+			diag.WithPath("/contracts"),
 		)))
-		return
+		return contractsByID, diagnostics
 	}
-	digests[contractID] = contractDigest
+	for _, contractID := range requiredWitnessContractIDs() {
+		payload, ok := contractsMap[contractID]
+		if !ok {
+			diagnostics = append(diagnostics, diag.FromError(diag.New(
+				CodeRecipeContractMismatch,
+				"integration bundle top-level contracts object does not contain a required Witness contract.",
+				diag.WithPath("/contracts"),
+				diag.WithDetail("contract_id", contractID),
+			)))
+			continue
+		}
+		object, ok := payload.(map[string]any)
+		if !ok {
+			diagnostics = append(diagnostics, diag.FromError(diag.New(
+				CodeRecipeContractMismatch,
+				"integration bundle required Witness contract must be a JSON object.",
+				diag.WithPath("/contracts/"+jsonPointerEscape(contractID)),
+				diag.WithDetail("contract_id", contractID),
+			)))
+			continue
+		}
+		if bodyID := contractIDValue(object); bodyID != "" && bodyID != contractID {
+			diagnostics = append(diagnostics, diag.FromError(diag.New(
+				CodeRecipeContractMismatch,
+				"integration bundle contract body id does not match the contract map key.",
+				diag.WithPath("/contracts/"+jsonPointerEscape(contractID)+"/id"),
+				diag.WithDetail("contract_id", contractID),
+				diag.WithDetail("body_id", bodyID),
+			)))
+			continue
+		}
+		if contractDiagnostics := validateRequiredContractStructure(contractID, object); len(contractDiagnostics) > 0 {
+			diagnostics = append(diagnostics, contractDiagnostics...)
+			continue
+		}
+		contractsByID[contractID] = object
+	}
+	return contractsByID, diagnostics
+}
+
+func requiredWitnessContractIDs() []string {
+	wanted := map[string]bool{}
+	for _, requirement := range RequiredRecipes {
+		wanted[requirement.ContractID] = true
+	}
+	return sortedBoolMapKeys(wanted)
 }
 
 func validateRequiredContractStructure(contractID string, object map[string]any) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	requireTurns(&diagnostics, contractID, object["turns"])
-	requireObjectString(&diagnostics, contractID, object, "reducer", "instructions")
-	requireObjectString(&diagnostics, contractID, object, "prompt_context", "participant_transcript")
-	requireObjectString(&diagnostics, contractID, object, "prompt_context", "facilitator_ledger")
-	requireContractInput(&diagnostics, contractID, object, "charter", true, true)
-	requireContractInput(&diagnostics, contractID, object, "findings", true, true)
-	requireContractInput(&diagnostics, contractID, object, "artifact", false, false)
+	requireReducer(&diagnostics, contractID, object["reducer"])
+	requirePromptContext(&diagnostics, contractID, object)
+	requireContractInputs(&diagnostics, contractID, object)
 	result, ok := object["result"].(map[string]any)
 	if !ok {
 		diagnostics = append(diagnostics, contractStructureDiagnostic(contractID, "/result", "integration bundle required Witness contract result must be an object."))
 		return diagnostics
 	}
-	if _, ok := result["transport"].(string); !ok {
-		diagnostics = append(diagnostics, contractStructureDiagnostic(contractID, "/result/transport", "integration bundle required Witness contract result transport must be a string."))
+	if transport, _ := result["transport"].(string); transport != "json" {
+		diagnostics = append(diagnostics, contractStructureDiagnostic(contractID, "/result/transport", "integration bundle required Witness contract result transport must be json."))
 	}
 	if _, ok := result["schema"].(map[string]any); !ok {
 		diagnostics = append(diagnostics, contractStructureDiagnostic(contractID, "/result/schema", "integration bundle required Witness contract result schema must be an object."))
@@ -1022,8 +1027,12 @@ func validateRequiredContractStructure(contractID string, object map[string]any)
 
 func requireTurns(diagnostics *[]diag.Diagnostic, contractID string, value any) {
 	turns, ok := value.([]any)
-	if !ok || len(turns) == 0 {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/turns", "integration bundle required Witness contract turns must be a non-empty array."))
+	if !ok {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/turns", "integration bundle required Witness contract turns must be an array."))
+		return
+	}
+	if len(turns) != 4 {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/turns", "integration bundle required Witness contract turns must contain exactly four participant turns."))
 		return
 	}
 	for index, turn := range turns {
@@ -1032,110 +1041,137 @@ func requireTurns(diagnostics *[]diag.Diagnostic, contractID string, value any) 
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d", index), "integration bundle required Witness contract turn must be an object."))
 			continue
 		}
-		if _, ok := object["participant_turn"].(json.Number); !ok {
-			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/participant_turn", index), "integration bundle required Witness contract turn participant_turn must be a number."))
-		}
-		if strings.TrimSpace(stringField(object, "slot")) == "" {
+		if !nonEmptyString(object["slot"]) {
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/slot", index), "integration bundle required Witness contract turn slot must be a non-empty string."))
 		}
-		if strings.TrimSpace(stringField(object, "instructions")) == "" {
+		if !nonEmptyString(object["instructions"]) {
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/instructions", index), "integration bundle required Witness contract turn instructions must be a non-empty string."))
+		}
+		expected := index + 1
+		actual, ok := jsonNumberInt(object["participant_turn"])
+		if !ok || actual != expected {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/participant_turn", index), "integration bundle required Witness contract participant_turn numbering is invalid."))
 		}
 	}
 }
 
-func requireObjectString(diagnostics *[]diag.Diagnostic, contractID string, object map[string]any, objectKey string, stringKey string) {
-	child, ok := object[objectKey].(map[string]any)
+func requireReducer(diagnostics *[]diag.Diagnostic, contractID string, value any) {
+	reducer, ok := value.(map[string]any)
 	if !ok {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/"+objectKey, "integration bundle required Witness contract "+objectKey+" must be an object."))
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/reducer", "integration bundle required Witness contract reducer must be an object."))
 		return
 	}
-	if strings.TrimSpace(stringField(child, stringKey)) == "" {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/"+objectKey+"/"+stringKey, "integration bundle required Witness contract "+objectKey+"."+stringKey+" must be a non-empty string."))
+	if !nonEmptyString(reducer["instructions"]) {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/reducer/instructions", "integration bundle required Witness contract reducer instructions must be a non-empty string."))
 	}
 }
 
-func requireContractInput(diagnostics *[]diag.Diagnostic, contractID string, contract map[string]any, inputName string, required bool, schemaRequired bool) {
+func requirePromptContext(diagnostics *[]diag.Diagnostic, contractID string, object map[string]any) {
+	promptContext, ok := object["prompt_context"].(map[string]any)
+	if !ok {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/prompt_context", "integration bundle required Witness contract prompt_context must be an object."))
+		return
+	}
+	if participantTranscript, _ := promptContext["participant_transcript"].(string); participantTranscript != "complete" {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/prompt_context/participant_transcript", "integration bundle required Witness contract prompt_context participant_transcript must be complete."))
+	}
+	if facilitatorLedger, _ := promptContext["facilitator_ledger"].(string); facilitatorLedger != "trace_only" {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/prompt_context/facilitator_ledger", "integration bundle required Witness contract prompt_context facilitator_ledger must be trace_only."))
+	}
+}
+
+func requireContractInputs(diagnostics *[]diag.Diagnostic, contractID string, contract map[string]any) {
 	inputs, ok := contract["inputs"].(map[string]any)
 	if !ok {
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs", "integration bundle required Witness contract inputs must be an object."))
 		return
 	}
-	input, ok := inputs[inputName].(map[string]any)
+	expectedInputs := map[string]bool{}
+	for _, expected := range requiredWitnessContractInputs {
+		expectedInputs[expected.name] = true
+		requireContractInput(diagnostics, contractID, inputs, expected)
+	}
+	for inputName := range inputs {
+		if !expectedInputs[inputName] {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+jsonPointerEscape(inputName), "integration bundle required Witness contract inputs must contain only charter, findings, and artifact."))
+		}
+	}
+}
+
+func requireContractInput(diagnostics *[]diag.Diagnostic, contractID string, inputs map[string]any, expected requiredContractInput) {
+	input, ok := inputs[expected.name].(map[string]any)
 	if !ok {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+inputName, "integration bundle required Witness contract input must be an object."))
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name, "integration bundle required Witness contract input must be an object."))
 		return
 	}
-	if value, ok := input["required"].(bool); !ok || value != required {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+inputName+"/required", "integration bundle required Witness contract input required flag is invalid."))
+	if value, ok := input["required"].(bool); !ok || value != expected.required {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/required", "integration bundle required Witness contract input required flag is invalid."))
 	}
-	if strings.TrimSpace(stringField(input, "cardinality")) == "" {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+inputName+"/cardinality", "integration bundle required Witness contract input cardinality must be a non-empty string."))
+	if cardinality, _ := input["cardinality"].(string); cardinality != expected.cardinality {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/cardinality", "integration bundle required Witness contract input cardinality is invalid."))
 	}
-	if _, ok := input["max_bytes"].(json.Number); !ok {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+inputName+"/max_bytes", "integration bundle required Witness contract input max_bytes must be a number."))
+	if !positiveJSONNumber(input["max_bytes"]) {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/max_bytes", "integration bundle required Witness contract input max_bytes must be a positive number."))
 	}
-	if schemaRequired {
-		if strings.TrimSpace(stringField(input, "media_type")) == "" {
-			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+inputName+"/media_type", "integration bundle required Witness contract input media_type must be a non-empty string."))
+	if expected.mediaType == "" {
+		if _, exists := input["media_type"]; exists {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/media_type", "integration bundle required Witness contract input media_type is not expected."))
 		}
-		if _, ok := input["schema"].(map[string]any); !ok {
-			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+inputName+"/schema", "integration bundle required Witness contract input schema must be an object."))
+	} else {
+		mediaType, _ := input["media_type"].(string)
+		if mediaType != expected.mediaType {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/media_type", "integration bundle required Witness contract input media_type is invalid."))
 		}
 	}
+	_, hasSchema := input["schema"].(map[string]any)
+	if expected.schemaObject && !hasSchema {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/schema", "integration bundle required Witness contract input schema must be an object."))
+	}
+	if !expected.schemaObject {
+		if _, exists := input["schema"]; exists {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/schema", "integration bundle required Witness contract input schema is not expected."))
+		}
+	}
+}
+
+func jsonNumberInt(value any) (int, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := number.Int64()
+	if err != nil {
+		return 0, false
+	}
+	return int(parsed), true
+}
+
+func positiveJSONNumber(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	parsed, err := number.Int64()
+	return err == nil && parsed > 0
+}
+
+func nonEmptyString(value any) bool {
+	text, ok := value.(string)
+	return ok && strings.TrimSpace(text) != ""
 }
 
 func contractStructureDiagnostic(contractID string, path string, message string) diag.Diagnostic {
 	return diag.FromError(diag.New(
 		CodeRecipeContractMismatch,
 		message,
-		diag.WithPath(path),
+		diag.WithPath("/contracts/"+jsonPointerEscape(contractID)+path),
 		diag.WithDetail("contract_id", contractID),
 	))
 }
 
-func stringField(object map[string]any, key string) string {
-	value, _ := object[key].(string)
-	return value
-}
-
-func scanContracts(value any, wanted map[string]bool, found map[string]bool) {
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			scanContracts(item, wanted, found)
-		}
-	case map[string]any:
-		if contracts, ok := typed["contracts"].(map[string]any); ok {
-			for contractID, contractPayload := range contracts {
-				if wanted[contractID] {
-					found[contractID] = true
-				}
-				scanContracts(contractPayload, wanted, found)
-			}
-		}
-		if id := contractID(typed); wanted[id] {
-			found[id] = true
-		}
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			if key == "contracts" {
-				continue
-			}
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			scanContracts(typed[key], wanted, found)
-		}
-	}
-}
-
-func contractID(object map[string]any) string {
-	if id := contractIDValue(object); id != "" {
-		return id
-	}
-	return ""
+func jsonPointerEscape(value string) string {
+	value = strings.ReplaceAll(value, "~", "~0")
+	return strings.ReplaceAll(value, "/", "~1")
 }
 
 func contractIDValue(object map[string]any) string {
