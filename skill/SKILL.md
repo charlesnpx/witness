@@ -1,3 +1,8 @@
+---
+name: witness
+description: Run deterministic single-pass Witness reviews from a frozen source state and Charter. Use when Codex or Claude should orchestrate Witness review, verification planning, adjudication, policy checks, or metrics without mutating reviewed sources.
+---
+
 # Witness Single-Pass Review
 
 Use this skill to run Witness review from a frozen source state and frozen Charter. Witness is a deterministic CLI workflow: it does not mutate reviewed sources, apply findings, retry models, add model roles, add judgment gates, or own an iteration loop.

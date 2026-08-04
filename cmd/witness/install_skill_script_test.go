@@ -40,6 +40,14 @@ type installSkillFile struct {
 	SHA256 string `json:"sha256"`
 }
 
+const witnessSkillPrefix = `---
+name: witness
+description: Run deterministic single-pass Witness reviews from a frozen source state and Charter. Use when Codex or Claude should orchestrate Witness review, verification planning, adjudication, policy checks, or metrics without mutating reviewed sources.
+---
+
+# Witness Single-Pass Review
+`
+
 func TestInstallSkillScriptPlanIsJSONOnlyAndSideEffectFree(t *testing.T) {
 	bashPath := requireBash(t)
 	repoRoot := repoRootFromCmdWitness(t)
@@ -147,6 +155,12 @@ func TestInstallSkillScriptInstallRootAndUninstall(t *testing.T) {
 			t.Fatalf("expected installed file missing %s: %v", path, err)
 		}
 	}
+	for _, path := range []string{
+		filepath.Join(installRoot, ".codex", "skills", "witness", "SKILL.md"),
+		filepath.Join(installRoot, ".claude", "skills", "witness", "SKILL.md"),
+	} {
+		assertWitnessSkillMetadata(t, path)
+	}
 
 	stdout, stderr, err = runInstallSkillScript(t, bashPath, repoRoot, []string{"--uninstall", "--json", "--install-root", installRoot}, env...)
 	if err != nil {
@@ -216,6 +230,17 @@ func reportedInstallSkillFiles(report installSkillReport) []installSkillFile {
 		files = append(files, report.Targets[target].Files...)
 	}
 	return files
+}
+
+func assertWitnessSkillMetadata(t *testing.T, path string) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read installed Witness skill %s: %v", path, err)
+	}
+	if !strings.HasPrefix(string(body), witnessSkillPrefix) {
+		t.Fatalf("installed Witness skill %s is missing discoverable front matter", path)
+	}
 }
 
 func assertPathUnderRoot(t *testing.T, path, root string) {
