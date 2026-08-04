@@ -1005,6 +1005,7 @@ func requiredWitnessContractIDs() []string {
 func validateRequiredContractStructure(contractID string, object map[string]any) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	requireTurns(&diagnostics, contractID, object["turns"])
+	requireReducer(&diagnostics, contractID, object["reducer"])
 	requirePromptContext(&diagnostics, contractID, object)
 	requireContractInputs(&diagnostics, contractID, object)
 	result, ok := object["result"].(map[string]any)
@@ -1040,11 +1041,28 @@ func requireTurns(diagnostics *[]diag.Diagnostic, contractID string, value any) 
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d", index), "integration bundle required Witness contract turn must be an object."))
 			continue
 		}
+		if !nonEmptyString(object["slot"]) {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/slot", index), "integration bundle required Witness contract turn slot must be a non-empty string."))
+		}
+		if !nonEmptyString(object["instructions"]) {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/instructions", index), "integration bundle required Witness contract turn instructions must be a non-empty string."))
+		}
 		expected := index + 1
 		actual, ok := jsonNumberInt(object["participant_turn"])
 		if !ok || actual != expected {
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/participant_turn", index), "integration bundle required Witness contract participant_turn numbering is invalid."))
 		}
+	}
+}
+
+func requireReducer(diagnostics *[]diag.Diagnostic, contractID string, value any) {
+	reducer, ok := value.(map[string]any)
+	if !ok {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/reducer", "integration bundle required Witness contract reducer must be an object."))
+		return
+	}
+	if !nonEmptyString(reducer["instructions"]) {
+		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/reducer/instructions", "integration bundle required Witness contract reducer instructions must be a non-empty string."))
 	}
 }
 
@@ -1095,13 +1113,15 @@ func requireContractInput(diagnostics *[]diag.Diagnostic, contractID string, inp
 	if !positiveJSONNumber(input["max_bytes"]) {
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/max_bytes", "integration bundle required Witness contract input max_bytes must be a positive number."))
 	}
-	mediaType, hasMediaType := input["media_type"].(string)
 	if expected.mediaType == "" {
-		if hasMediaType && strings.TrimSpace(mediaType) != "" {
+		if _, exists := input["media_type"]; exists {
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/media_type", "integration bundle required Witness contract input media_type is not expected."))
 		}
-	} else if mediaType != expected.mediaType {
-		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/media_type", "integration bundle required Witness contract input media_type is invalid."))
+	} else {
+		mediaType, _ := input["media_type"].(string)
+		if mediaType != expected.mediaType {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/media_type", "integration bundle required Witness contract input media_type is invalid."))
+		}
 	}
 	_, hasSchema := input["schema"].(map[string]any)
 	if expected.schemaObject && !hasSchema {
@@ -1131,8 +1151,13 @@ func positiveJSONNumber(value any) bool {
 	if !ok {
 		return false
 	}
-	parsed, err := number.Float64()
+	parsed, err := number.Int64()
 	return err == nil && parsed > 0
+}
+
+func nonEmptyString(value any) bool {
+	text, ok := value.(string)
+	return ok && strings.TrimSpace(text) != ""
 }
 
 func contractStructureDiagnostic(contractID string, path string, message string) diag.Diagnostic {

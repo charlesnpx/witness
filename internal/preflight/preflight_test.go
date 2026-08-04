@@ -3,6 +3,7 @@ package preflight
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -238,6 +239,71 @@ func TestRelayAbsentRejectsMalformedWitnessIntegrationBundle(t *testing.T) {
 	if !hasDiagnostic(result.Diagnostics, CodeRecipeContractMismatch) {
 		t.Fatalf("diagnostics = %#v, want %s", result.Diagnostics, CodeRecipeContractMismatch)
 	}
+}
+
+func TestValidateRequiredContractStructureRejectsExecutableContractFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(map[string]any)
+		wantPath string
+	}{
+		{
+			name: "missing reducer object",
+			mutate: func(contract map[string]any) {
+				delete(contract, "reducer")
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer",
+		},
+		{
+			name: "empty reducer instructions",
+			mutate: func(contract map[string]any) {
+				contract["reducer"].(map[string]any)["instructions"] = ""
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer/instructions",
+		},
+		{
+			name: "empty turn slot",
+			mutate: func(contract map[string]any) {
+				contract["turns"].([]any)[0].(map[string]any)["slot"] = ""
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/slot",
+		},
+		{
+			name: "empty turn instructions",
+			mutate: func(contract map[string]any) {
+				contract["turns"].([]any)[0].(map[string]any)["instructions"] = " "
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/instructions",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			contractID, contract := requiredContractForTest(t)
+			test.mutate(contract)
+
+			diagnostics := validateRequiredContractStructure(contractID, contract)
+			requireContractMismatchAtPath(t, diagnostics, test.wantPath)
+		})
+	}
+}
+
+func TestValidateRequiredContractStructureRejectsUnexpectedArtifactMediaTypePresence(t *testing.T) {
+	contractID, contract := requiredContractForTest(t)
+	artifact := contract["inputs"].(map[string]any)["artifact"].(map[string]any)
+	artifact["media_type"] = json.Number("7")
+
+	diagnostics := validateRequiredContractStructure(contractID, contract)
+	requireContractMismatchAtPath(t, diagnostics, "/contracts/witnessed-review~1economy-equivalence-v2/inputs/artifact/media_type")
+}
+
+func TestValidateRequiredContractStructureRejectsFractionalMaxBytes(t *testing.T) {
+	contractID, contract := requiredContractForTest(t)
+	artifact := contract["inputs"].(map[string]any)["artifact"].(map[string]any)
+	artifact["max_bytes"] = json.Number("0.5")
+
+	diagnostics := validateRequiredContractStructure(contractID, contract)
+	requireContractMismatchAtPath(t, diagnostics, "/contracts/witnessed-review~1economy-equivalence-v2/inputs/artifact/max_bytes")
 }
 
 func TestEvaluateCompileReportAcceptsRealCompiledPlanShape(t *testing.T) {
@@ -512,6 +578,21 @@ func loadFixture[T any](t *testing.T, name string) T {
 	return value
 }
 
+func requiredContractForTest(t *testing.T) (string, map[string]any) {
+	t.Helper()
+	const contractID = "witnessed-review/economy-equivalence-v2"
+	fixture := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
+	contracts, ok := fixture["contracts"].(map[string]any)
+	if !ok {
+		t.Fatalf("contracts = %T, want object", fixture["contracts"])
+	}
+	contract, ok := contracts[contractID].(map[string]any)
+	if !ok {
+		t.Fatalf("%s contract = %T, want object", contractID, contracts[contractID])
+	}
+	return contractID, contract
+}
+
 func readJSONForTest[T any](t *testing.T, path string) T {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -568,6 +649,16 @@ func retainedPreflightPayloadBytes(t *testing.T, path string) ([]byte, string) {
 func hasDiagnostic(diagnostics []diag.Diagnostic, code string) bool {
 	_, ok := findDiagnostic(diagnostics, code)
 	return ok
+}
+
+func requireContractMismatchAtPath(t *testing.T, diagnostics []diag.Diagnostic, path string) {
+	t.Helper()
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == CodeRecipeContractMismatch && diagnostic.Path == path {
+			return
+		}
+	}
+	t.Fatalf("diagnostics = %#v, want %s at %s", diagnostics, CodeRecipeContractMismatch, path)
 }
 
 func findDiagnostic(diagnostics []diag.Diagnostic, code string) (diag.Diagnostic, bool) {
