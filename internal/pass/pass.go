@@ -48,6 +48,7 @@ const (
 	CodeInvalidState            = "pass_invalid_state"
 	CodePassStateConfigMismatch = "pass_state_config_mismatch"
 	CodeHeadManifestMismatch    = "pass_head_manifest_snapshot_mismatch"
+	CodeNextActionDrift         = "pass_next_action_drift"
 
 	stageFreeze     = "freeze"
 	stagePreflight  = "preflight"
@@ -356,6 +357,11 @@ func advance(ctx context.Context, state *State) (*Invocation, error) {
 			return nil, err
 		}
 		return saveAndReport(state, stagePreflight)
+	}
+	if state.NextAction.Type == actionCallerRoleOutputs {
+		if err := validatePendingRoleOutputAction(state); err != nil {
+			return nil, err
+		}
 	}
 	if missing := missingRoleOutputs(state); len(missing) > 0 {
 		if err := setRoleOutputAction(state, missing); err != nil {
@@ -946,6 +952,7 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 			config.ReceiptPaths = append(config.ReceiptPaths, absolute)
 		}
 	}
+	applyOutputDefaults(&config)
 	if err := rejectDriverOutputAliases(config); err != nil {
 		return Config{}, err
 	}
@@ -1073,6 +1080,43 @@ func setRoleOutputAction(state *State, missing []RoleOutputSpec) error {
 	}
 	addDegradedActionContext(state)
 	return nil
+}
+
+func validatePendingRoleOutputAction(state *State) error {
+	if state == nil || state.NextAction.Type != actionCallerRoleOutputs {
+		return nil
+	}
+	scopePolicy, err := nextActionScopePolicy(state.Config)
+	if err != nil {
+		return err
+	}
+	changeSurfacePath, changeSurfaceDigest, err := roleOutputChangeSurfaceActionRef(state, scopePolicy)
+	if err != nil {
+		return err
+	}
+	action := state.NextAction
+	if action.ScopePolicy == scopePolicy &&
+		action.ChangeSurfacePath == changeSurfacePath &&
+		action.ChangeSurfaceDigest == changeSurfaceDigest {
+		return nil
+	}
+	return validationError(
+		CodeNextActionDrift,
+		"pending caller role-output action no longer matches the current review policy and change surface.",
+		"/next_action",
+		map[string]any{
+			"persisted": map[string]any{
+				"scope_policy":          action.ScopePolicy,
+				"change_surface_path":   action.ChangeSurfacePath,
+				"change_surface_digest": action.ChangeSurfaceDigest,
+			},
+			"rederived": map[string]any{
+				"scope_policy":          scopePolicy,
+				"change_surface_path":   changeSurfacePath,
+				"change_surface_digest": changeSurfaceDigest,
+			},
+		},
+	)
 }
 
 func setRelayBatchAction(state *State, batch *RelayBatchAction) {

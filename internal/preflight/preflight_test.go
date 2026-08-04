@@ -201,17 +201,27 @@ func TestCompileReportMissingDigestRejectedPerRecipe(t *testing.T) {
 	}
 }
 
-func TestRelayAbsentRejectsStubbedRequiredContracts(t *testing.T) {
+func TestRelayAbsentRejectsMalformedWitnessIntegrationBundle(t *testing.T) {
 	root := t.TempDir()
-	contractBodies := map[string]any{}
-	for _, requirement := range RequiredRecipes {
-		contractBodies[requirement.ContractID] = map[string]any{"id": requirement.ContractID}
+	fixture := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
+	fixtureContracts := fixture["contracts"].(map[string]any)
+	economyContract := fixtureContracts["witnessed-review/economy-equivalence-v2"].(map[string]any)
+	economyContract["turns"].([]any)[0].(map[string]any)["participant_turn"] = 0
+	economyContract["inputs"].(map[string]any)["charter"].(map[string]any)["max_bytes"] = -1
+	economyContract["result"].(map[string]any)["transport"] = "nonsense"
+	nestedContracts := map[string]any{
+		"witnessed-review/witness-falsification-v2": fixtureContracts["witnessed-review/witness-falsification-v2"],
 	}
 	bundlePath := filepath.Join(root, "bundle.json")
 	writeCanonicalForTest(t, bundlePath, map[string]any{
-		"schema_version": "relay-integration-bundle-v2",
-		"id":             "witness/stubbed-contracts",
-		"contracts":      contractBodies,
+		"schema_version": "relay-integration-bundle-v1",
+		"id":             "",
+		"contracts": map[string]any{
+			"witnessed-review/economy-equivalence-v2": economyContract,
+		},
+		"nested": map[string]any{
+			"contracts": nestedContracts,
+		},
 	})
 
 	result, err := Run(context.Background(), Options{
@@ -220,7 +230,7 @@ func TestRelayAbsentRejectsStubbedRequiredContracts(t *testing.T) {
 		StateDir:              filepath.Join(root, "state"),
 	})
 	if err == nil {
-		t.Fatal("relay-absent preflight accepted stubbed required contracts")
+		t.Fatal("relay-absent preflight accepted a malformed integration bundle")
 	}
 	if result.OK {
 		t.Fatalf("result.OK = true, diagnostics = %#v", result.Diagnostics)

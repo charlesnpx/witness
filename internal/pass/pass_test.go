@@ -78,6 +78,25 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	}
 }
 
+func TestBeginWithSameOptionsResumesExistingPass(t *testing.T) {
+	options := newBeginOptions(t)
+
+	invocation, err := Begin(context.Background(), options)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	assertInvocation(t, invocation, stageFreeze, actionWitnessCommand, false)
+
+	invocation, err = Begin(context.Background(), options)
+	if err != nil {
+		t.Fatalf("begin same options: %v", err)
+	}
+	assertInvocation(t, invocation, stagePreflight, actionCallerRoleOutputs, false)
+	if invocation.PassState.Path != filepath.Join(options.StateDir, StateFileName) {
+		t.Fatalf("pass state path = %s, want %s", invocation.PassState.Path, filepath.Join(options.StateDir, StateFileName))
+	}
+}
+
 func TestDriverDriftFailsClosed(t *testing.T) {
 	options := newBeginOptions(t)
 	if _, err := Begin(context.Background(), options); err != nil {
@@ -470,6 +489,48 @@ func TestCallerRoleOutputsDeltaActionCarriesEarlyChangeSurface(t *testing.T) {
 	}
 	if err := requireSemanticMatch("plan change surface", *plan.ChangeSurface, derivedSurface); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResumeRejectsRoleOutputActionPolicyDriftBeforePlanning(t *testing.T) {
+	options, invocation, _, _ := beginDeltaRoleOutputWaitForTest(t)
+	if invocation.NextAction.ScopePolicy != contracts.ScopePolicyDeltaObligating {
+		t.Fatalf("scope_policy = %s, want %s", invocation.NextAction.ScopePolicy, contracts.ScopePolicyDeltaObligating)
+	}
+	writeRoleOutputsForState(t, options.StateDir, false)
+
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "whole-tree-policy"
+	policy.ScopePolicy = contracts.ScopePolicyWholeTree
+	writeCanonicalForTest(t, options.PolicyPath, policy)
+
+	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted role-output files after action policy drift")
+	}
+	assertValidationCode(t, err, CodeNextActionDrift)
+	var validation *ValidationError
+	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
+		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
+	}
+	details := validation.Diagnostics[0].Details
+	persisted, ok := details["persisted"].(map[string]any)
+	if !ok {
+		t.Fatalf("persisted details = %#v, want object", details["persisted"])
+	}
+	rederived, ok := details["rederived"].(map[string]any)
+	if !ok {
+		t.Fatalf("rederived details = %#v, want object", details["rederived"])
+	}
+	if persisted["scope_policy"] != contracts.ScopePolicyDeltaObligating || rederived["scope_policy"] != contracts.ScopePolicyWholeTree {
+		t.Fatalf("drift details = %#v, want delta persisted and whole-tree rederived", details)
+	}
+	if strings.TrimSpace(persisted["change_surface_digest"].(string)) == "" || rederived["change_surface_digest"] != "" {
+		t.Fatalf("change-surface drift details = %#v, want persisted digest and empty rederived digest", details)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	if _, statErr := os.Stat(state.Config.Outputs.PlanPath); !os.IsNotExist(statErr) {
+		t.Fatalf("plan was written before action drift failure: %v", statErr)
 	}
 }
 
