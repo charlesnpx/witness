@@ -241,12 +241,26 @@ func TestRelayAbsentRejectsMalformedWitnessIntegrationBundle(t *testing.T) {
 	}
 }
 
-func TestValidateRequiredContractStructureRejectsExecutableContractFields(t *testing.T) {
+func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *testing.T) {
 	tests := []struct {
 		name     string
 		mutate   func(map[string]any)
 		wantPath string
 	}{
+		{
+			name: "empty contract id",
+			mutate: func(contract map[string]any) {
+				contract["id"] = ""
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/id",
+		},
+		{
+			name: "non-string contract id",
+			mutate: func(contract map[string]any) {
+				contract["id"] = json.Number("123")
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/id",
+		},
 		{
 			name: "missing reducer object",
 			mutate: func(contract map[string]any) {
@@ -280,12 +294,42 @@ func TestValidateRequiredContractStructureRejectsExecutableContractFields(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			contractID, contract := requiredContractForTest(t)
+			contract["id"] = contractID
 			test.mutate(contract)
 
-			diagnostics := validateRequiredContractStructure(contractID, contract)
+			_, diagnostics := validateWitnessIntegrationBundle(map[string]any{
+				"schema_version": relayIntegrationBundleV2,
+				"id":             "test-bundle",
+				"contracts": map[string]any{
+					contractID: contract,
+				},
+			})
 			requireContractMismatchAtPath(t, diagnostics, test.wantPath)
 		})
 	}
+
+	t.Run("absent contract id is accepted", func(t *testing.T) {
+		fixture := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
+		contracts, ok := fixture["contracts"].(map[string]any)
+		if !ok {
+			t.Fatalf("contracts = %T, want object", fixture["contracts"])
+		}
+		for _, payload := range contracts {
+			if contract, ok := payload.(map[string]any); ok {
+				delete(contract, "id")
+			}
+		}
+
+		contractsByID, diagnostics := validateWitnessIntegrationBundle(fixture)
+		if len(diagnostics) > 0 {
+			t.Fatalf("expected no diagnostics for absent contract body ids, got %v", diagnostics)
+		}
+		for contractID := range contracts {
+			if _, ok := contractsByID[contractID]; !ok {
+				t.Fatalf("expected contract %q to be accepted without a body id", contractID)
+			}
+		}
+	})
 }
 
 func TestValidateRequiredContractStructureRejectsUnexpectedArtifactMediaTypePresence(t *testing.T) {
@@ -353,9 +397,10 @@ func TestCompileCommandDiagnosticUsesTypedRelayCodes(t *testing.T) {
 func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	stateDir := t.TempDir()
+	bundlePath := writeFixtureIntegrationBundleWithContractIDsForTest(t, t.TempDir())
 	result, err := Run(context.Background(), Options{
 		RelayPath:             "fake-relay",
-		IntegrationBundlePath: filepath.Join(fixtures, "integration-bundle-v2.fixture.json"),
+		IntegrationBundlePath: bundlePath,
 		StateDir:              stateDir,
 		Runner:                fakeRunner{t: t, fixtures: fixtures},
 	})
@@ -406,9 +451,10 @@ func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 func TestRunRelayPresentRetainsFixtureCapabilitiesByteIdentical(t *testing.T) {
 	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	stateDir := t.TempDir()
+	bundlePath := writeFixtureIntegrationBundleWithContractIDsForTest(t, t.TempDir())
 	result, err := Run(context.Background(), Options{
 		RelayPath:             "fake-relay",
-		IntegrationBundlePath: filepath.Join(fixtures, "integration-bundle-v2.fixture.json"),
+		IntegrationBundlePath: bundlePath,
 		StateDir:              stateDir,
 		Runner:                fakeRunner{t: t, fixtures: fixtures},
 	})
@@ -454,7 +500,7 @@ func TestRunBindsExistingSnapshotManifestAndRejectsForgedReference(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureBundle := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
+	fixtureBundle := writeFixtureIntegrationBundleWithContractIDsForTest(t, root)
 	result, err := Run(context.Background(), Options{
 		RelayPath:              filepath.Join(root, "missing-convo-relay"),
 		IntegrationBundlePath:  fixtureBundle,
@@ -576,6 +622,31 @@ func loadFixture[T any](t *testing.T, name string) T {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func writeFixtureIntegrationBundleWithContractIDsForTest(t *testing.T, dir string) string {
+	t.Helper()
+	bundle := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
+	contracts, ok := bundle["contracts"].(map[string]any)
+	if !ok {
+		t.Fatalf("contracts = %T, want object", bundle["contracts"])
+	}
+	for _, contractID := range requiredWitnessContractIDs() {
+		contract, ok := contracts[contractID].(map[string]any)
+		if !ok {
+			t.Fatalf("%s contract = %T, want object", contractID, contracts[contractID])
+		}
+		contract["id"] = contractID
+	}
+	path := filepath.Join(dir, "integration-bundle-v2.fixture-with-contract-ids.json")
+	data, err := json.MarshalIndent(bundle, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func requiredContractForTest(t *testing.T) (string, map[string]any) {
