@@ -975,15 +975,18 @@ func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]
 			)))
 			continue
 		}
-		if bodyID := contractIDValue(object); bodyID != "" && bodyID != contractID {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeRecipeContractMismatch,
-				"integration bundle contract body id does not match the contract map key.",
-				diag.WithPath("/contracts/"+jsonPointerEscape(contractID)+"/id"),
-				diag.WithDetail("contract_id", contractID),
-				diag.WithDetail("body_id", bodyID),
-			)))
-			continue
+		if rawBodyID, present := object["id"]; present {
+			bodyID, bodyIDOK := rawBodyID.(string)
+			if !bodyIDOK || bodyID == "" || bodyID != contractID {
+				diagnostics = append(diagnostics, diag.FromError(diag.New(
+					CodeRecipeContractMismatch,
+					"integration bundle required Witness contract body id, when present, must be a non-empty string matching the contract map key.",
+					diag.WithPath("/contracts/"+jsonPointerEscape(contractID)+"/id"),
+					diag.WithDetail("contract_id", contractID),
+					diag.WithDetail("body_id", rawBodyID),
+				)))
+				continue
+			}
 		}
 		if contractDiagnostics := validateRequiredContractStructure(contractID, object); len(contractDiagnostics) > 0 {
 			diagnostics = append(diagnostics, contractDiagnostics...)
