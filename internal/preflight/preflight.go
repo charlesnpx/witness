@@ -957,7 +957,12 @@ func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]
 		)))
 		return contractsByID, diagnostics
 	}
-	for _, contractID := range requiredWitnessContractIDs() {
+	requiredContractIDs := requiredWitnessContractIDs()
+	requiredContractIDSet := map[string]bool{}
+	for _, contractID := range requiredContractIDs {
+		requiredContractIDSet[contractID] = true
+	}
+	for _, contractID := range requiredContractIDs {
 		payload, ok := contractsMap[contractID]
 		if !ok {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
@@ -987,6 +992,22 @@ func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]
 			continue
 		}
 		contractsByID[contractID] = object
+	}
+	contractIDs := make([]string, 0, len(contractsMap))
+	for contractID := range contractsMap {
+		contractIDs = append(contractIDs, contractID)
+	}
+	sort.Strings(contractIDs)
+	for _, contractID := range contractIDs {
+		if requiredContractIDSet[contractID] {
+			continue
+		}
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeRecipeContractMismatch,
+			"degraded Witness bundle must contain exactly the required Witness contracts.",
+			diag.WithPath("/contracts/"+jsonPointerEscape(contractID)),
+			diag.WithDetail("contract_id", contractID),
+		)))
 	}
 	return contractsByID, diagnostics
 }
