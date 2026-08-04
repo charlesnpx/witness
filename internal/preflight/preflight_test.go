@@ -244,47 +244,47 @@ func TestRelayAbsentRejectsMalformedWitnessIntegrationBundle(t *testing.T) {
 func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *testing.T) {
 	tests := []struct {
 		name     string
-		mutate   func(string, map[string]any)
+		mutate   func(string, map[string]any, map[string]any)
 		wantPath string
 	}{
 		{
 			name: "body contract id matching map key",
-			mutate: func(contractID string, contract map[string]any) {
+			mutate: func(contractID string, _ map[string]any, contract map[string]any) {
 				contract["id"] = contractID
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/id",
 		},
 		{
 			name: "missing reducer object",
-			mutate: func(_ string, contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				delete(contract, "reducer")
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer",
 		},
 		{
 			name: "empty reducer instructions",
-			mutate: func(_ string, contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["reducer"].(map[string]any)["instructions"] = ""
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer/instructions",
 		},
 		{
 			name: "empty turn slot",
-			mutate: func(_ string, contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["turns"].([]any)[0].(map[string]any)["slot"] = ""
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/slot",
 		},
 		{
 			name: "empty turn instructions",
-			mutate: func(_ string, contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["turns"].([]any)[0].(map[string]any)["instructions"] = " "
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/instructions",
 		},
 		{
 			name: "turn slots do not match alternating schedule",
-			mutate: func(_ string, contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				slots := []string{"slot_0", "slot_0", "slot_0", "slot_1"}
 				for index, slot := range slots {
 					contract["turns"].([]any)[index].(map[string]any)["slot"] = slot
@@ -293,15 +293,50 @@ func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *te
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/1/slot",
 		},
 		{
+			name: "unknown bundle root field",
+			mutate: func(_ string, bundle map[string]any, _ map[string]any) {
+				bundle["extra"] = true
+			},
+			wantPath: "/extra",
+		},
+		{
 			name: "unknown contract field",
-			mutate: func(_ string, contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["extra"] = true
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/extra",
 		},
 		{
+			name: "unknown result field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["result"].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/result/extra",
+		},
+		{
+			name: "unknown turn field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["turns"].([]any)[0].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/turns/0/extra",
+		},
+		{
+			name: "unknown reducer field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["reducer"].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/reducer/extra",
+		},
+		{
+			name: "unknown prompt context field",
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
+				contract["prompt_context"].(map[string]any)["extra"] = true
+			},
+			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/prompt_context/extra",
+		},
+		{
 			name: "unknown input field",
-			mutate: func(_ string, contract map[string]any) {
+			mutate: func(_ string, _ map[string]any, contract map[string]any) {
 				contract["inputs"].(map[string]any)["charter"].(map[string]any)["path"] = "/tmp/value"
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/inputs/charter/path",
@@ -311,15 +346,17 @@ func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *te
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			contractID, contract := requiredContractForTest(t)
-			test.mutate(contractID, contract)
 
-			_, diagnostics := validateWitnessIntegrationBundle(map[string]any{
+			bundle := map[string]any{
 				"schema_version": relayIntegrationBundleV2,
 				"id":             "test-bundle",
 				"contracts": map[string]any{
 					contractID: contract,
 				},
-			})
+			}
+			test.mutate(contractID, bundle, contract)
+
+			_, diagnostics := validateWitnessIntegrationBundle(bundle)
 			requireContractMismatchAtPath(t, diagnostics, test.wantPath)
 		})
 	}
