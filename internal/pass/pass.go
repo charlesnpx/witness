@@ -13,6 +13,7 @@ import (
 
 	"github.com/charlesnpx/witness/internal/adjudicate"
 	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/changesurface"
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/diag"
@@ -27,8 +28,8 @@ import (
 )
 
 const (
-	StateSchemaVersion      = "witness-pass-state-v1"
-	InvocationSchemaVersion = "witness-pass-next-action-v1"
+	StateSchemaVersion      = "witness-pass-state-v2"
+	InvocationSchemaVersion = "witness-pass-next-action-v2"
 
 	StateFileName = "pass-state.json"
 
@@ -46,6 +47,7 @@ const (
 	CodeInvalidPreflight        = "pass_invalid_preflight"
 	CodeInvalidState            = "pass_invalid_state"
 	CodePassStateConfigMismatch = "pass_state_config_mismatch"
+	CodeHeadManifestMismatch    = "pass_head_manifest_snapshot_mismatch"
 
 	stageFreeze     = "freeze"
 	stagePreflight  = "preflight"
@@ -64,6 +66,8 @@ const (
 	actionComplete            = "complete"
 	digestClassFreezeManifest = "freeze-manifest"
 	digestClassPassState      = "pass-state"
+
+	roleOutputChangeSurfaceRole = "role-output-change-surface"
 )
 
 var atomicWriteFile = ledger.WriteFileAtomic
@@ -135,14 +139,15 @@ type Config struct {
 }
 
 type Outputs struct {
-	StatePath          string `json:"state_path"`
-	CharterFreezePath  string `json:"charter_freeze_path"`
-	PreflightPath      string `json:"preflight_path"`
-	PlanPath           string `json:"plan_path"`
-	ManifestPath       string `json:"manifest_path"`
-	AssembleResultPath string `json:"assemble_result_path,omitempty"`
-	RunResultPath      string `json:"run_result_path"`
-	MetricsPath        string `json:"metrics_path"`
+	StatePath                   string `json:"state_path"`
+	CharterFreezePath           string `json:"charter_freeze_path"`
+	PreflightPath               string `json:"preflight_path"`
+	PlanPath                    string `json:"plan_path"`
+	ManifestPath                string `json:"manifest_path"`
+	AssembleResultPath          string `json:"assemble_result_path,omitempty"`
+	RoleOutputChangeSurfacePath string `json:"role_output_change_surface_path,omitempty"`
+	RunResultPath               string `json:"run_result_path"`
+	MetricsPath                 string `json:"metrics_path"`
 }
 
 type State struct {
@@ -188,6 +193,9 @@ type NextAction struct {
 	Type                 string              `json:"type"`
 	Command              []string            `json:"command,omitempty"`
 	Roles                []RoleOutputRequest `json:"roles,omitempty"`
+	ScopePolicy          string              `json:"scope_policy,omitempty"`
+	ChangeSurfacePath    string              `json:"change_surface_path,omitempty"`
+	ChangeSurfaceDigest  string              `json:"change_surface_digest,omitempty"`
 	SnapshotDigest       string              `json:"snapshot_digest,omitempty"`
 	SnapshotManifestPath string              `json:"snapshot_manifest_path,omitempty"`
 	CharterHash          string              `json:"charter_hash,omitempty"`
@@ -350,7 +358,9 @@ func advance(ctx context.Context, state *State) (*Invocation, error) {
 		return saveAndReport(state, stagePreflight)
 	}
 	if missing := missingRoleOutputs(state); len(missing) > 0 {
-		setRoleOutputAction(state, missing)
+		if err := setRoleOutputAction(state, missing); err != nil {
+			return nil, err
+		}
 		return saveAndReport(state, "")
 	}
 	if !stageComplete(state, stagePlan) {
@@ -388,7 +398,9 @@ func advance(ctx context.Context, state *State) (*Invocation, error) {
 
 func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 	if state.NextAction.Type == "" || stageRun != "" {
-		setNextAction(state)
+		if err := setNextAction(state); err != nil {
+			return nil, err
+		}
 	}
 	if err := writeState(state); err != nil {
 		return nil, err
@@ -471,6 +483,9 @@ func runFreeze(ctx context.Context, state *State) error {
 
 func runPreflight(ctx context.Context, state *State) error {
 	config := state.Config
+	if err := validateEffectiveHeadManifest(config); err != nil {
+		return err
+	}
 	result, err := preflight.Run(ctx, preflight.Options{
 		RelayPath:              config.RelayPath,
 		IntegrationBundlePath:  config.IntegrationBundlePath,
@@ -485,10 +500,10 @@ func runPreflight(ctx context.Context, state *State) error {
 	if err := writeCanonicalFile(config.Outputs.PreflightPath, result); err != nil {
 		return err
 	}
-	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
-		{role: "integration-bundle", path: config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
-		{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
-	})
+	if err := writeRoleOutputChangeSurface(config, result.SnapshotDigest); err != nil {
+		return err
+	}
+	inputs, err := artifactRecordsForExistingFiles(preflightInputSpecs(config))
 	if err != nil {
 		return err
 	}
@@ -526,7 +541,11 @@ func runPlan(state *State) error {
 	if err != nil {
 		return err
 	}
-	changeSurface, err := readChangeSurfaceInput(config.BaseManifestPath, config.HeadManifestPath, config.BaselinePass)
+	changeSurface, err := readDriverChangeSurfaceInput(config, config.BaselinePass)
+	if err != nil {
+		return err
+	}
+	headManifestPath, err := effectiveHeadManifestPath(config)
 	if err != nil {
 		return err
 	}
@@ -562,7 +581,7 @@ func runPlan(state *State) error {
 		{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes},
 		{role: "policy", path: config.PolicyPath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-		{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest},
+		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
 	for _, item := range config.RoleOutputs {
 		inputSpecs = append(inputSpecs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digest.ClassRawBytes})
@@ -604,7 +623,11 @@ func runAssemble(state *State) error {
 	if err != nil {
 		return err
 	}
-	changeSurface, err := readChangeSurfaceInput(config.BaseManifestPath, config.HeadManifestPath, false)
+	changeSurface, err := readDriverChangeSurfaceInput(config, false)
+	if err != nil {
+		return err
+	}
+	headManifestPath, err := effectiveHeadManifestPath(config)
 	if err != nil {
 		return err
 	}
@@ -651,7 +674,7 @@ func runAssemble(state *State) error {
 		{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
 		{role: "integration-bundle-retained", path: filepath.Join(config.StateDir, "integration-bundle.json"), digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-		{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest},
+		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
 	for _, batch := range relayRecords {
 		inputSpecs = append(inputSpecs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digest.ClassRawBytes})
@@ -703,7 +726,11 @@ func runAdjudicate(state *State) error {
 	if err != nil {
 		return err
 	}
-	changeSurface, err := readChangeSurfaceInput(config.BaseManifestPath, config.HeadManifestPath, false)
+	changeSurface, err := readDriverChangeSurfaceInput(config, false)
+	if err != nil {
+		return err
+	}
+	headManifestPath, err := effectiveHeadManifestPath(config)
 	if err != nil {
 		return err
 	}
@@ -766,7 +793,7 @@ func runAdjudicate(state *State) error {
 		{role: "ledger", path: config.LedgerPath, digestClass: digest.ClassRawBytes},
 		{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-		{role: "head-manifest", path: config.HeadManifestPath, digestClass: digestClassFreezeManifest},
+		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
 	for _, item := range config.RoleOutputs {
 		inputSpecs = append(inputSpecs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digest.ClassRawBytes})
@@ -985,7 +1012,7 @@ func stateDirInsideSource(sourceDir string, stateDir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
-func setNextAction(state *State) {
+func setNextAction(state *State) error {
 	if !stageComplete(state, stageFreeze) ||
 		!stageComplete(state, stagePreflight) ||
 		!stageComplete(state, stagePlan) ||
@@ -993,18 +1020,18 @@ func setNextAction(state *State) {
 		!stageComplete(state, stageAdjudicate) ||
 		!stageComplete(state, stageMetrics) {
 		if missing := missingRoleOutputs(state); len(missing) > 0 && stageComplete(state, stagePreflight) {
-			setRoleOutputAction(state, missing)
-			return
+			return setRoleOutputAction(state, missing)
 		}
 		if batch := nextRelayBatchAction(state); batch != nil && stageComplete(state, stagePlan) {
 			setRelayBatchAction(state, batch)
-			return
+			return nil
 		}
 		setWitnessCommandAction(state)
-		return
+		return nil
 	}
 	state.Complete = true
 	setCompleteAction(state)
+	return nil
 }
 
 func setWitnessCommandAction(state *State) {
@@ -1017,16 +1044,27 @@ func setWitnessCommandAction(state *State) {
 	addDegradedActionContext(state)
 }
 
-func setRoleOutputAction(state *State, missing []RoleOutputSpec) {
+func setRoleOutputAction(state *State, missing []RoleOutputSpec) error {
 	requests := make([]RoleOutputRequest, 0, len(missing))
 	for _, item := range missing {
 		requests = append(requests, RoleOutputRequest{Role: item.Role, Path: item.Path})
+	}
+	scopePolicy, err := nextActionScopePolicy(state.Config)
+	if err != nil {
+		return err
+	}
+	changeSurfacePath, changeSurfaceDigest, err := roleOutputChangeSurfaceActionRef(state, scopePolicy)
+	if err != nil {
+		return err
 	}
 	snapshotDigest := stageOutputDigest(state, "source-snapshot-manifest")
 	charterHash := currentCharterHash(state.Config)
 	state.NextAction = NextAction{
 		Type:                 actionCallerRoleOutputs,
 		Roles:                requests,
+		ScopePolicy:          scopePolicy,
+		ChangeSurfacePath:    changeSurfacePath,
+		ChangeSurfaceDigest:  changeSurfaceDigest,
 		SnapshotDigest:       snapshotDigest,
 		SnapshotManifestPath: state.Config.SnapshotManifestPath,
 		CharterHash:          charterHash,
@@ -1034,6 +1072,7 @@ func setRoleOutputAction(state *State, missing []RoleOutputSpec) {
 		Summary:              roleOutputSummary(requests, snapshotDigest),
 	}
 	addDegradedActionContext(state)
+	return nil
 }
 
 func setRelayBatchAction(state *State, batch *RelayBatchAction) {
@@ -1768,6 +1807,167 @@ func readReviewRules(path string) (contracts.ReviewRules, error) {
 		return contracts.ReviewRules{}, fileError(err, path, "open review rules")
 	}
 	return contracts.ReadReviewRulesBytes(data)
+}
+
+func nextActionScopePolicy(config Config) (string, error) {
+	policyDocument, err := readReviewPolicy(config.PolicyPath)
+	if err != nil {
+		return "", err
+	}
+	switch strings.TrimSpace(policyDocument.ScopePolicy) {
+	case "", contracts.ScopePolicyWholeTree:
+		return contracts.ScopePolicyWholeTree, nil
+	case contracts.ScopePolicyDeltaObligating:
+		return contracts.ScopePolicyDeltaObligating, nil
+	default:
+		return "", diag.New(
+			contracts.CodeInvalidPolicy,
+			"scope_policy must be delta_obligating or whole_tree when set.",
+			diag.WithPath("/scope_policy"),
+			diag.WithDetail("value", policyDocument.ScopePolicy),
+		)
+	}
+}
+
+func roleOutputChangeSurfaceActionRef(state *State, scopePolicy string) (string, string, error) {
+	if state == nil || scopePolicy != contracts.ScopePolicyDeltaObligating || state.Config.BaselinePass {
+		return "", "", nil
+	}
+	input, err := readDriverChangeSurfaceInput(state.Config, false)
+	if err != nil {
+		return "", "", err
+	}
+	if input.BaseManifest == nil || input.HeadManifest == nil {
+		return "", "", missingChangeSurfaceDiagnostic(input)
+	}
+	path := roleOutputChangeSurfacePath(state.Config)
+	document, err := readChangeSurfaceDocument(path)
+	if err != nil {
+		return "", "", err
+	}
+	surfaceDigest, err := changesurface.Digest(document)
+	if err != nil {
+		return "", "", err
+	}
+	return path, surfaceDigest, nil
+}
+
+func writeRoleOutputChangeSurface(config Config, passArtifactDigest string) error {
+	document, _, err := deriveRoleOutputChangeSurface(config, passArtifactDigest)
+	if err != nil || document == nil {
+		return err
+	}
+	return writeCanonicalFile(roleOutputChangeSurfacePath(config), *document)
+}
+
+func deriveRoleOutputChangeSurface(config Config, passArtifactDigest string) (*changesurface.Document, string, error) {
+	if !roleOutputChangeSurfaceExpected(config) {
+		return nil, "", nil
+	}
+	input, err := readDriverChangeSurfaceInput(config, false)
+	if err != nil {
+		return nil, "", err
+	}
+	if input.BaseManifest == nil || input.HeadManifest == nil {
+		return nil, "", missingChangeSurfaceDiagnostic(input)
+	}
+	surface, surfaceDigest, err := changesurface.Derive(*input.BaseManifest, *input.HeadManifest, passArtifactDigest)
+	if err != nil {
+		return nil, "", err
+	}
+	return &surface, surfaceDigest, nil
+}
+
+func missingChangeSurfaceDiagnostic(input planning.ChangeSurfaceInput) error {
+	return diag.New(
+		planning.CodeMissingChangeSurface,
+		"change surface derivation requires both a base manifest and the derived head manifest.",
+		diag.WithDetail("base_manifest", input.BaseManifest != nil),
+		diag.WithDetail("head_manifest", input.HeadManifest != nil),
+	)
+}
+
+func roleOutputChangeSurfaceExpected(config Config) bool {
+	return strings.TrimSpace(config.BaseManifestPath) != "" && !config.BaselinePass
+}
+
+func readDriverChangeSurfaceInput(config Config, baselinePass bool) (planning.ChangeSurfaceInput, error) {
+	headPath, err := effectiveHeadManifestPath(config)
+	if err != nil {
+		return planning.ChangeSurfaceInput{}, err
+	}
+	return readChangeSurfaceInput(config.BaseManifestPath, headPath, baselinePass)
+}
+
+func validateEffectiveHeadManifest(config Config) error {
+	_, err := effectiveHeadManifestPath(config)
+	return err
+}
+
+func effectiveHeadManifestPath(config Config) (string, error) {
+	if strings.TrimSpace(config.HeadManifestPath) != "" {
+		if err := requireHeadManifestSnapshotMatch(config, config.HeadManifestPath); err != nil {
+			return "", err
+		}
+		return config.HeadManifestPath, nil
+	}
+	if strings.TrimSpace(config.BaseManifestPath) != "" {
+		return config.SnapshotManifestPath, nil
+	}
+	return "", nil
+}
+
+func effectiveHeadManifestPathUnchecked(config Config) string {
+	if strings.TrimSpace(config.HeadManifestPath) != "" {
+		return config.HeadManifestPath
+	}
+	if strings.TrimSpace(config.BaseManifestPath) != "" {
+		return config.SnapshotManifestPath
+	}
+	return ""
+}
+
+func requireHeadManifestSnapshotMatch(config Config, headPath string) error {
+	snapshotPath := strings.TrimSpace(config.SnapshotManifestPath)
+	if strings.TrimSpace(headPath) == "" || snapshotPath == "" {
+		return nil
+	}
+	headManifest, err := readFreezeManifest(headPath)
+	if err != nil {
+		return err
+	}
+	snapshotManifest, err := readFreezeManifest(snapshotPath)
+	if err != nil {
+		return err
+	}
+	headDigest, err := freeze.ManifestDigest(headManifest)
+	if err != nil {
+		return diag.Wrap(err, CodeHeadManifestMismatch, "explicit head manifest digest could not be recomputed.", diag.WithPath("/config/head_manifest_path"), diag.WithDetail("head_manifest_path", headPath))
+	}
+	snapshotDigest, err := freeze.ManifestDigest(snapshotManifest)
+	if err != nil {
+		return diag.Wrap(err, CodeHeadManifestMismatch, "snapshot manifest digest could not be recomputed.", diag.WithPath("/config/snapshot_manifest_path"), diag.WithDetail("snapshot_manifest_path", snapshotPath))
+	}
+	if headDigest != snapshotDigest {
+		return diag.New(
+			CodeHeadManifestMismatch,
+			"explicit head manifest does not match the frozen snapshot manifest.",
+			diag.WithPath("/config/head_manifest_path"),
+			diag.WithDetail("head_manifest_path", headPath),
+			diag.WithDetail("snapshot_manifest_path", snapshotPath),
+			diag.WithDetail("head_manifest_digest", headDigest),
+			diag.WithDetail("snapshot_manifest_digest", snapshotDigest),
+		)
+	}
+	return nil
+}
+
+func readChangeSurfaceDocument(path string) (changesurface.Document, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return changesurface.Document{}, fileError(err, path, "open role-output change surface")
+	}
+	return strictjson.DecodeBytes[changesurface.Document](data, strictjson.DefaultMaxBytes*4)
 }
 
 func readChangeSurfaceInput(basePath string, headPath string, baselinePass bool) (planning.ChangeSurfaceInput, error) {

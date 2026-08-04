@@ -152,6 +152,79 @@ func TestBeginResumeRejectsStateIdentityMismatch(t *testing.T) {
 	})
 }
 
+func TestResumeRejectsV1PassStateSchema(t *testing.T) {
+	stateDir := t.TempDir()
+	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), State{
+		SchemaVersion: "witness-pass-state-v1",
+		DigestProfile: digest.Profile,
+		StateDigest:   digest.Prefix + strings.Repeat("0", 64),
+	})
+
+	_, err := Resume(context.Background(), ResumeOptions{StateDir: stateDir})
+	if err == nil {
+		t.Fatal("resume accepted a v1 pass state")
+	}
+	assertValidationCode(t, err, CodeStateUnsupported)
+
+	var validation *ValidationError
+	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
+		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
+	}
+	details := validation.Diagnostics[0].Details
+	if details["actual"] != "witness-pass-state-v1" || details["expected"] != StateSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want actual v1 and expected %s", details, StateSchemaVersion)
+	}
+}
+
+func TestResumeRejectsExplicitHeadManifestSnapshotMismatch(t *testing.T) {
+	options := newBeginOptions(t)
+	root := filepath.Dir(options.StateDir)
+	basePath := filepath.Join(root, "base-manifest.json")
+	headPath := filepath.Join(root, "head-manifest.json")
+	policyPath := filepath.Join(root, "policy.json")
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "delta-policy"
+	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	writeCanonicalForTest(t, policyPath, policy)
+	options.BaseManifestPath = basePath
+	options.HeadManifestPath = headPath
+	options.PolicyPath = policyPath
+
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	snapshot := readJSONForTest[freeze.Manifest](t, filepath.Join(options.StateDir, "source-snapshot", "manifest.json"))
+	staleHead := snapshot
+	staleHead.Files = append([]freeze.FileEntry(nil), snapshot.Files...)
+	if len(staleHead.Files) != 1 {
+		t.Fatalf("test source files = %#v, want one file", staleHead.Files)
+	}
+	staleHead.Files[0] = freezeFileEntryForTest("app.txt", "100644", []byte("stale\n"))
+	restampFreezeManifestForTest(t, &staleHead)
+	writeCanonicalForTest(t, basePath, staleHead)
+	writeCanonicalForTest(t, headPath, staleHead)
+	headDigest, err := freeze.ManifestDigest(staleHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDigest, err := freeze.ManifestDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headDigest == snapshotDigest {
+		t.Fatalf("test setup produced matching digests %s", headDigest)
+	}
+
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted an explicit head manifest that differs from the frozen snapshot")
+	}
+	assertValidationCode(t, err, CodeHeadManifestMismatch)
+	if _, statErr := os.Stat(filepath.Join(options.StateDir, "preflight.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("preflight stage was run after head/snapshot mismatch: %v", statErr)
+	}
+}
+
 func TestResumeRejectsSelfConsistentTamperedFrozenCharter(t *testing.T) {
 	options := newBeginOptions(t)
 	if _, err := Begin(context.Background(), options); err != nil {
@@ -269,7 +342,9 @@ func TestResumeRejectsPreflightWaitStateBackendStrataTampering(t *testing.T) {
 			"backend_strata": cloneStringMap(result.BackendStrata),
 		},
 	})
-	setNextAction(state)
+	if err := setNextAction(state); err != nil {
+		t.Fatal(err)
+	}
 	if state.NextAction.Type != actionCallerRoleOutputs {
 		t.Fatalf("next action = %s, want role-output wait state", state.NextAction.Type)
 	}
@@ -346,6 +421,190 @@ func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {
 	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 	if err == nil {
 		t.Fatal("resume accepted a self-consistent tampered change surface")
+	}
+	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestCallerRoleOutputsDeltaActionCarriesEarlyChangeSurface(t *testing.T) {
+	options, invocation, baseManifest, headManifest := beginDeltaRoleOutputWaitForTest(t)
+	action := invocation.NextAction
+	if invocation.SchemaVersion != InvocationSchemaVersion {
+		t.Fatalf("schema_version = %s, want %s", invocation.SchemaVersion, InvocationSchemaVersion)
+	}
+	if action.ScopePolicy != contracts.ScopePolicyDeltaObligating {
+		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, contracts.ScopePolicyDeltaObligating)
+	}
+	if action.ChangeSurfacePath == "" || !filepath.IsAbs(action.ChangeSurfacePath) {
+		t.Fatalf("change_surface_path = %q, want absolute path", action.ChangeSurfacePath)
+	}
+	if action.ChangeSurfaceDigest == "" {
+		t.Fatal("change_surface_digest is empty")
+	}
+	earlySurface := readJSONForTest[changesurface.Document](t, action.ChangeSurfacePath)
+	earlyDigest, err := changesurface.Digest(earlySurface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.ChangeSurfaceDigest != earlyDigest {
+		t.Fatalf("action change_surface_digest = %s, want persisted digest %s", action.ChangeSurfaceDigest, earlyDigest)
+	}
+
+	writeRoleOutputsForStateWithScopeAnchor(t, options.StateDir, "app.txt")
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	plan := readJSONForTest[planning.PlanDocument](t, state.Config.Outputs.PlanPath)
+	if plan.ChangeSurface == nil {
+		t.Fatal("plan did not derive a change surface")
+	}
+	derivedSurface, derivedDigest, err := changesurface.Derive(baseManifest, headManifest, plan.ArtifactDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.ChangeSurfaceDigest != derivedDigest || plan.ChangeSurfaceDigest != derivedDigest {
+		t.Fatalf("change surface digests action=%s plan=%s derived=%s", action.ChangeSurfaceDigest, plan.ChangeSurfaceDigest, derivedDigest)
+	}
+	if err := requireSemanticMatch("early change surface", earlySurface, derivedSurface); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireSemanticMatch("plan change surface", *plan.ChangeSurface, derivedSurface); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCallerRoleOutputsDeltaActionFailsWithoutDerivableChangeSurface(t *testing.T) {
+	options := newBeginOptions(t)
+	root := filepath.Dir(options.StateDir)
+	policyPath := filepath.Join(root, "policy.json")
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "delta-policy"
+	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	writeCanonicalForTest(t, policyPath, policy)
+	options.PolicyPath = policyPath
+
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume emitted a delta role-output action without a derivable change surface")
+	}
+	if got := diagCode(err); got != planning.CodeMissingChangeSurface {
+		t.Fatalf("error code = %s, want %s: %v", got, planning.CodeMissingChangeSurface, err)
+	}
+}
+
+func TestPreflightRecordIncludesEarlyChangeSurfaceInputs(t *testing.T) {
+	options := newBeginOptions(t)
+	root := filepath.Dir(options.StateDir)
+	basePath := filepath.Join(root, "base-manifest.json")
+	headPath := filepath.Join(root, "head-manifest.json")
+	policyPath := filepath.Join(root, "policy.json")
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "delta-policy"
+	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	writeCanonicalForTest(t, policyPath, policy)
+	options.BaseManifestPath = basePath
+	options.HeadManifestPath = headPath
+	options.PolicyPath = policyPath
+
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	headManifest := readJSONForTest[freeze.Manifest](t, filepath.Join(options.StateDir, "source-snapshot", "manifest.json"))
+	baseManifest := headManifest
+	baseManifest.Files = append([]freeze.FileEntry(nil), headManifest.Files...)
+	if len(baseManifest.Files) != 1 {
+		t.Fatalf("test source files = %#v, want one file", baseManifest.Files)
+	}
+	baseManifest.Files[0] = freezeFileEntryForTest("app.txt", "100644", []byte("before\n"))
+	restampFreezeManifestForTest(t, &baseManifest)
+	writeCanonicalForTest(t, basePath, baseManifest)
+	writeCanonicalForTest(t, headPath, headManifest)
+
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	if invocation.NextAction.ChangeSurfacePath == "" {
+		t.Fatal("delta role-output action did not carry an early change surface")
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	preflightStage := stageRecordForTest(t, state, stagePreflight)
+	for _, want := range []struct {
+		role string
+		path string
+	}{
+		{role: "base-manifest", path: basePath},
+		{role: "head-manifest", path: headPath},
+	} {
+		record, ok := findArtifactRecord(preflightStage.Inputs, want.role, want.path)
+		if !ok {
+			t.Fatalf("preflight inputs missing %s at %s: %#v", want.role, want.path, preflightStage.Inputs)
+		}
+		if record.DigestClass != digestClassFreezeManifest {
+			t.Fatalf("%s digest_class = %s, want %s", want.role, record.DigestClass, digestClassFreezeManifest)
+		}
+		wantDigest, err := computeArtifactDigest(want.path, digestClassFreezeManifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.Digest != wantDigest {
+			t.Fatalf("%s digest = %s, want %s", want.role, record.Digest, wantDigest)
+		}
+	}
+
+	baseManifest.Files[0] = freezeFileEntryForTest("app.txt", "100644", []byte("tampered\n"))
+	restampFreezeManifestForTest(t, &baseManifest)
+	writeCanonicalForTest(t, basePath, baseManifest)
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted a mutated early change-surface input")
+	}
+	assertValidationCode(t, err, CodeStateDrift)
+}
+
+func TestCallerRoleOutputsWholeTreeActionOmitsChangeSurface(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	action := invocation.NextAction
+	if action.ScopePolicy != contracts.ScopePolicyWholeTree {
+		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, contracts.ScopePolicyWholeTree)
+	}
+	if action.ChangeSurfacePath != "" || action.ChangeSurfaceDigest != "" {
+		t.Fatalf("whole-tree action carried change surface fields: %#v", action)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	if _, err := os.Stat(roleOutputChangeSurfacePath(state.Config)); !os.IsNotExist(err) {
+		t.Fatalf("whole-tree pass wrote early change surface: %v", err)
+	}
+}
+
+func TestResumeRejectsTamperedEarlyRoleOutputChangeSurface(t *testing.T) {
+	options, invocation, _, _ := beginDeltaRoleOutputWaitForTest(t)
+	surfacePath := invocation.NextAction.ChangeSurfacePath
+	surface := readJSONForTest[changesurface.Document](t, surfacePath)
+	if len(surface.ChangedPaths) == 0 {
+		t.Fatal("early change surface has no changed paths")
+	}
+	surface.ChangedPaths[0].Path = "forged.go"
+	writeCanonicalForTest(t, surfacePath, surface)
+	state := readPassStateForTest(t, options.StateDir)
+	refreshArtifactDigestForTest(t, state, roleOutputChangeSurfaceRole, surfacePath)
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted a self-consistent tampered early change surface")
 	}
 	assertValidationCode(t, err, CodeStateInvalid)
 }
@@ -1082,6 +1341,42 @@ func newBeginOptions(t *testing.T) BeginOptions {
 		RelayPath:             filepath.Join(root, "missing-convo-relay"),
 		IntegrationBundlePath: filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json"),
 	}
+}
+
+func beginDeltaRoleOutputWaitForTest(t *testing.T) (BeginOptions, *Invocation, freeze.Manifest, freeze.Manifest) {
+	t.Helper()
+	options := newBeginOptions(t)
+	root := filepath.Dir(options.StateDir)
+	basePath := filepath.Join(root, "base-manifest.json")
+	policyPath := filepath.Join(root, "policy.json")
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "delta-policy"
+	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	writeCanonicalForTest(t, policyPath, policy)
+	options.BaseManifestPath = basePath
+	options.PolicyPath = policyPath
+
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	headManifest := readJSONForTest[freeze.Manifest](t, filepath.Join(options.StateDir, "source-snapshot", "manifest.json"))
+	baseManifest := headManifest
+	baseManifest.Files = append([]freeze.FileEntry(nil), headManifest.Files...)
+	if len(baseManifest.Files) != 1 {
+		t.Fatalf("test source files = %#v, want one file", baseManifest.Files)
+	}
+	baseManifest.Files[0] = freezeFileEntryForTest("app.txt", "100644", []byte("before\n"))
+	restampFreezeManifestForTest(t, &baseManifest)
+	writeCanonicalForTest(t, basePath, baseManifest)
+
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	if invocation.NextAction.Type != actionCallerRoleOutputs {
+		t.Fatalf("next action = %s, want %s", invocation.NextAction.Type, actionCallerRoleOutputs)
+	}
+	return options, invocation, baseManifest, headManifest
 }
 
 func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {

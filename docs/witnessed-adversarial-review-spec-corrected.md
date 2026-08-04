@@ -1068,7 +1068,7 @@ assembly after caller-produced relay evidence when required, adjudication, and
 metrics. It never calls models, never launches relay verification batches,
 never applies findings, and owns no iteration or convergence loop.
 
-The driver persists `witness-pass-state-v1` as canonical JSON under the pass
+The driver persists `witness-pass-state-v2` as canonical JSON under the pass
 state directory. The state document records completed stages, exact input and
 output artifact paths and digests, relay batch evidence locations when batches
 exist, the next action, and a `state_digest` computed over the state document
@@ -1077,7 +1077,7 @@ recorded artifact digests before advancing; drift fails closed with a typed
 diagnostic.
 
 After each invocation the driver writes a canonical
-`witness-pass-next-action-v1` JSON document to stdout and a concise human
+`witness-pass-next-action-v2` JSON document to stdout and a concise human
 summary to stderr. The next action is either the next `witness pass resume`
 command, a caller instruction to produce role outputs for named roles at the
 recorded snapshot digest into recorded paths, a caller instruction to run one
@@ -1093,7 +1093,21 @@ required.
 semantics.
 
 Version impact: one new persisted surface,
-`witness-pass-state-v1`, and one driver invocation output surface,
-`witness-pass-next-action-v1`. Existing Charter, freeze, preflight, plan,
+`witness-pass-state-v2`, and one driver invocation output surface,
+`witness-pass-next-action-v2`. Existing Charter, freeze, preflight, plan,
 manifest, adjudication, metrics, receipt, pending, DELTA1, and DEGRADE1
 surfaces are not bumped.
+
+### Pass Next-Action v2 Addendum
+
+`caller_role_outputs` actions in `witness-pass-next-action-v2` always carry
+`scope_policy` as `delta_obligating` or `whole_tree`. For delta-obligating
+passes with a derived change surface, the action also carries
+`change_surface_path` and `change_surface_digest`; whole-tree and explicit
+baseline-pass actions omit those two fields.
+
+The early change-surface document is advisory transport for the caller. The
+driver persists it as a preflight-stage output and revalidates it on resume by
+rederiving from the configured base manifest and authoritative head snapshot,
+but planning, assembly, and adjudication continue to derive from the
+authoritative manifests and never read the early document as input.
