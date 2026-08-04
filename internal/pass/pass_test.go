@@ -152,6 +152,79 @@ func TestBeginResumeRejectsStateIdentityMismatch(t *testing.T) {
 	})
 }
 
+func TestResumeRejectsV1PassStateSchema(t *testing.T) {
+	stateDir := t.TempDir()
+	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), State{
+		SchemaVersion: "witness-pass-state-v1",
+		DigestProfile: digest.Profile,
+		StateDigest:   digest.Prefix + strings.Repeat("0", 64),
+	})
+
+	_, err := Resume(context.Background(), ResumeOptions{StateDir: stateDir})
+	if err == nil {
+		t.Fatal("resume accepted a v1 pass state")
+	}
+	assertValidationCode(t, err, CodeStateUnsupported)
+
+	var validation *ValidationError
+	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
+		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
+	}
+	details := validation.Diagnostics[0].Details
+	if details["actual"] != "witness-pass-state-v1" || details["expected"] != StateSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want actual v1 and expected %s", details, StateSchemaVersion)
+	}
+}
+
+func TestResumeRejectsExplicitHeadManifestSnapshotMismatch(t *testing.T) {
+	options := newBeginOptions(t)
+	root := filepath.Dir(options.StateDir)
+	basePath := filepath.Join(root, "base-manifest.json")
+	headPath := filepath.Join(root, "head-manifest.json")
+	policyPath := filepath.Join(root, "policy.json")
+	policy := contracts.DefaultReviewPolicy()
+	policy.PolicyID = "delta-policy"
+	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	writeCanonicalForTest(t, policyPath, policy)
+	options.BaseManifestPath = basePath
+	options.HeadManifestPath = headPath
+	options.PolicyPath = policyPath
+
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	snapshot := readJSONForTest[freeze.Manifest](t, filepath.Join(options.StateDir, "source-snapshot", "manifest.json"))
+	staleHead := snapshot
+	staleHead.Files = append([]freeze.FileEntry(nil), snapshot.Files...)
+	if len(staleHead.Files) != 1 {
+		t.Fatalf("test source files = %#v, want one file", staleHead.Files)
+	}
+	staleHead.Files[0] = freezeFileEntryForTest("app.txt", "100644", []byte("stale\n"))
+	restampFreezeManifestForTest(t, &staleHead)
+	writeCanonicalForTest(t, basePath, staleHead)
+	writeCanonicalForTest(t, headPath, staleHead)
+	headDigest, err := freeze.ManifestDigest(staleHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDigest, err := freeze.ManifestDigest(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headDigest == snapshotDigest {
+		t.Fatalf("test setup produced matching digests %s", headDigest)
+	}
+
+	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err == nil {
+		t.Fatal("resume accepted an explicit head manifest that differs from the frozen snapshot")
+	}
+	assertValidationCode(t, err, CodeHeadManifestMismatch)
+	if _, statErr := os.Stat(filepath.Join(options.StateDir, "preflight.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("preflight stage was run after head/snapshot mismatch: %v", statErr)
+	}
+}
+
 func TestResumeRejectsSelfConsistentTamperedFrozenCharter(t *testing.T) {
 	options := newBeginOptions(t)
 	if _, err := Begin(context.Background(), options); err != nil {

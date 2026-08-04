@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	StateSchemaVersion      = "witness-pass-state-v1"
+	StateSchemaVersion      = "witness-pass-state-v2"
 	InvocationSchemaVersion = "witness-pass-next-action-v2"
 
 	StateFileName = "pass-state.json"
@@ -47,6 +47,7 @@ const (
 	CodeInvalidPreflight        = "pass_invalid_preflight"
 	CodeInvalidState            = "pass_invalid_state"
 	CodePassStateConfigMismatch = "pass_state_config_mismatch"
+	CodeHeadManifestMismatch    = "pass_head_manifest_snapshot_mismatch"
 
 	stageFreeze     = "freeze"
 	stagePreflight  = "preflight"
@@ -482,6 +483,9 @@ func runFreeze(ctx context.Context, state *State) error {
 
 func runPreflight(ctx context.Context, state *State) error {
 	config := state.Config
+	if err := validateEffectiveHeadManifest(config); err != nil {
+		return err
+	}
 	result, err := preflight.Run(ctx, preflight.Options{
 		RelayPath:              config.RelayPath,
 		IntegrationBundlePath:  config.IntegrationBundlePath,
@@ -544,6 +548,10 @@ func runPlan(state *State) error {
 	if err != nil {
 		return err
 	}
+	headManifestPath, err := effectiveHeadManifestPath(config)
+	if err != nil {
+		return err
+	}
 	roleOutputs := make([]planning.RoleOutputInput, 0, len(config.RoleOutputs))
 	for _, item := range config.RoleOutputs {
 		document, err := readRoleOutput(item.Path)
@@ -576,7 +584,7 @@ func runPlan(state *State) error {
 		{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes},
 		{role: "policy", path: config.PolicyPath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-		{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
+		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
 	for _, item := range config.RoleOutputs {
 		inputSpecs = append(inputSpecs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digest.ClassRawBytes})
@@ -619,6 +627,10 @@ func runAssemble(state *State) error {
 		return err
 	}
 	changeSurface, err := readDriverChangeSurfaceInput(config, false)
+	if err != nil {
+		return err
+	}
+	headManifestPath, err := effectiveHeadManifestPath(config)
 	if err != nil {
 		return err
 	}
@@ -665,7 +677,7 @@ func runAssemble(state *State) error {
 		{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
 		{role: "integration-bundle-retained", path: filepath.Join(config.StateDir, "integration-bundle.json"), digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-		{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
+		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
 	for _, batch := range relayRecords {
 		inputSpecs = append(inputSpecs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digest.ClassRawBytes})
@@ -718,6 +730,10 @@ func runAdjudicate(state *State) error {
 		return err
 	}
 	changeSurface, err := readDriverChangeSurfaceInput(config, false)
+	if err != nil {
+		return err
+	}
+	headManifestPath, err := effectiveHeadManifestPath(config)
 	if err != nil {
 		return err
 	}
@@ -780,7 +796,7 @@ func runAdjudicate(state *State) error {
 		{role: "ledger", path: config.LedgerPath, digestClass: digest.ClassRawBytes},
 		{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-		{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
+		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
 	for _, item := range config.RoleOutputs {
 		inputSpecs = append(inputSpecs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digest.ClassRawBytes})
@@ -1868,10 +1884,32 @@ func roleOutputChangeSurfaceExpected(config Config) bool {
 }
 
 func readDriverChangeSurfaceInput(config Config, baselinePass bool) (planning.ChangeSurfaceInput, error) {
-	return readChangeSurfaceInput(config.BaseManifestPath, effectiveHeadManifestPath(config), baselinePass)
+	headPath, err := effectiveHeadManifestPath(config)
+	if err != nil {
+		return planning.ChangeSurfaceInput{}, err
+	}
+	return readChangeSurfaceInput(config.BaseManifestPath, headPath, baselinePass)
 }
 
-func effectiveHeadManifestPath(config Config) string {
+func validateEffectiveHeadManifest(config Config) error {
+	_, err := effectiveHeadManifestPath(config)
+	return err
+}
+
+func effectiveHeadManifestPath(config Config) (string, error) {
+	if strings.TrimSpace(config.HeadManifestPath) != "" {
+		if err := requireHeadManifestSnapshotMatch(config, config.HeadManifestPath); err != nil {
+			return "", err
+		}
+		return config.HeadManifestPath, nil
+	}
+	if strings.TrimSpace(config.BaseManifestPath) != "" {
+		return config.SnapshotManifestPath, nil
+	}
+	return "", nil
+}
+
+func effectiveHeadManifestPathUnchecked(config Config) string {
 	if strings.TrimSpace(config.HeadManifestPath) != "" {
 		return config.HeadManifestPath
 	}
@@ -1879,6 +1917,41 @@ func effectiveHeadManifestPath(config Config) string {
 		return config.SnapshotManifestPath
 	}
 	return ""
+}
+
+func requireHeadManifestSnapshotMatch(config Config, headPath string) error {
+	snapshotPath := strings.TrimSpace(config.SnapshotManifestPath)
+	if strings.TrimSpace(headPath) == "" || snapshotPath == "" {
+		return nil
+	}
+	headManifest, err := readFreezeManifest(headPath)
+	if err != nil {
+		return err
+	}
+	snapshotManifest, err := readFreezeManifest(snapshotPath)
+	if err != nil {
+		return err
+	}
+	headDigest, err := freeze.ManifestDigest(headManifest)
+	if err != nil {
+		return diag.Wrap(err, CodeHeadManifestMismatch, "explicit head manifest digest could not be recomputed.", diag.WithPath("/config/head_manifest_path"), diag.WithDetail("head_manifest_path", headPath))
+	}
+	snapshotDigest, err := freeze.ManifestDigest(snapshotManifest)
+	if err != nil {
+		return diag.Wrap(err, CodeHeadManifestMismatch, "snapshot manifest digest could not be recomputed.", diag.WithPath("/config/snapshot_manifest_path"), diag.WithDetail("snapshot_manifest_path", snapshotPath))
+	}
+	if headDigest != snapshotDigest {
+		return diag.New(
+			CodeHeadManifestMismatch,
+			"explicit head manifest does not match the frozen snapshot manifest.",
+			diag.WithPath("/config/head_manifest_path"),
+			diag.WithDetail("head_manifest_path", headPath),
+			diag.WithDetail("snapshot_manifest_path", snapshotPath),
+			diag.WithDetail("head_manifest_digest", headDigest),
+			diag.WithDetail("snapshot_manifest_digest", snapshotDigest),
+		)
+	}
+	return nil
 }
 
 func readChangeSurfaceDocument(path string) (changesurface.Document, error) {

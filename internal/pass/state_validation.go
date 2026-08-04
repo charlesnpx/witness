@@ -28,6 +28,7 @@ func validateLoadedState(state *State) error {
 	if state == nil {
 		return &ValidationError{Diagnostics: diagnostics}
 	}
+	diagnostics = append(diagnostics, validateEffectiveHeadManifestBinding(state)...)
 	diagnostics = append(diagnostics, validateMandatoryStageArtifacts(state)...)
 	diagnostics = append(diagnostics, validateRecordedArtifactDigestsAndOutputs(state)...)
 	diagnostics = append(diagnostics, validateDerivedRelayBatches(state)...)
@@ -88,6 +89,16 @@ func validateStageOrdering(state *State) []diag.Diagnostic {
 	return diagnostics
 }
 
+func validateEffectiveHeadManifestBinding(state *State) []diag.Diagnostic {
+	if state == nil || !stageComplete(state, stageFreeze) {
+		return nil
+	}
+	if _, err := effectiveHeadManifestPath(state.Config); err != nil {
+		return []diag.Diagnostic{diag.FromError(err)}
+	}
+	return nil
+}
+
 func validateMandatoryStageArtifacts(state *State) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	for _, stage := range state.Stages {
@@ -128,7 +139,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
 			{role: "policy", path: config.PolicyPath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-			{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
+			{role: "head-manifest", path: effectiveHeadManifestPathUnchecked(config), digestClass: digestClassFreezeManifest},
 		}
 		for _, item := range config.RoleOutputs {
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
@@ -154,7 +165,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digestClassRaw()},
 			{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config), digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-			{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
+			{role: "head-manifest", path: effectiveHeadManifestPathUnchecked(config), digestClass: digestClassFreezeManifest},
 		}
 		for _, batch := range relayBatches {
 			inputs = append(inputs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digestClassRaw()})
@@ -184,7 +195,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
 			{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
-			{role: "head-manifest", path: effectiveHeadManifestPath(config), digestClass: digestClassFreezeManifest},
+			{role: "head-manifest", path: effectiveHeadManifestPathUnchecked(config), digestClass: digestClassFreezeManifest},
 		}
 		for _, item := range config.RoleOutputs {
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
