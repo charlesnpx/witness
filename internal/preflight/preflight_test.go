@@ -243,9 +243,10 @@ func TestRelayAbsentRejectsMalformedWitnessIntegrationBundle(t *testing.T) {
 
 func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *testing.T) {
 	tests := []struct {
-		name     string
-		mutate   func(string, map[string]any, map[string]any)
-		wantPath string
+		name            string
+		canonicalBundle bool
+		mutate          func(string, map[string]any, map[string]any)
+		wantPath        string
 	}{
 		{
 			name: "body contract id matching map key",
@@ -341,6 +342,14 @@ func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *te
 			},
 			wantPath: "/contracts/witnessed-review~1economy-equivalence-v2/inputs/charter/path",
 		},
+		{
+			name:            "unknown top-level contract",
+			canonicalBundle: true,
+			mutate: func(_ string, bundle map[string]any, _ map[string]any) {
+				bundle["contracts"].(map[string]any)["unused"] = map[string]any{"extra": true}
+			},
+			wantPath: "/contracts/unused",
+		},
 	}
 
 	for _, test := range tests {
@@ -353,6 +362,17 @@ func TestValidateWitnessIntegrationBundleRejectsMalformedRequiredContracts(t *te
 				"contracts": map[string]any{
 					contractID: contract,
 				},
+			}
+			if test.canonicalBundle {
+				bundle = loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
+				contracts, ok := bundle["contracts"].(map[string]any)
+				if !ok {
+					t.Fatalf("contracts = %T, want object", bundle["contracts"])
+				}
+				contract, ok = contracts[contractID].(map[string]any)
+				if !ok {
+					t.Fatalf("%s contract = %T, want object", contractID, contracts[contractID])
+				}
 			}
 			test.mutate(contractID, bundle, contract)
 
