@@ -142,6 +142,8 @@ var requiredWitnessContractInputs = []requiredContractInput{
 	{name: "artifact", required: false, cardinality: "many"},
 }
 
+var requiredWitnessTurnSlots = []string{"slot_0", "slot_1", "slot_0", "slot_1"}
+
 var requiredBackends = []string{"claude", "codex"}
 
 func Run(ctx context.Context, options Options) (*Result, error) {
@@ -929,6 +931,7 @@ func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]
 		)))
 		return contractsByID, diagnostics
 	}
+	rejectUnknownIntegrationBundleFields(&diagnostics, root, []string{"schema_version", "id", "contracts"}, "", "integration bundle")
 	if schemaVersion, _ := root["schema_version"].(string); schemaVersion != relayIntegrationBundleV2 {
 		diagnostics = append(diagnostics, diag.FromError(diag.New(
 			CodeRecipeContractMismatch,
@@ -975,18 +978,9 @@ func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]
 			)))
 			continue
 		}
-		if rawBodyID, present := object["id"]; present {
-			bodyID, bodyIDOK := rawBodyID.(string)
-			if !bodyIDOK || bodyID == "" || bodyID != contractID {
-				diagnostics = append(diagnostics, diag.FromError(diag.New(
-					CodeRecipeContractMismatch,
-					"integration bundle required Witness contract body id, when present, must be a non-empty string matching the contract map key.",
-					diag.WithPath("/contracts/"+jsonPointerEscape(contractID)+"/id"),
-					diag.WithDetail("contract_id", contractID),
-					diag.WithDetail("body_id", rawBodyID),
-				)))
-				continue
-			}
+		contractPath := "/contracts/" + jsonPointerEscape(contractID)
+		if rejectUnknownIntegrationBundleFields(&diagnostics, object, []string{"turns", "reducer", "inputs", "result", "prompt_context"}, contractPath, "integration contract") {
+			continue
 		}
 		if contractDiagnostics := validateRequiredContractStructure(contractID, object); len(contractDiagnostics) > 0 {
 			diagnostics = append(diagnostics, contractDiagnostics...)
@@ -1016,6 +1010,7 @@ func validateRequiredContractStructure(contractID string, object map[string]any)
 		diagnostics = append(diagnostics, contractStructureDiagnostic(contractID, "/result", "integration bundle required Witness contract result must be an object."))
 		return diagnostics
 	}
+	rejectUnknownIntegrationBundleFields(&diagnostics, result, []string{"transport", "schema", "assertions"}, "/contracts/"+jsonPointerEscape(contractID)+"/result", "result declaration")
 	if transport, _ := result["transport"].(string); transport != "json" {
 		diagnostics = append(diagnostics, contractStructureDiagnostic(contractID, "/result/transport", "integration bundle required Witness contract result transport must be json."))
 	}
@@ -1044,6 +1039,10 @@ func requireTurns(diagnostics *[]diag.Diagnostic, contractID string, value any) 
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d", index), "integration bundle required Witness contract turn must be an object."))
 			continue
 		}
+		turnPath := fmt.Sprintf("/contracts/%s/turns/%d", jsonPointerEscape(contractID), index)
+		if rejectUnknownIntegrationBundleFields(diagnostics, object, []string{"participant_turn", "slot", "instructions"}, turnPath, "turn declaration") {
+			continue
+		}
 		if !nonEmptyString(object["slot"]) {
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/slot", index), "integration bundle required Witness contract turn slot must be a non-empty string."))
 		}
@@ -1055,6 +1054,9 @@ func requireTurns(diagnostics *[]diag.Diagnostic, contractID string, value any) 
 		if !ok || actual != expected {
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/participant_turn", index), "integration bundle required Witness contract participant_turn numbering is invalid."))
 		}
+		if slot, _ := object["slot"].(string); strings.TrimSpace(slot) != "" && slot != requiredWitnessTurnSlots[index] {
+			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, fmt.Sprintf("/turns/%d/slot", index), "integration bundle required Witness contract turn slot must match the compiled alternating schedule."))
+		}
 	}
 }
 
@@ -1064,6 +1066,7 @@ func requireReducer(diagnostics *[]diag.Diagnostic, contractID string, value any
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/reducer", "integration bundle required Witness contract reducer must be an object."))
 		return
 	}
+	rejectUnknownIntegrationBundleFields(diagnostics, reducer, []string{"instructions"}, "/contracts/"+jsonPointerEscape(contractID)+"/reducer", "reducer declaration")
 	if !nonEmptyString(reducer["instructions"]) {
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/reducer/instructions", "integration bundle required Witness contract reducer instructions must be a non-empty string."))
 	}
@@ -1075,6 +1078,7 @@ func requirePromptContext(diagnostics *[]diag.Diagnostic, contractID string, obj
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/prompt_context", "integration bundle required Witness contract prompt_context must be an object."))
 		return
 	}
+	rejectUnknownIntegrationBundleFields(diagnostics, promptContext, []string{"participant_transcript", "facilitator_ledger"}, "/contracts/"+jsonPointerEscape(contractID)+"/prompt_context", "prompt context projection")
 	if participantTranscript, _ := promptContext["participant_transcript"].(string); participantTranscript != "complete" {
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/prompt_context/participant_transcript", "integration bundle required Witness contract prompt_context participant_transcript must be complete."))
 	}
@@ -1107,6 +1111,7 @@ func requireContractInput(diagnostics *[]diag.Diagnostic, contractID string, inp
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name, "integration bundle required Witness contract input must be an object."))
 		return
 	}
+	rejectUnknownIntegrationBundleFields(diagnostics, input, []string{"required", "cardinality", "media_type", "max_bytes", "schema"}, "/contracts/"+jsonPointerEscape(contractID)+"/inputs/"+jsonPointerEscape(expected.name), "input declaration")
 	if value, ok := input["required"].(bool); !ok || value != expected.required {
 		*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/required", "integration bundle required Witness contract input required flag is invalid."))
 	}
@@ -1135,6 +1140,41 @@ func requireContractInput(diagnostics *[]diag.Diagnostic, contractID string, inp
 			*diagnostics = append(*diagnostics, contractStructureDiagnostic(contractID, "/inputs/"+expected.name+"/schema", "integration bundle required Witness contract input schema is not expected."))
 		}
 	}
+}
+
+func rejectUnknownIntegrationBundleFields(diagnostics *[]diag.Diagnostic, object map[string]any, allowed []string, path string, label string) bool {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = true
+	}
+	unknown := make([]string, 0)
+	for key := range object {
+		if !allowedSet[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) == 0 {
+		return false
+	}
+	sort.Strings(unknown)
+	fields := make([]any, len(unknown))
+	for index, field := range unknown {
+		fields[index] = field
+	}
+	*diagnostics = append(*diagnostics, diag.FromError(diag.New(
+		CodeRecipeContractMismatch,
+		fmt.Sprintf("%s contains unsupported field(s): %s.", label, strings.Join(unknown, ", ")),
+		diag.WithPath(appendJSONPointer(path, unknown[0])),
+		diag.WithDetail("fields", fields),
+	)))
+	return true
+}
+
+func appendJSONPointer(path string, segment string) string {
+	if path == "" {
+		return "/" + jsonPointerEscape(segment)
+	}
+	return path + "/" + jsonPointerEscape(segment)
 }
 
 func jsonNumberInt(value any) (int, bool) {
