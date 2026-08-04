@@ -14,14 +14,14 @@ import (
 	"testing"
 	"time"
 
-	"witness/internal/adjudicate"
-	"witness/internal/charter"
-	"witness/internal/contracts"
-	"witness/internal/digest"
-	"witness/internal/harness"
-	"witness/internal/ledger"
-	"witness/internal/metrics"
-	"witness/internal/preflight"
+	"github.com/charlesnpx/witness/internal/adjudicate"
+	"github.com/charlesnpx/witness/internal/charter"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/harness"
+	"github.com/charlesnpx/witness/internal/ledger"
+	"github.com/charlesnpx/witness/internal/metrics"
+	"github.com/charlesnpx/witness/internal/preflight"
 )
 
 type binaries struct {

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"io"
 
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 type VerificationBatchDocument struct {

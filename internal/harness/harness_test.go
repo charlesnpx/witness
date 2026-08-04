@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"witness/internal/contracts"
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/freeze"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestRunEchoReceiptValidAndOutputDigestMatches(t *testing.T) {

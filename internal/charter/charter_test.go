@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/diag"
 )
 
 func TestAbsentEnvelopeKeepsReachabilityInactiveAndStandingInvariant(t *testing.T) {

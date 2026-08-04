@@ -7,12 +7,12 @@ import (
 	"sort"
 	"strings"
 
-	"witness/internal/changesurface"
-	"witness/internal/charter"
-	"witness/internal/contracts"
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/changesurface"
+	"github.com/charlesnpx/witness/internal/charter"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/freeze"
 )
 
 const (

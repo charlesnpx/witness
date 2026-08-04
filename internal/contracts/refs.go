@@ -1,6 +1,6 @@
 package contracts
 
-import "witness/internal/diag"
+import "github.com/charlesnpx/witness/internal/diag"
 
 type ArtifactRef struct {
 	Kind          string `json:"kind"`

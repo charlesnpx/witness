@@ -9,15 +9,15 @@ import (
 	"sort"
 	"strings"
 
-	"witness/internal/charter"
-	"witness/internal/contracts"
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/freeze"
-	"witness/internal/planning"
-	"witness/internal/portable"
-	"witness/internal/relayclient"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/charter"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/planning"
+	"github.com/charlesnpx/witness/internal/portable"
+	"github.com/charlesnpx/witness/internal/relayclient"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (

@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	"witness/internal/diag"
-	"witness/internal/harness"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/harness"
 )
 
 func main() {

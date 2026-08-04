@@ -4,9 +4,9 @@ import (
 	"io"
 	"strings"
 
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 type RelayCapabilityRequirementV3 struct {
@@ -21,7 +21,7 @@ var RequiredRelayCapabilityClosureV3 = []RelayCapabilityRequirementV3{
 	{Key: "integration_bundle_v2", Family: "contracts.integration_bundle", Capability: "relay-integration-bundle-v2"},
 	{Key: "selected_contract_v2", Family: "contracts.selected_integration_contract", Capability: "2"},
 	{Key: "prompt_policy_v2", Family: "prompt_policy", Capability: "prompt-policy/v2"},
-	{Key: "relay_root_digests_v1", Family: "digest_profile", Capability: "relay-root-digests-v1"},
+	{Key: "relay_root_digests_v1", Family: "digest_profile", Capability: "relay-root-digests-v1"}, // gitleaks:allow -- protocol capability identifier, not a credential
 	{Key: "recipe_v2", Family: "contracts.recipe", Capability: "2"},
 	{Key: "root_artifact_v2", Family: "contracts.root_artifact", Capability: "2"},
 	{Key: "root_recipe_plan_v2", Family: "contracts.root_recipe_plan", Capability: "2"},

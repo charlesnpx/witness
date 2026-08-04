@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"witness/internal/changesurface"
-	"witness/internal/charter"
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/changesurface"
+	"github.com/charlesnpx/witness/internal/charter"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestRoleOutputValidFixtures(t *testing.T) {

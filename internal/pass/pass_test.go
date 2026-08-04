@@ -12,20 +12,20 @@ import (
 	"strings"
 	"testing"
 
-	"witness/internal/adjudicate"
-	"witness/internal/canonjson"
-	"witness/internal/changesurface"
-	"witness/internal/charter"
-	"witness/internal/contracts"
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/freeze"
-	"witness/internal/harness"
-	"witness/internal/ledger"
-	"witness/internal/metrics"
-	"witness/internal/planning"
-	"witness/internal/preflight"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/adjudicate"
+	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/changesurface"
+	"github.com/charlesnpx/witness/internal/charter"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/harness"
+	"github.com/charlesnpx/witness/internal/ledger"
+	"github.com/charlesnpx/witness/internal/metrics"
+	"github.com/charlesnpx/witness/internal/planning"
+	"github.com/charlesnpx/witness/internal/preflight"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
@@ -879,8 +879,8 @@ func TestDriverImportsNoRelayExecutionOrProviderInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	forbidden := map[string]bool{
-		"witness/internal/relayclient": true,
-		"witness/internal/relayrun":    true,
+		"github.com/charlesnpx/witness/internal/relayclient": true,
+		"github.com/charlesnpx/witness/internal/relayrun":    true,
 	}
 	for _, pkg := range files {
 		for path, file := range pkg.Files {

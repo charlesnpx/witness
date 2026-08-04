@@ -6,9 +6,9 @@ import (
 	"io"
 	"strings"
 
-	"witness/internal/charter"
-	"witness/internal/diag"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/charter"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 type ScopeAnchor = charter.ScopeAnchor

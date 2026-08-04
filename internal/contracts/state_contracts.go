@@ -4,10 +4,10 @@ import (
 	"io"
 	"strings"
 
-	"witness/internal/changesurface"
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/changesurface"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (

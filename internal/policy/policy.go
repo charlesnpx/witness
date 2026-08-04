@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"witness/internal/contracts"
-	"witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 )
 
 const (

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"witness/internal/contracts"
-	"witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/digest"
 )
 
 func TestPolicyLoadAndApplicationBranches(t *testing.T) {

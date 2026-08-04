@@ -4,7 +4,7 @@
   "backends": [
     {
       "backend": "claude",
-      "executable_path": "/Users/Charles.Anderson/.local/bin/claude",
+      "executable_path": "/Users/example/.local/bin/claude",
       "version": "2.1.220 (Claude Code)",
       "authentication_status": "unknown",
       "status": "installed_auth_unknown",
@@ -46,7 +46,7 @@
     },
     {
       "backend": "codex",
-      "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+      "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
       "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
       "authentication_status": "unknown",
       "status": "installed_auth_unknown",
@@ -88,7 +88,7 @@
     },
     {
       "backend": "gemini",
-      "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/gemini",
+      "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/gemini",
       "version": "0.40.1",
       "authentication_status": "unknown",
       "status": "installed_auth_unknown",

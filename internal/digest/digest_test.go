@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"witness/internal/canonjson"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 type relayDigestFixtures struct {

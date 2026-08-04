@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"witness/internal/contracts"
-	"witness/internal/digest"
-	"witness/internal/planning"
-	"witness/internal/relayclient"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/planning"
+	"github.com/charlesnpx/witness/internal/relayclient"
 )
 
 type fakeRelayRunner struct {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/diag"
 )
 
 const RequiredConvoRelayVersion = "v1.4.0"

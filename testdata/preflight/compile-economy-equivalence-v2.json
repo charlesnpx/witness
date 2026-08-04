@@ -148,6 +148,6 @@
   },
   "recipe_digest": "sha256:18879970bd3aeeca8883fee1dc1ddd15f87c8e35b50aa40d3b2ff3a968915807",
   "recipe_id": "economy-equivalence-v2",
-  "settings_path": "/Users/Charles.Anderson/.convo-relay/settings.toml",
+  "settings_path": "/Users/example/.convo-relay/settings.toml",
   "target": "root"
 }

@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"witness/internal/diag"
-	"witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
 )
 
 func TestCreateDeterministicManifestDigest(t *testing.T) {

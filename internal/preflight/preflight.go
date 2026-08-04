@@ -10,13 +10,13 @@ import (
 	"sort"
 	"strings"
 
-	"witness/internal/canonjson"
-	"witness/internal/contracts"
-	"witness/internal/diag"
-	"witness/internal/digest"
-	"witness/internal/freeze"
-	"witness/internal/relayclient"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/relayclient"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (

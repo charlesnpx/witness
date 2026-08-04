@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"witness/internal/changesurface"
+	"github.com/charlesnpx/witness/internal/changesurface"
 )
 
 func FindingInChangeSurface(finding Finding, surface changesurface.Document) bool {

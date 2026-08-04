@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"witness/internal/canonjson"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestMarshalIsDeterministicAndNormalizesStrings(t *testing.T) {

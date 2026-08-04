@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"witness/internal/diag"
-	"witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/freeze"
 )
 
 func TestDeriveChangedPathsAndDeterministicDigest(t *testing.T) {

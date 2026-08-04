@@ -7,9 +7,9 @@ import (
 	"sort"
 	"testing"
 
-	"witness/internal/canonjson"
-	"witness/internal/contracts"
-	"witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/digest"
 )
 
 type planningPortablePayload struct {

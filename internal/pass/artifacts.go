@@ -6,11 +6,11 @@ import (
 	"sort"
 	"strings"
 
-	"witness/internal/contracts"
-	"witness/internal/digest"
-	"witness/internal/harness"
-	"witness/internal/planning"
-	"witness/internal/preflight"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/harness"
+	"github.com/charlesnpx/witness/internal/planning"
+	"github.com/charlesnpx/witness/internal/preflight"
 )
 
 func applyOutputDefaults(config *Config) {

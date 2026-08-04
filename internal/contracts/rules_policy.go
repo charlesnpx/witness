@@ -4,8 +4,8 @@ import (
 	"io"
 	"strings"
 
-	"witness/internal/diag"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 type ReviewRules struct {

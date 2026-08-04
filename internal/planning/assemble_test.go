@@ -6,15 +6,15 @@ import (
 	"sort"
 	"testing"
 
-	"witness/internal/adjudicate"
-	"witness/internal/canonjson"
-	"witness/internal/changesurface"
-	"witness/internal/charter"
-	"witness/internal/contracts"
-	"witness/internal/digest"
-	"witness/internal/metrics"
-	"witness/internal/preflight"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/adjudicate"
+	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/changesurface"
+	"github.com/charlesnpx/witness/internal/charter"
+	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/metrics"
+	"github.com/charlesnpx/witness/internal/preflight"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestAssembleInvalidReceiptAndMissingRelayRemainPending(t *testing.T) {

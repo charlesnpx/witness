@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"witness/internal/diag"
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (

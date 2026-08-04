@@ -148,6 +148,6 @@
   },
   "recipe_digest": "sha256:f5293b5b01118e15481a9afcd69996575b1e7115a7757fb55f318cc8a50b29e8",
   "recipe_id": "witness-falsify-v2",
-  "settings_path": "/Users/Charles.Anderson/.convo-relay/settings.toml",
+  "settings_path": "/Users/example/.convo-relay/settings.toml",
   "target": "root"
 }

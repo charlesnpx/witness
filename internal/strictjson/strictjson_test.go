@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/diag"
 )
 
 type fixtureDocument struct {

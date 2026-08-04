@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"witness/internal/diag"
+	"github.com/charlesnpx/witness/internal/diag"
 )
 
 // DefaultMaxBytes is the default per-document or per-line input ceiling used

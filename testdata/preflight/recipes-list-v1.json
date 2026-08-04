@@ -1,7 +1,7 @@
 {
   "scope": "recipes",
   "status": "ok",
-  "settings_path": "/Users/Charles.Anderson/.convo-relay/settings.toml",
+  "settings_path": "/Users/example/.convo-relay/settings.toml",
   "recipes": [
     {
       "id": "disagreement-reducer",
@@ -93,7 +93,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -828,7 +828,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -962,7 +962,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -1097,7 +1097,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -1231,7 +1231,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -1355,7 +1355,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -1487,7 +1487,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -1611,7 +1611,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -1742,7 +1742,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -1875,7 +1875,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -2008,7 +2008,7 @@
       "backend_readiness": [
         {
           "backend": "codex",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/codex",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/codex",
           "version": "codex-cli 0.146.0\nWARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",
@@ -2050,7 +2050,7 @@
         },
         {
           "backend": "gemini",
-          "executable_path": "/Users/Charles.Anderson/.nvm/versions/node/v22.22.0/bin/gemini",
+          "executable_path": "/Users/example/.nvm/versions/node/v22.22.0/bin/gemini",
           "version": "0.40.1",
           "authentication_status": "unknown",
           "status": "installed_auth_unknown",

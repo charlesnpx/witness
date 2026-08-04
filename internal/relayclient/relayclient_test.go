@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"witness/internal/strictjson"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 type runnerFunc func(ctx context.Context, executable string, args ...string) CommandResult
