@@ -82,6 +82,133 @@ func TestRouteHelp(t *testing.T) {
 	}
 }
 
+func TestRoleOutputValidate(t *testing.T) {
+	dir := t.TempDir()
+	initializedPath := filepath.Join(dir, "initialized.json")
+	if err := route([]string{"role-output", "init", "-role", contracts.RoleDefect, "-out", initializedPath}); err != nil {
+		t.Fatalf("role-output init: %v", err)
+	}
+
+	initialized, err := readRoleOutputFile(initializedPath)
+	if err != nil {
+		t.Fatalf("read initialized role output: %v", err)
+	}
+	if initialized.SchemaVersion != contracts.RoleOutputV3 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
+		t.Fatalf("initialized role output = %#v, want an empty valid defect document", initialized)
+	}
+	if err := contracts.RequireValidRoleOutput(initialized, nil); err != nil {
+		t.Fatalf("initialized role output validation: %v", err)
+	}
+	plannerFrozen := validCLIFrozenCharter(t)
+	plannerFrozen.CharterHash = initialized.CharterHash
+	planned, err := planning.Run(planning.Options{
+		FrozenCharter: &plannerFrozen,
+		RoleOutputs:   []planning.RoleOutputInput{{Path: initializedPath, Document: initialized}},
+		Preflight:     planning.PreflightBinding{SnapshotDigest: initialized.ArtifactDigest},
+	})
+	if err != nil {
+		t.Fatalf("planner accepts initialized role output: %v", err)
+	}
+	if len(planned.Plan.Diagnostics) != 0 {
+		t.Fatalf("planner diagnostics for initialized role output = %#v", planned.Plan.Diagnostics)
+	}
+	if !roleOutputHasInitPlaceholders(initialized) {
+		t.Fatal("initialized template not detected as carrying placeholder identities")
+	}
+	edited := initialized
+	edited.SourceIdentity = map[string]any{"kind": "session", "id": "real-session"}
+	edited.ConsumerIdentity = map[string]any{"kind": "session", "id": "real-consumer"}
+	if roleOutputHasInitPlaceholders(edited) {
+		t.Fatal("edited document falsely flagged as placeholder template")
+	}
+
+	frozen := validCLIFrozenCharter(t)
+	valid := initialized
+	valid.CharterHash = frozen.CharterHash
+	valid.ArtifactDigest = digest.RawBytes([]byte("role-output-artifact"))
+	validPath := filepath.Join(dir, "valid.json")
+	if err := writeCanonical(validPath, valid); err != nil {
+		t.Fatal(err)
+	}
+	validDigest, err := contracts.RoleOutputDigest(valid)
+	if err != nil {
+		t.Fatalf("role-output digest: %v", err)
+	}
+	validBytes, err := contracts.RoleOutputCanonicalBytes(valid)
+	if err != nil {
+		t.Fatalf("canonical role output: %v", err)
+	}
+	var invalidPayload map[string]any
+	if err := json.Unmarshal(validBytes, &invalidPayload); err != nil {
+		t.Fatalf("decode canonical role output: %v", err)
+	}
+	delete(invalidPayload, "source_identity")
+	invalidPath := filepath.Join(dir, "invalid.json")
+	if err := writeCanonical(invalidPath, invalidPayload); err != nil {
+		t.Fatal(err)
+	}
+	invalid, err := readRoleOutputFile(invalidPath)
+	if err != nil {
+		t.Fatalf("read invalid role output: %v", err)
+	}
+	plannerDiagnostics := contracts.ValidateRoleOutput(invalid, &frozen)
+	if len(plannerDiagnostics) == 0 {
+		t.Fatal("planner role-output validation accepted document missing source_identity")
+	}
+
+	tests := []struct {
+		name               string
+		input              string
+		wantDiagnosticCode string
+		wantDiagnosticPath string
+		wantDigest         string
+	}{
+		{
+			name:       "valid empty findings document",
+			input:      validPath,
+			wantDigest: validDigest,
+		},
+		{
+			name:               "missing required source identity",
+			input:              invalidPath,
+			wantDiagnosticCode: plannerDiagnostics[0].Code,
+			wantDiagnosticPath: plannerDiagnostics[0].Path,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output, err := captureRouteStdout(t, []string{"role-output", "validate", "-input", test.input})
+			if test.wantDiagnosticCode != "" {
+				if err == nil {
+					t.Fatal("role-output validate succeeded for an invalid document")
+				}
+				diagnostics := diagnosticsFromError(err)
+				if len(diagnostics) == 0 {
+					t.Fatalf("role-output validate diagnostics = none; err=%v", err)
+				}
+				if got := diagnostics[0].Code; got != test.wantDiagnosticCode {
+					t.Fatalf("diagnostic code = %s, want planner code %s; err=%v", got, test.wantDiagnosticCode, err)
+				}
+				if got := diagnostics[0].Path; got != test.wantDiagnosticPath {
+					t.Fatalf("diagnostic path = %s, want planner path %s; err=%v", got, test.wantDiagnosticPath, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("role-output validate: %v", err)
+			}
+			var result roleOutputValidationResult
+			if result, err = strictjson.DecodeBytes[roleOutputValidationResult]([]byte(output), strictjson.DefaultMaxBytes); err != nil {
+				t.Fatalf("decode validation output: %v", err)
+			}
+			if !result.OK || result.SchemaVersion != contracts.RoleOutputV3 || result.RoleOutputDigest != test.wantDigest {
+				t.Fatalf("validation result = %#v, want ok result with schema version and digest", result)
+			}
+		})
+	}
+}
+
 func captureRouteStdout(t *testing.T, args []string) (string, error) {
 	t.Helper()
 	originalStdout := os.Stdout
