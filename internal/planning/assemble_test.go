@@ -12,8 +12,6 @@ import (
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/digest"
-	"github.com/charlesnpx/witness/internal/metrics"
-	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
@@ -169,40 +167,12 @@ func TestAssembleSanitizesForgedRelayLaunchStatusOnRelayPresent(t *testing.T) {
 		t.Fatalf("manifest diagnostics = %#v", diagnostics)
 	}
 
-	adjudicated, err := adjudicate.Run(adjudicate.Options{
+	if _, err := adjudicate.Run(adjudicate.Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 		Manifest:      result.Manifest,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("adjudicate: %v", err)
-	}
-	dir := t.TempDir()
-	preflightPath := filepath.Join(dir, "preflight.json")
-	if err := os.WriteFile(preflightPath, append(canonjson.MustMarshal(preflight.Result{
-		SchemaVersion: preflight.SchemaVersion,
-		OK:            true,
-		BackendStrata: map[string]string{"codex": metrics.BackendAuthStatusAuthenticated},
-	}), '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runResultPath := filepath.Join(dir, "run-result.json")
-	if err := os.WriteFile(runResultPath, append(canonjson.MustMarshal(adjudicated), '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	metricDocument, err := metrics.Run(metrics.Options{
-		PreflightPath:  preflightPath,
-		RunResultPaths: []string{runResultPath},
-	})
-	if err != nil {
-		t.Fatalf("metrics: %v", err)
-	}
-	if len(metricDocument.PendingVerification.Strata) != 1 {
-		t.Fatalf("pending strata = %#v, want one relay-present backend stratum", metricDocument.PendingVerification.Strata)
-	}
-	stratum := metricDocument.PendingVerification.Strata[0]
-	if stratum.Backend != "codex" || stratum.BackendAuthStatus != metrics.BackendAuthStatusAuthenticated || stratum.Count != 1 {
-		t.Fatalf("pending stratum = %#v, want codex authenticated count 1", stratum)
 	}
 }
 

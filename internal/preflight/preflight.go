@@ -15,6 +15,7 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
@@ -70,6 +71,7 @@ type Result struct {
 	CompileReportDigests map[string]string `json:"compile_report_digests"`
 	RecipePlanDigests    map[string]string `json:"recipe_plan_digests"`
 	ContractDigests      map[string]string `json:"contract_digests"`
+	RelayReportedDigests map[string]string `json:"relay_reported_contract_digests,omitempty"`
 	BackendStrata        map[string]string `json:"backend_strata"`
 	SnapshotDigest       string            `json:"snapshot_digest,omitempty"`
 	ConsumerIdentity     map[string]any    `json:"consumer_identity"`
@@ -154,6 +156,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
 		ContractDigests:      map[string]string{},
+		RelayReportedDigests: map[string]string{},
 		BackendStrata:        map[string]string{},
 		ConsumerIdentity:     consumerIdentity(options.ConsumerIdentity),
 	}
@@ -291,16 +294,15 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		}
 	}
 
-	contractDigests, contractDiagnostics := selectedContractDigests(bundlePayload, compileReports)
+	contractDigests, relayReportedDigests, contractDiagnostics := selectedContractDigests(bundlePayload, compileReports)
 	diagnostics = append(diagnostics, contractDiagnostics...)
 	for contractID, contractDigest := range contractDigests {
 		result.ContractDigests[contractID] = contractDigest
 	}
-	contractDigestDoc := map[string]any{
-		"schema_version":   "witness-preflight-contract-digests-v1",
-		"digest_profile":   digest.Profile,
-		"contract_digests": result.ContractDigests,
+	for contractID, contractDigest := range relayReportedDigests {
+		result.RelayReportedDigests[contractID] = contractDigest
 	}
+	contractDigestDoc := ContractDigestDocument(*result)
 	if retainedDigest, err := retain(options.StateDir, "contract-digests.json", contractDigestDoc); err != nil {
 		return result, err
 	} else {
@@ -445,11 +447,7 @@ func runRelayAbsentPreflight(result *Result, options Options, launchErr error, d
 		}
 	}
 
-	contractDigestDoc := map[string]any{
-		"schema_version":   "witness-preflight-contract-digests-v1",
-		"digest_profile":   digest.Profile,
-		"contract_digests": result.ContractDigests,
-	}
+	contractDigestDoc := ContractDigestDocument(*result)
 	if retainedDigest, err := retain(options.StateDir, "contract-digests.json", contractDigestDoc); err != nil {
 		return result, err
 	} else {
@@ -858,9 +856,29 @@ func loadIntegrationBundle(path string) (any, string, []diag.Diagnostic) {
 	return payload, bundleDigest, nil
 }
 
-func selectedContractDigests(bundlePayload any, reports map[string]relayclient.CompileReport) (map[string]string, []diag.Diagnostic) {
-	digests := map[string]string{}
+func ContractDigestDocument(result Result) map[string]any {
+	document := map[string]any{
+		"schema_version":   "witness-preflight-contract-digests-v1",
+		"digest_profile":   digest.Profile,
+		"contract_digests": result.ContractDigests,
+	}
+	if len(result.RelayReportedDigests) > 0 {
+		document["relay_reported_contract_digests"] = result.RelayReportedDigests
+	}
+	return document
+}
+
+func selectedContractDigests(bundlePayload any, reports map[string]relayclient.CompileReport) (map[string]string, map[string]string, []diag.Diagnostic) {
+	witnessDigests := map[string]string{}
 	var diagnostics []diag.Diagnostic
+	if bundlePayload != nil {
+		bundleDigests, bundleDiagnostics := selectedContractDigestsFromBundle(bundlePayload)
+		diagnostics = append(diagnostics, bundleDiagnostics...)
+		for contractID, contractDigest := range bundleDigests {
+			witnessDigests[contractID] = contractDigest
+		}
+	}
+	relayReportedDigests := map[string]string{}
 	for _, recipeID := range sortedCompileReportKeys(reports) {
 		report := reports[recipeID]
 		if report.RootRecipePlan != nil && strings.TrimSpace(report.IntegrationContractDigest) == "" {
@@ -878,16 +896,12 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 		for _, contractID := range sortedStringMapKeys(report.ContractDigests) {
 			contractDigest := report.ContractDigests[contractID]
 			if contractID != "" && contractDigest != "" {
-				digests[contractID] = contractDigest
+				relayReportedDigests[contractID] = contractDigest
 			}
 		}
 	}
-	if bundlePayload != nil {
-		_, bundleDiagnostics := validateWitnessIntegrationBundle(bundlePayload)
-		diagnostics = append(diagnostics, bundleDiagnostics...)
-	}
 	for _, contractID := range requiredWitnessContractIDs() {
-		if len(reports) > 0 && digests[contractID] == "" {
+		if len(reports) > 0 && relayReportedDigests[contractID] == "" {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
 				CodeContractDigestMissing,
 				"compile reports did not include the required selected integration contract digest.",
@@ -895,29 +909,76 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 			)))
 		}
 	}
-	return digests, diagnostics
+	return witnessDigests, relayReportedDigests, diagnostics
 }
 
 func selectedContractDigestsFromBundle(bundlePayload any) (map[string]string, []diag.Diagnostic) {
 	digests := map[string]string{}
-	contractsByID, diagnostics := validateWitnessIntegrationBundle(bundlePayload)
+	refs, evidence, diagnostics := selectedContractRefsAndEvidenceFromBundle(bundlePayload)
 	if len(diagnostics) > 0 {
 		return digests, diagnostics
 	}
+	for _, diagnostic := range selectedContractAuthenticationDiagnostics(refs, evidence) {
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	if len(diagnostics) > 0 {
+		return digests, diagnostics
+	}
+	_, diagnostics = validateWitnessIntegrationBundle(bundlePayload)
+	if len(diagnostics) > 0 {
+		return digests, diagnostics
+	}
+	required := map[string]bool{}
 	for _, contractID := range requiredWitnessContractIDs() {
-		contractDigest, err := digest.SemanticJSON(contractsByID[contractID])
-		if err != nil {
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(
-				err,
-				CodeContractDigestMissing,
-				"integration bundle required Witness contract digest could not be computed.",
-				diag.WithDetail("contract_id", contractID),
-			)))
-			continue
+		required[contractID] = true
+	}
+	for _, item := range evidence {
+		if required[item.ContractID] && item.Ref.Digest != "" {
+			digests[item.ContractID] = item.Ref.Digest
 		}
-		digests[contractID] = contractDigest
 	}
 	return digests, diagnostics
+}
+
+func SelectedContractDigestsFromBundle(bundlePayload any) (map[string]string, []diag.Diagnostic) {
+	return selectedContractDigestsFromBundle(bundlePayload)
+}
+
+func selectedContractAuthenticationDiagnostics(refs []contracts.ArtifactRef, evidence []planning.SelectedContractEvidence) []diag.Diagnostic {
+	return planning.SelectedContractManifestDiagnostics(refs, evidence)
+}
+
+func selectedContractRefsAndEvidenceFromBundle(bundlePayload any) ([]contracts.ArtifactRef, []planning.SelectedContractEvidence, []diag.Diagnostic) {
+	payloadBytes, err := canonjson.Marshal(bundlePayload)
+	if err != nil {
+		return nil, nil, []diag.Diagnostic{diag.FromError(diag.Wrap(
+			err,
+			CodeContractDigestMissing,
+			"integration bundle selected-contract evidence could not be canonicalized.",
+		))}
+	}
+	authenticated, err := planning.AuthenticatedSelectedContractsFromBytes(payloadBytes)
+	if err != nil {
+		return nil, nil, []diag.Diagnostic{diag.FromError(err)}
+	}
+	refs := make([]contracts.ArtifactRef, 0, len(authenticated))
+	evidence := make([]planning.SelectedContractEvidence, 0, len(authenticated))
+	for _, contract := range authenticated {
+		ref := contracts.ArtifactRef{
+			Kind:          "selected-contract",
+			ID:            "integration-bundle:" + strings.ReplaceAll(contract.ContractID, "/", ":"),
+			Digest:        contract.ContractDigest,
+			DigestProfile: digest.Profile,
+			MediaType:     "application/json",
+		}
+		refs = append(refs, ref)
+		evidence = append(evidence, planning.SelectedContractEvidence{
+			Ref:        ref,
+			ContractID: contract.ContractID,
+			RawBytes:   append([]byte(nil), payloadBytes...),
+		})
+	}
+	return refs, evidence, nil
 }
 
 func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]any, []diag.Diagnostic) {

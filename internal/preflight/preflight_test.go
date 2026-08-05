@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/canonjson"
@@ -14,6 +15,7 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
@@ -173,7 +175,7 @@ func TestCompileReportMissingDigestRejectedPerRecipe(t *testing.T) {
 		t.Fatalf("diagnostics = %#v, want %s", diagnostics, CodeContractDigestMissing)
 	}
 
-	_, diagnostics := selectedContractDigests(nil, map[string]relayclient.CompileReport{
+	_, _, diagnostics := selectedContractDigests(nil, map[string]relayclient.CompileReport{
 		missingRequirement.ID: missingReport,
 		siblingRequirement.ID: {
 			RecipeID:                  siblingRequirement.ID,
@@ -199,6 +201,128 @@ func TestCompileReportMissingDigestRejectedPerRecipe(t *testing.T) {
 	}
 	if got := diagnostic.Details["recipe_id"]; got != missingRequirement.ID {
 		t.Fatalf("recipe_id = %v, want %s", got, missingRequirement.ID)
+	}
+}
+
+func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing.T) {
+	bundle := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
+	reports := map[string]relayclient.CompileReport{}
+	relayByContract := map[string]string{}
+	for _, requirement := range RequiredRecipes {
+		relayDigest := digest.RawBytes([]byte("relay-projection:" + requirement.ContractID))
+		relayByContract[requirement.ContractID] = relayDigest
+		reports[requirement.ID] = relayclient.CompileReport{
+			RecipeID:                  requirement.ID,
+			IntegrationContract:       requirement.ContractID,
+			IntegrationContractDigest: relayDigest,
+			RootRecipePlan: map[string]any{
+				"recipe_id":                    requirement.ID,
+				"integration_contract_digest":  relayDigest,
+				"integration_contract_id":      requirement.ContractID,
+				"deterministic_test_fixture":   true,
+				"required_input_binding_count": 4,
+			},
+			ContractDigests: map[string]string{
+				requirement.ContractID: relayDigest,
+			},
+		}
+	}
+
+	witnessDigests, relayReportedDigests, diagnostics := selectedContractDigests(bundle, reports)
+	if len(diagnostics) > 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	for _, contractID := range requiredWitnessContractIDs() {
+		if witnessDigests[contractID] == "" {
+			t.Fatalf("missing witness digest for %s", contractID)
+		}
+		if relayReportedDigests[contractID] != relayByContract[contractID] {
+			t.Fatalf("relay digest for %s = %s, want %s", contractID, relayReportedDigests[contractID], relayByContract[contractID])
+		}
+		if witnessDigests[contractID] == relayReportedDigests[contractID] {
+			t.Fatalf("witness digest unexpectedly matched relay-reported digest for %s", contractID)
+		}
+	}
+
+	result := Result{
+		ContractDigests:      witnessDigests,
+		RelayReportedDigests: relayReportedDigests,
+		ArtifactDigests: map[string]string{
+			"relay-capabilities.json": digest.RawBytes([]byte("capabilities")),
+		},
+	}
+	document := ContractDigestDocument(result)
+	lineage, ok := document["relay_reported_contract_digests"].(map[string]string)
+	if !ok {
+		t.Fatalf("relay_reported_contract_digests = %#v, want map", document["relay_reported_contract_digests"])
+	}
+	for contractID, relayDigest := range relayByContract {
+		if lineage[contractID] != relayDigest {
+			t.Fatalf("lineage[%s] = %s, want %s", contractID, lineage[contractID], relayDigest)
+		}
+	}
+	compatibility := compatibilityManifest(&result, nil)
+	for _, selected := range compatibility.SelectedContracts {
+		if selected.Digest != witnessDigests[selected.ContractID] {
+			t.Fatalf("compatibility selected digest for %s = %s, want witness %s", selected.ContractID, selected.Digest, witnessDigests[selected.ContractID])
+		}
+		if selected.Digest == relayReportedDigests[selected.ContractID] {
+			t.Fatalf("compatibility selected digest for %s used relay-reported lineage", selected.ContractID)
+		}
+	}
+}
+
+func TestSelectedContractPreflightAuthenticationMatchesAssemblyDiagnostic(t *testing.T) {
+	contractID := "witnessed-review/economy-equivalence-v2"
+	_, contractBody := requiredContractForTest(t)
+	payload := map[string]any{"contracts": map[string]any{contractID: contractBody}}
+	raw := canonjson.MustMarshal(payload)
+	witnessDigest, err := digest.SemanticJSON(contractBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayDigest := digest.RawBytes([]byte("relay-projection:" + contractID))
+	ref := contracts.ArtifactRef{
+		Kind:          "selected-contract",
+		ID:            "selected-contract",
+		Digest:        relayDigest,
+		DigestProfile: digest.Profile,
+		MediaType:     "application/json",
+	}
+	assemblyDiagnostics := planning.SelectedContractManifestDiagnostics(
+		[]contracts.ArtifactRef{ref},
+		[]planning.SelectedContractEvidence{{
+			Ref:        ref,
+			ContractID: contractID,
+			RawBytes:   raw,
+		}},
+	)
+	if len(assemblyDiagnostics) != 1 {
+		t.Fatalf("assembly diagnostics = %#v, want one", assemblyDiagnostics)
+	}
+
+	preflightDiagnostics := selectedContractAuthenticationDiagnostics(
+		[]contracts.ArtifactRef{ref},
+		[]planning.SelectedContractEvidence{{
+			Ref:        ref,
+			ContractID: contractID,
+			RawBytes:   raw,
+		}},
+	)
+	if len(preflightDiagnostics) != 1 {
+		t.Fatalf("preflight diagnostics = %#v, want one", preflightDiagnostics)
+	}
+	if !reflect.DeepEqual(preflightDiagnostics[0], assemblyDiagnostics[0]) {
+		t.Fatalf("preflight diagnostic = %#v, want assembly diagnostic %#v", preflightDiagnostics[0], assemblyDiagnostics[0])
+	}
+	if got := preflightDiagnostics[0].Details["contract_id"]; got != contractID {
+		t.Fatalf("contract_id detail = %v, want %s", got, contractID)
+	}
+	if got := preflightDiagnostics[0].Details["witness_digest"]; got != witnessDigest {
+		t.Fatalf("witness_digest = %v, want %s", got, witnessDigest)
+	}
+	if got := preflightDiagnostics[0].Details["relay_reported_digest"]; got != relayDigest {
+		t.Fatalf("relay_reported_digest = %v, want %s", got, relayDigest)
 	}
 }
 

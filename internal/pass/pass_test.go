@@ -1604,6 +1604,7 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
 		ContractDigests:      map[string]string{"integration_bundle": bundleDigest},
+		RelayReportedDigests: map[string]string{},
 		BackendStrata:        map[string]string{"claude": "ready", "codex": "ready"},
 		ConsumerIdentity:     map[string]any{"kind": "witness", "id": "pass-driver"},
 	}
@@ -1643,14 +1644,11 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		planRelative := filepath.ToSlash(filepath.Join("recipe-plans", requirement.RecipeID+".json"))
 		result.ArtifactDigests[reportRelative] = retainPreflightPayloadForTest(t, config.StateDir, reportRelative, report)
 		result.CompileReportDigests[requirement.RecipeID] = result.ArtifactDigests[reportRelative]
+		result.RelayReportedDigests[requirement.ContractID] = selectedDigests[requirement.ContractID]
 		result.ArtifactDigests[planRelative] = retainPreflightPayloadForTest(t, config.StateDir, planRelative, plan)
 		result.RecipePlanDigests[requirement.RecipeID] = result.ArtifactDigests[planRelative]
 	}
-	contractDigestDoc := map[string]any{
-		"schema_version":   "witness-preflight-contract-digests-v1",
-		"digest_profile":   digest.Profile,
-		"contract_digests": result.ContractDigests,
-	}
+	contractDigestDoc := preflight.ContractDigestDocument(result)
 	result.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, config.StateDir, "contract-digests.json", contractDigestDoc)
 	result.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(result))
 	writeCanonicalForTest(t, config.Outputs.PreflightPath, result)

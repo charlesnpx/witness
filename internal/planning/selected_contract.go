@@ -226,7 +226,9 @@ func selectedContractEvidenceDigestPresent(evidence []SelectedContractEvidence, 
 					"selected-contract manifest reference digest does not match the retained contract body.",
 					diag.WithDetail("contract_id", contract.ContractID),
 					diag.WithDetail("actual_digest", contract.ContractDigest),
+					diag.WithDetail("witness_digest", contract.ContractDigest),
 					diag.WithDetail("ref_digest", item.Ref.Digest),
+					diag.WithDetail("relay_reported_digest", item.Ref.Digest),
 				)
 			}
 			if contract.ContractDigest == digestValue {
@@ -286,6 +288,10 @@ func selectedContractManifestDiagnostics(refs []contracts.ArtifactRef, evidence 
 	return diagnostics
 }
 
+func SelectedContractManifestDiagnostics(refs []contracts.ArtifactRef, evidence []SelectedContractEvidence) []diag.Diagnostic {
+	return selectedContractManifestDiagnostics(refs, evidence)
+}
+
 func selectedContractEvidenceDiagnostics(evidence []SelectedContractEvidence) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	for _, item := range evidence {
@@ -310,7 +316,9 @@ func selectedContractEvidenceDiagnostics(evidence []SelectedContractEvidence) []
 					"selected-contract manifest reference digest does not match the retained contract body.",
 					diag.WithDetail("contract_id", contract.ContractID),
 					diag.WithDetail("actual_digest", contract.ContractDigest),
+					diag.WithDetail("witness_digest", contract.ContractDigest),
 					diag.WithDetail("ref_digest", item.Ref.Digest),
+					diag.WithDetail("relay_reported_digest", item.Ref.Digest),
 				)))
 			}
 		}
