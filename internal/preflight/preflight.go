@@ -15,12 +15,16 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (
 	SchemaVersion = "witness-verification-preflight-v1"
+
+	ContractDigestDocumentV1 = "witness-preflight-contract-digests-v1"
+	ContractDigestDocumentV2 = "witness-preflight-contract-digests-v2"
 
 	relayIntegrationBundleV2 = "relay-integration-bundle-v2"
 
@@ -42,6 +46,9 @@ const (
 	CodeCompileReportMismatch       = "preflight_compile_report_mismatch"
 	CodeCompilePlanMissing          = "preflight_compile_plan_missing"
 	CodeContractDigestMissing       = "preflight_contract_digest_missing"
+	CodeContractDigestMalformed     = "preflight_contract_digest_malformed"
+	CodeContractDigestMismatch      = "preflight_contract_digest_mismatch"
+	CodeContractDigestDocument      = "preflight_contract_digest_document_invalid"
 	CodeInvalidRecipeID             = "preflight_invalid_recipe_id"
 	CodeMissingFreezeInput          = "preflight_missing_freeze_input"
 	CodeSnapshotDigestMismatch      = "preflight_snapshot_digest_mismatch"
@@ -70,10 +77,19 @@ type Result struct {
 	CompileReportDigests map[string]string `json:"compile_report_digests"`
 	RecipePlanDigests    map[string]string `json:"recipe_plan_digests"`
 	ContractDigests      map[string]string `json:"contract_digests"`
+	RelayReportedDigests map[string]string `json:"relay_reported_contract_digests,omitempty"`
 	BackendStrata        map[string]string `json:"backend_strata"`
 	SnapshotDigest       string            `json:"snapshot_digest,omitempty"`
 	ConsumerIdentity     map[string]any    `json:"consumer_identity"`
 	Diagnostics          []diag.Diagnostic `json:"diagnostics,omitempty"`
+}
+
+// ContractDigestDocumentData is the version-aware interpretation of a retained
+// contract-digests document.
+type ContractDigestDocumentData struct {
+	SchemaVersion        string
+	WitnessDigests       map[string]string
+	RelayReportedDigests map[string]string
 }
 
 type Error struct {
@@ -154,6 +170,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
 		ContractDigests:      map[string]string{},
+		RelayReportedDigests: map[string]string{},
 		BackendStrata:        map[string]string{},
 		ConsumerIdentity:     consumerIdentity(options.ConsumerIdentity),
 	}
@@ -291,16 +308,15 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		}
 	}
 
-	contractDigests, contractDiagnostics := selectedContractDigests(bundlePayload, compileReports)
+	contractDigests, relayReportedDigests, contractDiagnostics := selectedContractDigests(bundlePayload, compileReports)
 	diagnostics = append(diagnostics, contractDiagnostics...)
 	for contractID, contractDigest := range contractDigests {
 		result.ContractDigests[contractID] = contractDigest
 	}
-	contractDigestDoc := map[string]any{
-		"schema_version":   "witness-preflight-contract-digests-v1",
-		"digest_profile":   digest.Profile,
-		"contract_digests": result.ContractDigests,
+	for contractID, contractDigest := range relayReportedDigests {
+		result.RelayReportedDigests[contractID] = contractDigest
 	}
+	contractDigestDoc := ContractDigestDocument(*result)
 	if retainedDigest, err := retain(options.StateDir, "contract-digests.json", contractDigestDoc); err != nil {
 		return result, err
 	} else {
@@ -445,11 +461,7 @@ func runRelayAbsentPreflight(result *Result, options Options, launchErr error, d
 		}
 	}
 
-	contractDigestDoc := map[string]any{
-		"schema_version":   "witness-preflight-contract-digests-v1",
-		"digest_profile":   digest.Profile,
-		"contract_digests": result.ContractDigests,
-	}
+	contractDigestDoc := ContractDigestDocument(*result)
 	if retainedDigest, err := retain(options.StateDir, "contract-digests.json", contractDigestDoc); err != nil {
 		return result, err
 	} else {
@@ -858,16 +870,263 @@ func loadIntegrationBundle(path string) (any, string, []diag.Diagnostic) {
 	return payload, bundleDigest, nil
 }
 
-func selectedContractDigests(bundlePayload any, reports map[string]relayclient.CompileReport) (map[string]string, []diag.Diagnostic) {
-	digests := map[string]string{}
+func ContractDigestDocument(result Result) map[string]any {
+	document := map[string]any{
+		"schema_version":   ContractDigestDocumentV2,
+		"digest_profile":   digest.Profile,
+		"contract_digests": result.ContractDigests,
+	}
+	if len(result.RelayReportedDigests) > 0 {
+		document["relay_reported_contract_digests"] = result.RelayReportedDigests
+	}
+	return document
+}
+
+// ReadContractDigestDocument decodes retained document versions without
+// conflating relay-reported lineage with Witness-computed contract bodies.
+func ReadContractDigestDocument(payload any) (ContractDigestDocumentData, error) {
+	decoded := ContractDigestDocumentData{
+		WitnessDigests:       map[string]string{},
+		RelayReportedDigests: map[string]string{},
+	}
+	document, ok := payload.(map[string]any)
+	if !ok {
+		return decoded, diag.New(CodeContractDigestDocument, "contract-digests document must be an object.")
+	}
+	schemaVersion, _ := document["schema_version"].(string)
+	if schemaVersion != ContractDigestDocumentV1 && schemaVersion != ContractDigestDocumentV2 {
+		return decoded, diag.New(
+			CodeContractDigestDocument,
+			"contract-digests document schema_version is unsupported.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("actual", schemaVersion),
+			diag.WithDetail("supported", []string{ContractDigestDocumentV1, ContractDigestDocumentV2}),
+		)
+	}
+	if digestProfile, _ := document["digest_profile"].(string); digestProfile != digest.Profile {
+		return decoded, diag.New(
+			CodeContractDigestDocument,
+			"contract-digests document digest_profile is unsupported.",
+			diag.WithPath("/digest_profile"),
+			diag.WithDetail("actual", digestProfile),
+			diag.WithDetail("expected", digest.Profile),
+		)
+	}
+	contractDigests, err := contractDigestDocumentMap(document, "contract_digests", true)
+	if err != nil {
+		return decoded, err
+	}
+	decoded.SchemaVersion = schemaVersion
+	switch schemaVersion {
+	case ContractDigestDocumentV1:
+		// v1 contract_digests are relay lineage. Do not treat them as Witness
+		// body digests, even if a malformed historical producer added v2 fields.
+		decoded.RelayReportedDigests = contractDigests
+	case ContractDigestDocumentV2:
+		decoded.WitnessDigests = contractDigests
+		relayReportedDigests, err := contractDigestDocumentMap(document, "relay_reported_contract_digests", false)
+		if err != nil {
+			return decoded, err
+		}
+		decoded.RelayReportedDigests = relayReportedDigests
+	}
+	return decoded, nil
+}
+
+func contractDigestDocumentMap(document map[string]any, field string, required bool) (map[string]string, error) {
+	value, found := document[field]
+	if !found || value == nil {
+		if required {
+			return nil, diag.New(
+				CodeContractDigestDocument,
+				"contract-digests document is missing a required digest map.",
+				diag.WithPath("/"+field),
+				diag.WithDetail("field", field),
+			)
+		}
+		return map[string]string{}, nil
+	}
+	result := map[string]string{}
+	switch digests := value.(type) {
+	case map[string]string:
+		for contractID, contractDigest := range digests {
+			result[contractID] = contractDigest
+		}
+	case map[string]any:
+		for contractID, rawDigest := range digests {
+			contractDigest, ok := rawDigest.(string)
+			if !ok {
+				return nil, diag.New(
+					CodeContractDigestDocument,
+					"contract-digests document digest values must be strings.",
+					diag.WithPath("/"+field+"/"+jsonPointerEscape(contractID)),
+				)
+			}
+			result[contractID] = contractDigest
+		}
+	default:
+		return nil, diag.New(
+			CodeContractDigestDocument,
+			"contract-digests document digest map must be an object.",
+			diag.WithPath("/"+field),
+		)
+	}
+	return result, nil
+}
+
+// ResolveRelayReportedContractDigests gives compile-report contract_digests
+// precedence and treats the plan digest as corroboration for the selected
+// integration contract.
+func ResolveRelayReportedContractDigests(contractDigests map[string]string, integrationContractID string, integrationContractDigest string) (map[string]string, error) {
+	resolved := map[string]string{}
+	for contractID, contractDigest := range contractDigests {
+		if contractDigest = strings.TrimSpace(contractDigest); contractID != "" && contractDigest != "" {
+			resolved[contractID] = contractDigest
+		}
+	}
+	if integrationContractID == "" {
+		return resolved, nil
+	}
+	reportedDigest := strings.TrimSpace(contractDigests[integrationContractID])
+	planDigest := strings.TrimSpace(integrationContractDigest)
+	if reportedDigest != "" && planDigest != "" && reportedDigest != planDigest {
+		return nil, diag.New(
+			CodeContractDigestMismatch,
+			"compile report contract_digests disagrees with integration_contract_digest.",
+			diag.WithDetail("contract_id", integrationContractID),
+			diag.WithDetail("contract_digests_digest", reportedDigest),
+			diag.WithDetail("integration_contract_digest", planDigest),
+		)
+	}
+	if reportedDigest == "" && planDigest != "" {
+		if !digest.WellFormed(planDigest) {
+			return nil, diag.New(
+				CodeContractDigestMalformed,
+				"integration_contract_digest must be a well-formed sha256 digest.",
+				diag.WithDetail("contract_id", integrationContractID),
+				diag.WithDetail("value", planDigest),
+			)
+		}
+		resolved[integrationContractID] = planDigest
+	}
+	return resolved, nil
+}
+
+// ProjectRelayReportedContractDigests retains only the digest for the
+// selected contract in one compile report. Compile reports can carry digests
+// for unrelated contracts, but those are not part of Witness relay lineage.
+func ProjectRelayReportedContractDigests(resolvedDigests map[string]string, selectedContractID string) map[string]string {
+	projected := map[string]string{}
+	if selectedContractID == "" {
+		return projected
+	}
+	if contractDigest := strings.TrimSpace(resolvedDigests[selectedContractID]); contractDigest != "" {
+		projected[selectedContractID] = contractDigest
+	}
+	return projected
+}
+
+// DecodeCompileReportContractDigests strictly decodes a compile-report
+// contract_digests map. reportID is included in diagnostics so generation and
+// retained-state validation report malformed values identically.
+func DecodeCompileReportContractDigests(reportID string, rawDigests any) (map[string]string, error) {
+	if rawDigests == nil {
+		return map[string]string{}, nil
+	}
+	values := map[string]any{}
+	switch raw := rawDigests.(type) {
+	case map[string]string:
+		for contractID, contractDigest := range raw {
+			values[contractID] = contractDigest
+		}
+	case map[string]any:
+		for contractID, contractDigest := range raw {
+			values[contractID] = contractDigest
+		}
+	default:
+		return nil, diag.New(
+			CodeContractDigestMalformed,
+			"compile report contract_digests must be an object.",
+			diag.WithPath("/contract_digests"),
+			diag.WithDetail("report", reportID),
+			diag.WithDetail("report_id", reportID),
+			diag.WithDetail("recipe_id", reportID),
+			diag.WithDetail("value_type", compileReportDigestValueType(rawDigests)),
+		)
+	}
+
+	decoded := make(map[string]string, len(values))
+	for _, contractID := range sortedAnyMapKeys(values) {
+		rawDigest := values[contractID]
+		contractDigest, ok := rawDigest.(string)
+		if !ok || strings.TrimSpace(contractDigest) == "" {
+			return nil, diag.New(
+				CodeContractDigestMalformed,
+				"compile report contract_digests values must be non-empty strings.",
+				diag.WithPath("/contract_digests/"+jsonPointerEscape(contractID)),
+				diag.WithDetail("report", reportID),
+				diag.WithDetail("report_id", reportID),
+				diag.WithDetail("recipe_id", reportID),
+				diag.WithDetail("contract_id", contractID),
+				diag.WithDetail("contract_key", contractID),
+				diag.WithDetail("value_type", compileReportDigestValueType(rawDigest)),
+			)
+		}
+		if !digest.WellFormed(contractDigest) {
+			return nil, diag.New(
+				CodeContractDigestMalformed,
+				"compile report contract_digests values must be well-formed sha256 digests.",
+				diag.WithPath("/contract_digests/"+jsonPointerEscape(contractID)),
+				diag.WithDetail("report", reportID),
+				diag.WithDetail("report_id", reportID),
+				diag.WithDetail("recipe_id", reportID),
+				diag.WithDetail("contract_id", contractID),
+				diag.WithDetail("contract_key", contractID),
+				diag.WithDetail("value", contractDigest),
+			)
+		}
+		decoded[contractID] = contractDigest
+	}
+	return decoded, nil
+}
+
+func compileReportDigestValueType(value any) string {
+	switch value.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "string"
+	case bool:
+		return "boolean"
+	case json.Number, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return "number"
+	case map[string]any, map[string]string:
+		return "object"
+	case []any, []string:
+		return "array"
+	default:
+		return fmt.Sprintf("%T", value)
+	}
+}
+
+func selectedContractDigests(bundlePayload any, reports map[string]relayclient.CompileReport) (map[string]string, map[string]string, []diag.Diagnostic) {
+	witnessDigests := map[string]string{}
 	var diagnostics []diag.Diagnostic
+	if bundlePayload != nil {
+		bundleDigests, bundleDiagnostics := selectedContractDigestsFromBundle(bundlePayload)
+		diagnostics = append(diagnostics, bundleDiagnostics...)
+		for contractID, contractDigest := range bundleDigests {
+			witnessDigests[contractID] = contractDigest
+		}
+	}
+	relayReportedDigests := map[string]string{}
 	for _, recipeID := range sortedCompileReportKeys(reports) {
 		report := reports[recipeID]
+		reportRecipeID := report.RecipeID
+		if reportRecipeID == "" {
+			reportRecipeID = recipeID
+		}
 		if report.RootRecipePlan != nil && strings.TrimSpace(report.IntegrationContractDigest) == "" {
-			reportRecipeID := report.RecipeID
-			if reportRecipeID == "" {
-				reportRecipeID = recipeID
-			}
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
 				CodeContractDigestMissing,
 				"compile report did not include the selected integration contract digest.",
@@ -875,19 +1134,25 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 				diag.WithDetail("contract_id", report.IntegrationContract),
 			)))
 		}
-		for _, contractID := range sortedStringMapKeys(report.ContractDigests) {
-			contractDigest := report.ContractDigests[contractID]
-			if contractID != "" && contractDigest != "" {
-				digests[contractID] = contractDigest
+		reportDigests, err := compileReportContractDigests(reportRecipeID, report)
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(err))
+			continue
+		}
+		resolvedDigests, err := ResolveRelayReportedContractDigests(reportDigests, report.IntegrationContract, report.IntegrationContractDigest)
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(err))
+			continue
+		}
+		projectedDigests := ProjectRelayReportedContractDigests(resolvedDigests, report.IntegrationContract)
+		for _, contractID := range sortedStringMapKeys(projectedDigests) {
+			if contractDigest := projectedDigests[contractID]; contractDigest != "" {
+				relayReportedDigests[contractID] = contractDigest
 			}
 		}
 	}
-	if bundlePayload != nil {
-		_, bundleDiagnostics := validateWitnessIntegrationBundle(bundlePayload)
-		diagnostics = append(diagnostics, bundleDiagnostics...)
-	}
 	for _, contractID := range requiredWitnessContractIDs() {
-		if len(reports) > 0 && digests[contractID] == "" {
+		if len(reports) > 0 && relayReportedDigests[contractID] == "" {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(
 				CodeContractDigestMissing,
 				"compile reports did not include the required selected integration contract digest.",
@@ -895,29 +1160,84 @@ func selectedContractDigests(bundlePayload any, reports map[string]relayclient.C
 			)))
 		}
 	}
-	return digests, diagnostics
+	return witnessDigests, relayReportedDigests, diagnostics
+}
+
+func compileReportContractDigests(reportID string, report relayclient.CompileReport) (map[string]string, error) {
+	rawDigests, found := report.Payload["contract_digests"]
+	if !found {
+		rawDigests = report.ContractDigests
+	}
+	return DecodeCompileReportContractDigests(reportID, rawDigests)
 }
 
 func selectedContractDigestsFromBundle(bundlePayload any) (map[string]string, []diag.Diagnostic) {
 	digests := map[string]string{}
-	contractsByID, diagnostics := validateWitnessIntegrationBundle(bundlePayload)
+	refs, evidence, diagnostics := selectedContractRefsAndEvidenceFromBundle(bundlePayload)
 	if len(diagnostics) > 0 {
 		return digests, diagnostics
 	}
+	for _, diagnostic := range selectedContractAuthenticationDiagnostics(refs, evidence) {
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	if len(diagnostics) > 0 {
+		return digests, diagnostics
+	}
+	_, diagnostics = validateWitnessIntegrationBundle(bundlePayload)
+	if len(diagnostics) > 0 {
+		return digests, diagnostics
+	}
+	required := map[string]bool{}
 	for _, contractID := range requiredWitnessContractIDs() {
-		contractDigest, err := digest.SemanticJSON(contractsByID[contractID])
-		if err != nil {
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(
-				err,
-				CodeContractDigestMissing,
-				"integration bundle required Witness contract digest could not be computed.",
-				diag.WithDetail("contract_id", contractID),
-			)))
-			continue
+		required[contractID] = true
+	}
+	for _, item := range evidence {
+		if required[item.ContractID] && item.Ref.Digest != "" {
+			digests[item.ContractID] = item.Ref.Digest
 		}
-		digests[contractID] = contractDigest
 	}
 	return digests, diagnostics
+}
+
+func SelectedContractDigestsFromBundle(bundlePayload any) (map[string]string, []diag.Diagnostic) {
+	return selectedContractDigestsFromBundle(bundlePayload)
+}
+
+func selectedContractAuthenticationDiagnostics(refs []contracts.ArtifactRef, evidence []planning.SelectedContractEvidence) []diag.Diagnostic {
+	return planning.SelectedContractManifestDiagnostics(refs, evidence)
+}
+
+func selectedContractRefsAndEvidenceFromBundle(bundlePayload any) ([]contracts.ArtifactRef, []planning.SelectedContractEvidence, []diag.Diagnostic) {
+	payloadBytes, err := canonjson.Marshal(bundlePayload)
+	if err != nil {
+		return nil, nil, []diag.Diagnostic{diag.FromError(diag.Wrap(
+			err,
+			CodeContractDigestMissing,
+			"integration bundle selected-contract evidence could not be canonicalized.",
+		))}
+	}
+	authenticated, err := planning.AuthenticatedSelectedContractsFromBytes(payloadBytes)
+	if err != nil {
+		return nil, nil, []diag.Diagnostic{diag.FromError(err)}
+	}
+	refs := make([]contracts.ArtifactRef, 0, len(authenticated))
+	evidence := make([]planning.SelectedContractEvidence, 0, len(authenticated))
+	for _, contract := range authenticated {
+		ref := contracts.ArtifactRef{
+			Kind:          "selected-contract",
+			ID:            "integration-bundle:" + strings.ReplaceAll(contract.ContractID, "/", ":"),
+			Digest:        contract.ContractDigest,
+			DigestProfile: digest.Profile,
+			MediaType:     "application/json",
+		}
+		refs = append(refs, ref)
+		evidence = append(evidence, planning.SelectedContractEvidence{
+			Ref:        ref,
+			ContractID: contract.ContractID,
+			RawBytes:   append([]byte(nil), payloadBytes...),
+		})
+	}
+	return refs, evidence, nil
 }
 
 func validateWitnessIntegrationBundle(bundlePayload any) (map[string]map[string]any, []diag.Diagnostic) {
@@ -1573,6 +1893,15 @@ func sortedCompileReportKeys(reports map[string]relayclient.CompileReport) []str
 }
 
 func sortedStringMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedAnyMapKeys(values map[string]any) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
