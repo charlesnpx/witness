@@ -697,8 +697,7 @@ func validatePreflightContractDigestDocument(retained any, result preflight.Resu
 	}
 	switch document.SchemaVersion {
 	case preflight.ContractDigestDocumentV1:
-		return requireSemanticMatch(
-			"preflight v1 contract-digest relay lineage",
+		return requireV1ContractDigestLineage(
 			document.RelayReportedDigests,
 			expectedV1ContractDigestLineage(result),
 		)
@@ -718,6 +717,40 @@ func expectedV1ContractDigestLineage(result preflight.Result) map[string]string 
 		lineage["integration_bundle"] = integrationBundleDigest
 	}
 	return lineage
+}
+
+func requireV1ContractDigestLineage(retained map[string]string, expected map[string]string) error {
+	projected := make(map[string]string, len(expected))
+	for _, contractID := range sortedStringMapKeys(expected) {
+		if contractDigest, found := retained[contractID]; found {
+			projected[contractID] = contractDigest
+		}
+	}
+	if err := requireSemanticMatch("preflight v1 contract-digest relay lineage", projected, expected); err != nil {
+		return err
+	}
+	for _, contractID := range sortedStringMapKeys(retained) {
+		if _, projectedContract := expected[contractID]; projectedContract {
+			continue
+		}
+		if requiredWitnessContractID(contractID) {
+			return diag.New(
+				CodeStateInvalid,
+				"preflight v1 contract-digest relay lineage contains an unexpected required contract.",
+				diag.WithDetail("contract_id", contractID),
+			)
+		}
+	}
+	return nil
+}
+
+func requiredWitnessContractID(contractID string) bool {
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		if requirement.ContractID == contractID {
+			return true
+		}
+	}
+	return false
 }
 
 func isPreflightRetainedOutputRole(role string) bool {

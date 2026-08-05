@@ -416,6 +416,33 @@ func TestValidatePreflightContractDigestDocumentReadsV1AsRelayLineage(t *testing
 	}
 }
 
+func TestValidatePreflightContractDigestDocumentAllowsV1LegacyNonRequiredExtra(t *testing.T) {
+	contractID := contracts.RequiredWitnessRecipeContractsV2[0].ContractID
+	relayDigest := digest.RawBytes([]byte("relay-lineage:" + contractID))
+	integrationBundleDigest := digest.RawBytes([]byte("integration-bundle"))
+	extraContractID := "example/non-required-contract"
+	extraDigest := digest.RawBytes([]byte("relay-lineage:" + extraContractID))
+	retained := map[string]any{
+		"schema_version": preflight.ContractDigestDocumentV1,
+		"digest_profile": digest.Profile,
+		"contract_digests": map[string]any{
+			contractID:           relayDigest,
+			"integration_bundle": integrationBundleDigest,
+			extraContractID:      extraDigest,
+		},
+	}
+	result := preflight.Result{
+		ContractDigests: map[string]string{
+			"integration_bundle": integrationBundleDigest,
+		},
+		RelayReportedDigests: map[string]string{contractID: relayDigest},
+	}
+
+	if err := validatePreflightContractDigestDocument(retained, result); err != nil {
+		t.Fatalf("v1 persisted contract-digests rejected a non-required legacy extra: %v", err)
+	}
+}
+
 func TestValidatePreflightCompileReportRejectsDisagreeingRelayLineage(t *testing.T) {
 	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
 	reportedDigest := digest.RawBytes([]byte("relay-reported:" + requirement.ContractID))
