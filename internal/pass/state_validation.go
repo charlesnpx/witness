@@ -314,11 +314,7 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 			_, err = validateFreezeManifestOutput(state.Config, manifest)
 		}
 	case artifact.Role == "preflight":
-		var result preflight.Result
-		result, err = strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
-		if err == nil {
-			err = validatePreflightOutput(state.Config, result)
-		}
+		err = validatePreflightOutputDocument(state.Config, data)
 	case isPreflightRetainedOutputRole(artifact.Role):
 		err = validatePreflightRetainedOutput(state.Config, artifact)
 	case artifact.Role == roleOutputChangeSurfaceRole:
@@ -551,9 +547,32 @@ func safeSlashRelativePath(value string) bool {
 }
 
 func validatePreflightOutput(config Config, result preflight.Result) error {
+	return validatePreflightOutputWithRetainedArtifacts(config, result, true)
+}
+
+func validatePreflightOutputDocument(config Config, data []byte) error {
+	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return err
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	_, retainedArtifactsPresent := document["retained_artifacts"]
+	return validatePreflightOutputWithRetainedArtifacts(config, result, retainedArtifactsPresent)
+}
+
+func validatePreflightOutputWithRetainedArtifacts(config Config, result preflight.Result, retainedArtifactsPresent bool) error {
 	expected, err := expectedPreflightResult(config)
 	if err != nil {
 		return err
+	}
+	if !retainedArtifactsPresent {
+		// Preflight v1 documents emitted before retained_artifacts was added share
+		// the schema version. Preserve their semantics while requiring the field
+		// from every document that carries it.
+		expected.RetainedArtifacts = nil
 	}
 	return requireSemanticMatch("preflight", result, expected)
 }
@@ -563,6 +582,7 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		SchemaVersion:        preflight.SchemaVersion,
 		OK:                   true,
 		StateDir:             config.StateDir,
+		RetainedArtifacts:    map[string]string{},
 		ArtifactDigests:      map[string]string{},
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
@@ -687,6 +707,7 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		return result, err
 	}
 	result.ArtifactDigests["compatibility-manifest.json"] = compatibilityDigest
+	result.RetainedArtifacts = preflight.RetainedArtifacts(config.StateDir, config.SnapshotManifestPath, result.ArtifactDigests)
 	return result, nil
 }
 

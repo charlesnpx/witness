@@ -34,6 +34,12 @@ import (
 const (
 	verificationPlanMissingPreflight = "verification_plan_missing_preflight"
 	verificationPlanInvalidPreflight = "verification_plan_invalid_preflight"
+
+	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
+	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
+	assembleStateDirIntegrationBundle     = "integration-bundle.json"
+	assembleStateDirSelectedContract      = "selected-contract.json"
+	assembleStateDirPreflightResult       = "preflight.json"
 )
 
 var witnessCommands = map[string]map[string]bool{
@@ -498,6 +504,13 @@ func runVerificationAssemble(args []string) error {
 	if *planPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble requires -plan.")
 	}
+	missingStateDirDefaults := applyVerificationAssembleStateDirDefaults(
+		*stateDir,
+		compatibilityPath,
+		capabilitiesPath,
+		integrationBundlePath,
+		&selectedContractPaths,
+	)
 	protected := []protectedInput{
 		{role: "plan", path: *planPath},
 		{role: "base-manifest", path: *baseManifestPath},
@@ -582,6 +595,7 @@ func runVerificationAssemble(args []string) error {
 		ReceiptHMACKeyFile: *receiptHMACKeyFile,
 	})
 	if err != nil {
+		addStateDirDefaultPathDetails(err, missingStateDirDefaults)
 		if result != nil {
 			if writeErr := writeCanonical(*out, result.Manifest); writeErr != nil {
 				return writeErr
@@ -590,6 +604,134 @@ func runVerificationAssemble(args []string) error {
 		return err
 	}
 	return writeCanonical(*out, verificationAssembleOutput(result))
+}
+
+func applyVerificationAssembleStateDirDefaults(
+	stateDir string,
+	compatibilityPath *string,
+	capabilitiesPath *string,
+	integrationBundlePath *string,
+	selectedContractPaths *repeatedStrings,
+) map[string]string {
+	if stateDir == "" {
+		return nil
+	}
+	retainedArtifacts, hasRetainedArtifacts := stateDirPreflightRetainedArtifacts(stateDir)
+	missing := map[string]string{}
+	for _, item := range []struct {
+		ref      string
+		relative string
+		path     *string
+	}{
+		{ref: "compatibility_manifest", relative: assembleStateDirCompatibilityManifest, path: compatibilityPath},
+		{ref: "relay_capabilities", relative: assembleStateDirRelayCapabilities, path: capabilitiesPath},
+		{ref: "integration_bundle", relative: assembleStateDirIntegrationBundle, path: integrationBundlePath},
+	} {
+		if *item.path != "" {
+			continue
+		}
+		relativePath := item.relative
+		if hasRetainedArtifacts {
+			relativePath = retainedArtifacts[item.ref]
+		}
+		candidate, exists := stateDirRetainedArtifactPath(stateDir, relativePath)
+		if exists {
+			*item.path = candidate
+			continue
+		}
+		missing[item.ref] = candidate
+	}
+	if len(*selectedContractPaths) == 0 {
+		candidate, exists := stateDirRetainedArtifactPath(stateDir, assembleStateDirSelectedContract)
+		if exists {
+			*selectedContractPaths = append(*selectedContractPaths, candidate)
+		} else {
+			missing["selected_contracts"] = candidate
+		}
+	}
+	return missing
+}
+
+func stateDirPreflightRetainedArtifacts(stateDir string) (map[string]string, bool) {
+	data, err := os.ReadFile(filepath.Join(stateDir, assembleStateDirPreflightResult))
+	if err != nil {
+		return nil, false
+	}
+	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return nil, false
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, false
+	}
+	if _, present := document["retained_artifacts"]; !present {
+		return nil, false
+	}
+	return result.RetainedArtifacts, true
+}
+
+func stateDirRetainedArtifactPath(stateDir string, relativePath string) (string, bool) {
+	if !stateDirContainedRelativePath(relativePath) {
+		return relativePath, false
+	}
+	candidate := filepath.Join(stateDir, relativePath)
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return candidate, false
+	}
+	resolvedStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		return candidate, false
+	}
+	relative, err := filepath.Rel(resolvedStateDir, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return candidate, false
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return candidate, false
+	}
+	return candidate, true
+}
+
+// stateDirContainedRelativePath reports whether a retained-artifact path is a
+// clean relative path that stays inside the state directory. Absolute paths
+// and any path that escapes upward (a leading ".." component after cleaning)
+// are rejected, and stateDirRetainedArtifactPath additionally resolves
+// symlinks and requires the resolved target to be a regular file inside the
+// resolved state directory. This is accident prevention against stale or
+// malformed inventories, not a security boundary against a local attacker
+// racing filesystem state between validation and open.
+func stateDirContainedRelativePath(relativePath string) bool {
+	if relativePath == "" || filepath.IsAbs(relativePath) {
+		return false
+	}
+	cleaned := filepath.Clean(relativePath)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+func addStateDirDefaultPathDetails(err error, missing map[string]string) {
+	if len(missing) == 0 {
+		return
+	}
+	var validation *planning.ValidationError
+	if !errors.As(err, &validation) {
+		return
+	}
+	for index := range validation.Diagnostics {
+		diagnostic := &validation.Diagnostics[index]
+		if diagnostic.Code != planning.CodeMissingEvidenceRef || diagnostic.Details == nil {
+			continue
+		}
+		ref, _ := diagnostic.Details["ref"].(string)
+		if candidate, ok := missing[ref]; ok {
+			diagnostic.Details["state_dir_default_path"] = candidate
+		}
+	}
 }
 
 func verificationAssembleOutput(result *planning.AssembleResult) any {

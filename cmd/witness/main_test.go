@@ -711,6 +711,199 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 	}
 }
 
+func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	compatibility, capabilities, bundle, selectedContract := writeCLIStateDirAssembleArtifacts(t, stateDir)
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	batchPath := filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json")
+	explicitOut := filepath.Join(dir, "manifest-explicit.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", batchPath,
+		"-compatibility-manifest", compatibility,
+		"-relay-capabilities", capabilities,
+		"-integration-bundle", bundle,
+		"-selected-contract", selectedContract,
+		"-out", explicitOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with explicit inputs: %v", err)
+	}
+	defaultedOut := filepath.Join(dir, "manifest-defaulted.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", batchPath,
+		"-state-dir", stateDir,
+		"-out", defaultedOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with state-dir defaults: %v", err)
+	}
+	explicitBytes, err := os.ReadFile(explicitOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultedBytes, err := os.ReadFile(defaultedOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(defaultedBytes, explicitBytes) {
+		t.Fatalf("defaulted assemble output differs from explicit input output:\ndefaulted: %s\nexplicit: %s", defaultedBytes, explicitBytes)
+	}
+}
+
+func TestVerificationAssembleStateDirDefaultsUseRetainedPreflightInventory(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	staleCompatibility, _, _, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
+	if err := writeCanonical(staleCompatibility, map[string]any{"not": "the retained compatibility manifest"}); err != nil {
+		t.Fatal(err)
+	}
+	retainedDir := filepath.Join(stateDir, "retained")
+	if err := os.MkdirAll(retainedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	capabilities := filepath.Join(retainedDir, "relay-capabilities-retained.json")
+	if err := writeCanonical(capabilities, map[string]any{"name": filepath.Base(capabilities)}); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(retainedDir, "integration-bundle-retained.json")
+	if err := writeCanonical(bundle, map[string]any{"name": filepath.Base(bundle)}); err != nil {
+		t.Fatal(err)
+	}
+	compatibility := writeCLICompatibilityArtifact(t, retainedDir, "compatibility-manifest-retained.json", filepath.Base(capabilities), filepath.Base(bundle))
+	preflightPath := writeCLIPreflightResult(t, stateDir, assembleStateDirPreflightResult, stateDir, compatibility, capabilities, bundle)
+	preflightData, err := os.ReadFile(preflightPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResult, err := strictjson.DecodeBytes[preflight.Result](preflightData, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResult.RetainedArtifacts = map[string]string{
+		"compatibility_manifest": filepath.ToSlash(filepath.Join("retained", filepath.Base(compatibility))),
+		"relay_capabilities":     filepath.ToSlash(filepath.Join("retained", filepath.Base(capabilities))),
+		"integration_bundle":     filepath.ToSlash(filepath.Join("retained", filepath.Base(bundle))),
+	}
+	if err := writeCanonical(preflightPath, preflightResult); err != nil {
+		t.Fatal(err)
+	}
+
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	manifestOut := filepath.Join(dir, "manifest.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json"),
+		"-state-dir", stateDir,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with retained preflight inventory: %v", err)
+	}
+	manifestData, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](manifestData, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := manifest.CompatibilityManifest.ID, artifactIDFromPath(compatibility); got != want {
+		t.Fatalf("compatibility manifest ref = %q, want retained inventory %q", got, want)
+	}
+}
+
+func TestVerificationAssembleExplicitInputOverridesStateDirDefault(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	defaultCompatibility, capabilities, bundle, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
+	overrideCompatibility := writeCLICompatibilityArtifact(t, dir, "compatibility-override.json", filepath.Base(capabilities), filepath.Base(bundle))
+	if err := writeCanonical(defaultCompatibility, map[string]any{"not": "a compatibility manifest"}); err != nil {
+		t.Fatal(err)
+	}
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, overrideCompatibility, capabilities, bundle)
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	manifestOut := filepath.Join(dir, "manifest.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json"),
+		"-state-dir", stateDir,
+		"-compatibility-manifest", overrideCompatibility,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with compatibility override: %v", err)
+	}
+	data, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := manifest.CompatibilityManifest.ID, artifactIDFromPath(overrideCompatibility); got != want {
+		t.Fatalf("compatibility manifest ref = %q, want explicit override %q", got, want)
+	}
+}
+
 func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
@@ -2636,6 +2829,45 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 	return path
 }
 
+func writeCLIStateDirAssembleArtifacts(t *testing.T, stateDir string) (string, string, string, string) {
+	t.Helper()
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	capabilitiesPath := filepath.Join(stateDir, assembleStateDirRelayCapabilities)
+	if err := writeCanonical(capabilitiesPath, map[string]any{"name": assembleStateDirRelayCapabilities}); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(stateDir, assembleStateDirIntegrationBundle)
+	if err := writeCanonical(bundlePath, map[string]any{"name": assembleStateDirIntegrationBundle}); err != nil {
+		t.Fatal(err)
+	}
+	compatibilityPath := writeCLICompatibilityArtifact(t, stateDir, assembleStateDirCompatibilityManifest, filepath.Base(capabilitiesPath), filepath.Base(bundlePath))
+	selectedContractPath := writeCLISelectedContractArtifact(t, stateDir, assembleStateDirSelectedContract)
+	return compatibilityPath, capabilitiesPath, bundlePath, selectedContractPath
+}
+
+func writeCLICompatibilityArtifact(t *testing.T, dir string, name string, capabilitiesName string, bundleName string) string {
+	t.Helper()
+	compatibility := validCLICompatibility(t, "compatibility.json")
+	compatibility.CapabilitiesDigest = cliWrittenCanonicalDigest(t, map[string]any{"name": capabilitiesName})
+	compatibility.IntegrationBundleDigest = cliSemanticDigest(t, map[string]any{"name": bundleName})
+	compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := writeCanonical(path, map[string]any{
+		"schema_version": "witness-retained-artifact-v1",
+		"digest_profile": digest.Profile,
+		"payload_digest": compatibilityDigest,
+		"payload":        compatibility,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func writeCLIReviewedArtifact(t *testing.T, dir string) string {
 	t.Helper()
 	path := filepath.Join(dir, "artifact.txt")
@@ -2785,4 +3017,64 @@ func writeCLISelectedContractArtifact(t *testing.T, dir string, name string) str
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestStateDirRetainedArtifactPathRejectsEscapingPaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, malicious := range []string{
+		"../outside.json",
+		"../../outside.json",
+		"nested/../../outside.json",
+		"/etc/passwd",
+		"",
+	} {
+		if _, ok := stateDirRetainedArtifactPath(dir, malicious); ok {
+			t.Fatalf("retained-artifact path %q escaped the state directory", malicious)
+		}
+	}
+	if !stateDirContainedRelativePath("source-snapshot/manifest.json") {
+		t.Fatal("legitimate nested relative path rejected")
+	}
+	if !stateDirContainedRelativePath("compatibility-manifest.json") {
+		t.Fatal("legitimate flat relative path rejected")
+	}
+}
+
+func TestStateDirRetainedArtifactPathRejectsSymlinkEscapes(t *testing.T) {
+	stateDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.json")
+	if err := os.WriteFile(outsideFile, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(stateDir, "escape.json")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "escape.json"); ok {
+		t.Fatal("symlink to a file outside the state directory was accepted")
+	}
+
+	linkedDir := filepath.Join(stateDir, "linked-dir")
+	if err := os.Symlink(outsideDir, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "linked-dir/outside.json"); ok {
+		t.Fatal("symlinked parent escaping the state directory was accepted")
+	}
+
+	insideFile := filepath.Join(stateDir, "inside.json")
+	if err := os.WriteFile(insideFile, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	insideLink := filepath.Join(stateDir, "inside-link.json")
+	if err := os.Symlink(insideFile, insideLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "inside-link.json"); !ok {
+		t.Fatal("symlink resolving inside the state directory was rejected")
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "inside.json"); !ok {
+		t.Fatal("plain regular file inside the state directory was rejected")
+	}
 }

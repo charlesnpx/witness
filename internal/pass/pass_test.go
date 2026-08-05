@@ -570,6 +570,63 @@ func TestValidatePreflightOutputProjectsExtraCompileReportDigest(t *testing.T) {
 	}
 }
 
+func TestResumeAcceptsLegacyPreflightResultWithoutRetainedArtifacts(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	result := writeReadyPreflightForTest(t, state.Config)
+	result.SnapshotDigest = result.ArtifactDigests["source-snapshot-manifest"]
+
+	data, err := canonjson.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyResult, ok := document.(map[string]any)
+	if !ok {
+		t.Fatalf("preflight document type = %T, want object", document)
+	}
+	delete(legacyResult, "retained_artifacts")
+	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, legacyResult)
+
+	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
+		{role: "integration-bundle", path: state.Config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
+		{role: "source-snapshot-manifest", path: state.Config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, err := artifactRecordsForExistingFiles(preflightOutputSpecs(state.Config, &result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markStageComplete(state, StageRecord{
+		Name:    stagePreflight,
+		Status:  statusComplete,
+		Inputs:  inputs,
+		Outputs: outputs,
+		Details: map[string]any{
+			"relay_absent":   false,
+			"backend_strata": cloneStringMap(result.BackendStrata),
+		},
+	})
+	if err := setNextAction(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume legacy preflight state: %v", err)
+	}
+}
+
 func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {
 	options := newBeginOptions(t)
 	root := filepath.Dir(options.StateDir)
@@ -1832,6 +1889,7 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 	contractDigestDoc := preflight.ContractDigestDocument(result)
 	result.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, config.StateDir, "contract-digests.json", contractDigestDoc)
 	result.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(result))
+	result.RetainedArtifacts = preflight.RetainedArtifacts(config.StateDir, config.SnapshotManifestPath, result.ArtifactDigests)
 	writeCanonicalForTest(t, config.Outputs.PreflightPath, result)
 	return result
 }

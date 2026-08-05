@@ -789,6 +789,46 @@ func TestRunRecordsAuthUnknownStrata(t *testing.T) {
 	}
 }
 
+func TestRunReportsRetainedArtifactPaths(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	stateDir := filepath.Join(root, "state")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "app.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(context.Background(), Options{
+		RelayPath:             filepath.Join(root, "missing-convo-relay"),
+		IntegrationBundlePath: filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json"),
+		StateDir:              stateDir,
+		SourceDir:             sourceDir,
+		SnapshotDir:           filepath.Join(stateDir, "source-snapshot"),
+		AllowNonGitSource:     true,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
+	}
+	want := map[string]string{
+		"compatibility_manifest": "compatibility-manifest.json",
+		"relay_capabilities":     "relay-capabilities.json",
+		"integration_bundle":     "integration-bundle.json",
+		"source_manifest":        "source-snapshot/manifest.json",
+		"workspace_manifest":     "source-snapshot/manifest.json",
+	}
+	for role, relativePath := range want {
+		if got := result.RetainedArtifacts[role]; got != relativePath {
+			t.Fatalf("retained artifact %s = %q, want %q; all = %#v", role, got, relativePath, result.RetainedArtifacts)
+		}
+	}
+	for role, relativePath := range result.RetainedArtifacts {
+		if _, err := os.Stat(filepath.Join(stateDir, filepath.FromSlash(relativePath))); err != nil {
+			t.Fatalf("retained artifact %s at %s: %v", role, relativePath, err)
+		}
+	}
+}
+
 func TestRunRelayPresentRetainsFixtureCapabilitiesByteIdentical(t *testing.T) {
 	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	stateDir := t.TempDir()
