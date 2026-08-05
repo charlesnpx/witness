@@ -209,9 +209,28 @@ func runVerification(command string, args []string) error {
 }
 
 type roleOutputValidationResult struct {
-	OK               bool   `json:"ok"`
-	SchemaVersion    string `json:"schema_version"`
-	RoleOutputDigest string `json:"role_output_digest"`
+	OK                  bool   `json:"ok"`
+	SchemaVersion       string `json:"schema_version"`
+	RoleOutputDigest    string `json:"role_output_digest"`
+	PlaceholdersPresent bool   `json:"placeholders_present,omitempty"`
+	Warning             string `json:"warning,omitempty"`
+}
+
+// roleOutputHasInitPlaceholders reports whether the document still carries
+// the identity markers written by `witness role-output init`. Such a
+// document is structurally valid but is a template: its digests and
+// identities can never bind to a real frozen Charter or artifact, and the
+// planner will reject it in any real pass.
+func roleOutputHasInitPlaceholders(document contracts.RoleOutputDocument) bool {
+	for _, identity := range []map[string]any{document.SourceIdentity, document.ConsumerIdentity} {
+		if identity == nil {
+			continue
+		}
+		if kind, _ := identity["kind"].(string); kind == "placeholder" {
+			return true
+		}
+	}
+	return false
 }
 
 func runRoleOutput(command string, args []string) error {
@@ -289,11 +308,16 @@ func runRoleOutputValidate(args []string) error {
 	if err != nil {
 		return err
 	}
-	return diag.WriteCanonical(os.Stdout, roleOutputValidationResult{
+	result := roleOutputValidationResult{
 		OK:               true,
 		SchemaVersion:    document.SchemaVersion,
 		RoleOutputDigest: roleOutputDigest,
-	})
+	}
+	if roleOutputHasInitPlaceholders(document) {
+		result.PlaceholdersPresent = true
+		result.Warning = "document still carries role-output init placeholder identities; replace them before filing it in a pass."
+	}
+	return diag.WriteCanonical(os.Stdout, result)
 }
 
 func runVerificationPreflight(args []string) error {

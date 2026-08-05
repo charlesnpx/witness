@@ -112,6 +112,15 @@ func TestRoleOutputValidate(t *testing.T) {
 	if len(planned.Plan.Diagnostics) != 0 {
 		t.Fatalf("planner diagnostics for initialized role output = %#v", planned.Plan.Diagnostics)
 	}
+	if !roleOutputHasInitPlaceholders(initialized) {
+		t.Fatal("initialized template not detected as carrying placeholder identities")
+	}
+	edited := initialized
+	edited.SourceIdentity = map[string]any{"kind": "session", "id": "real-session"}
+	edited.ConsumerIdentity = map[string]any{"kind": "session", "id": "real-consumer"}
+	if roleOutputHasInitPlaceholders(edited) {
+		t.Fatal("edited document falsely flagged as placeholder template")
+	}
 
 	frozen := validCLIFrozenCharter(t)
 	valid := initialized
