@@ -90,6 +90,10 @@ func main() {
 }
 
 func route(args []string) error {
+	if len(args) == 1 && (isHelpRequest(args[0]) || args[0] == "help") {
+		writeTopLevelUsage()
+		return nil
+	}
 	if len(args) == 0 {
 		return diag.New(diag.CodeInvalidCommand, "missing witness command.")
 	}
@@ -103,6 +107,10 @@ func route(args []string) error {
 		return notImplemented(args[0])
 	}
 	if subcommands, ok := witnessCommands[args[0]]; ok {
+		if len(args) == 2 && isHelpRequest(args[1]) {
+			writeGroupUsage(args[0], subcommands)
+			return nil
+		}
 		if len(args) < 2 {
 			return diag.New(
 				diag.CodeInvalidCommand,
@@ -136,6 +144,50 @@ func route(args []string) error {
 	)
 }
 
+func isHelpRequest(arg string) bool {
+	return arg == "-h" || arg == "--help"
+}
+
+func writeTopLevelUsage() {
+	fmt.Fprintln(os.Stdout, "usage: witness <command> [flags]")
+	fmt.Fprintln(os.Stdout, "available commands:")
+	for _, group := range sortedCommandGroups() {
+		fmt.Fprintf(os.Stdout, "  %s <subcommand>\n", group)
+		for _, command := range sortedCommandNames(witnessCommands[group]) {
+			fmt.Fprintf(os.Stdout, "    %s\n", command)
+		}
+	}
+	for _, command := range sortedCommandNames(singleCommands) {
+		fmt.Fprintf(os.Stdout, "  %s [flags]\n", command)
+	}
+}
+
+func writeGroupUsage(group string, subcommands map[string]bool) {
+	fmt.Fprintf(os.Stdout, "usage: witness %s <subcommand> [flags]\n", group)
+	fmt.Fprintf(os.Stdout, "available %s subcommands:\n", group)
+	for _, command := range sortedCommandNames(subcommands) {
+		fmt.Fprintf(os.Stdout, "  %s\n", command)
+	}
+}
+
+func sortedCommandGroups() []string {
+	groups := make([]string, 0, len(witnessCommands))
+	for group := range witnessCommands {
+		groups = append(groups, group)
+	}
+	sort.Strings(groups)
+	return groups
+}
+
+func sortedCommandNames(commands map[string]bool) []string {
+	names := make([]string, 0, len(commands))
+	for name := range commands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func runVerification(command string, args []string) error {
 	switch command {
 	case "preflight":
@@ -150,7 +202,7 @@ func runVerification(command string, args []string) error {
 }
 
 func runVerificationPreflight(args []string) error {
-	flags := newFlagSet("witness verification preflight")
+	flags := newFlagSet("witness verification preflight", "Check prerequisites for a verification run.")
 	relayPath := flags.String("relay", "", "convo-relay executable path")
 	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
 	stateDir := flags.String("state-dir", "", "preflight state directory")
@@ -158,8 +210,8 @@ func runVerificationPreflight(args []string) error {
 	snapshotDir := flags.String("snapshot-dir", "", "frozen source snapshot directory")
 	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
 	out := flags.String("out", "", "preflight result output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -188,7 +240,7 @@ func runVerificationPreflight(args []string) error {
 }
 
 func runVerificationPlan(args []string) error {
-	flags := newFlagSet("witness verification plan")
+	flags := newFlagSet("witness verification plan", "Create a verification plan.")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	preflightPath := flags.String("preflight", "", "verification preflight result path")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
@@ -199,8 +251,8 @@ func runVerificationPlan(args []string) error {
 	out := flags.String("out", "", "verification plan output path")
 	var roleOutputPaths repeatedStrings
 	flags.Var(&roleOutputPaths, "role-output", "role-output JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -286,7 +338,7 @@ func runVerificationPlan(args []string) error {
 }
 
 func runVerificationAssemble(args []string) error {
-	flags := newFlagSet("witness verification assemble")
+	flags := newFlagSet("witness verification assemble", "Assemble verification evidence into a manifest.")
 	planPath := flags.String("plan", "", "verification plan path")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
 	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface verification")
@@ -318,8 +370,8 @@ func runVerificationAssemble(args []string) error {
 	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
 	flags.Var(&selectedContractPaths, "selected-contract", "selected relay contract artifact path; may be repeated")
 	flags.Var(&artifactPaths, "artifact", "artifact input path for relay verification runs; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -429,7 +481,7 @@ func verificationAssembleOutput(result *planning.AssembleResult) any {
 }
 
 func runAdjudicate(args []string) error {
-	flags := newFlagSet("witness adjudicate")
+	flags := newFlagSet("witness adjudicate", "Adjudicate verification findings.")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	manifestPath := flags.String("manifest", "", "verification manifest path")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
@@ -443,8 +495,8 @@ func runAdjudicate(args []string) error {
 	out := flags.String("out", "", "adjudication run-result output path")
 	var roleOutputPaths repeatedStrings
 	flags.Var(&roleOutputPaths, "role-output", "role-output JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -538,14 +590,14 @@ func runAdjudicate(args []string) error {
 }
 
 func runMetrics(args []string) error {
-	flags := newFlagSet("witness metrics")
+	flags := newFlagSet("witness metrics", "Generate Witness metrics.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	preflightPath := flags.String("preflight", "", "verification preflight result path")
 	out := flags.String("out", "", "metrics output path")
 	var runResultPaths repeatedStrings
 	flags.Var(&runResultPaths, "run-result", "adjudication run-result JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -676,13 +728,13 @@ func runLedger(command string, args []string) error {
 }
 
 func runLedgerShow(args []string) error {
-	flags := newFlagSet("witness ledger show")
+	flags := newFlagSet("witness ledger show", "Show ledger records.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	out := flags.String("out", "", "ledger show output path")
 	var kinds repeatedStrings
 	flags.Var(&kinds, "kind", "event kind filter; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -701,15 +753,15 @@ func runLedgerShow(args []string) error {
 }
 
 func runLedgerPromote(args []string) error {
-	flags := newFlagSet("witness ledger promote")
+	flags := newFlagSet("witness ledger promote", "Promote a missing-goal question.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	questionID := flags.String("question-id", "", "missing-goal question ID")
 	goalRef := flags.String("goal-ref", "", "owner-authorized Charter goal reference")
 	actor := flags.String("actor", "", "owner actor")
 	rationale := flags.String("rationale", "", "owner rationale")
 	out := flags.String("out", "", "ledger promotion output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -733,15 +785,15 @@ func runLedgerPromote(args []string) error {
 }
 
 func runLedgerAcceptUnverified(args []string) error {
-	flags := newFlagSet("witness ledger accept-unverified")
+	flags := newFlagSet("witness ledger accept-unverified", "Accept an unverified finding.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	findingID := flags.String("finding-id", "", "pending-verification finding ID")
 	pendingVerificationID := flags.String("pending-verification-id", "", "pending verification result ID")
 	actor := flags.String("actor", "", "owner actor")
 	rationale := flags.String("rationale", "", "owner rationale")
 	out := flags.String("out", "", "ledger accept-unverified output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -778,15 +830,15 @@ func runPolicy(command string, args []string) error {
 }
 
 func runPolicyShow(args []string) error {
-	flags := newFlagSet("witness policy show")
+	flags := newFlagSet("witness policy show", "Show the effective review policy.")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	out := flags.String("out", "", "policy show output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -807,7 +859,7 @@ func runPolicyShow(args []string) error {
 }
 
 func runPolicyReleaseCaps(args []string) error {
-	flags := newFlagSet("witness policy release-caps")
+	flags := newFlagSet("witness policy release-caps", "Record a policy cap release.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path")
 	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
@@ -823,8 +875,8 @@ func runPolicyReleaseCaps(args []string) error {
 	policyDigest := flags.String("policy-digest", "", "expected policy digest")
 	rulesDigest := flags.String("rules-digest", "", "expected rules digest")
 	out := flags.String("out", "", "cap-release output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -879,7 +931,7 @@ func runPolicyReleaseCaps(args []string) error {
 }
 
 func runPolicyCheckApplication(args []string) error {
-	flags := newFlagSet("witness policy check-application")
+	flags := newFlagSet("witness policy check-application", "Check whether a policy application is allowed.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
@@ -902,8 +954,8 @@ func runPolicyCheckApplication(args []string) error {
 	var measuredTest optionalIntFlag
 	flags.Var(&measuredProduction, "measured-production", "measured production line delta")
 	flags.Var(&measuredTest, "measured-test", "measured test line delta")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	setFlags := visitedFlagNames(flags)
 	if flags.NArg() != 0 {
@@ -1804,7 +1856,7 @@ func runPass(command string, args []string) error {
 }
 
 func runPassBegin(args []string) error {
-	flags := newFlagSet("witness pass begin")
+	flags := newFlagSet("witness pass begin", "Start a Witness pass.")
 	stateDir := flags.String("state-dir", "", "pass state directory")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
@@ -1827,8 +1879,8 @@ func runPassBegin(args []string) error {
 	var receiptPaths repeatedStrings
 	flags.Var(&roleOutputSpecs, "role-output", "role=path for caller-produced role output; may be repeated")
 	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1866,10 +1918,10 @@ func runPassBegin(args []string) error {
 }
 
 func runPassResume(args []string) error {
-	flags := newFlagSet("witness pass resume")
+	flags := newFlagSet("witness pass resume", "Resume a Witness pass.")
 	stateDir := flags.String("state-dir", "", "pass state directory")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1916,14 +1968,14 @@ func runCharter(command string, args []string) error {
 }
 
 func runCharterInit(args []string) error {
-	flags := newFlagSet("witness charter init")
+	flags := newFlagSet("witness charter init", "Create a charter skeleton.")
 	out := flags.String("out", "", "charter skeleton path")
 	template := flags.String("template", charter.TemplateMinimal, "charter template name")
 	actor := flags.String("actor", "owner", "owner actor")
 	eventID := flags.String("event-id", "initial-charter", "initial owner event ID")
 	summary := flags.String("summary", "Initial owner-authorized charter skeleton.", "initial owner event summary")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1947,12 +1999,12 @@ func runCharterInit(args []string) error {
 }
 
 func runCharterFreeze(args []string) error {
-	flags := newFlagSet("witness charter freeze")
+	flags := newFlagSet("witness charter freeze", "Freeze a charter and its amendments.")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
 	out := flags.String("out", "", "frozen charter output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1972,13 +2024,13 @@ func runCharterFreeze(args []string) error {
 }
 
 func runCharterAmend(args []string) error {
-	flags := newFlagSet("witness charter amend")
+	flags := newFlagSet("witness charter amend", "Apply an owner amendment to a charter.")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
 	eventPath := flags.String("event", "", "owner event JSON path")
 	out := flags.String("out", "", "frozen charter output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -2011,12 +2063,12 @@ func runCharterAmend(args []string) error {
 }
 
 func runCharterShow(args []string) error {
-	flags := newFlagSet("witness charter show")
+	flags := newFlagSet("witness charter show", "Show a normalized charter.")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
 	out := flags.String("out", "", "normalized charter output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -2357,10 +2409,34 @@ func finalSymlinkTarget(path string) (string, bool, error) {
 	return filepath.Clean(target), true, nil
 }
 
-func newFlagSet(name string) *flag.FlagSet {
+func newFlagSet(name string, description string) *flag.FlagSet {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	flags.Usage = func() {
+		fmt.Fprintf(os.Stdout, "usage: %s [flags]\n", name)
+		fmt.Fprintln(os.Stdout, description)
+		fmt.Fprintln(os.Stdout, "flags:")
+		output := flags.Output()
+		flags.SetOutput(os.Stdout)
+		flags.PrintDefaults()
+		flags.SetOutput(output)
+	}
 	return flags
+}
+
+func parseFlags(flags *flag.FlagSet, args []string) (bool, error) {
+	usage := flags.Usage
+	flags.Usage = func() {}
+	err := flags.Parse(args)
+	flags.Usage = usage
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			flags.Usage()
+			return true, nil
+		}
+		return false, invalidFlagError(err)
+	}
+	return false, nil
 }
 
 func invalidFlagError(err error) error {
