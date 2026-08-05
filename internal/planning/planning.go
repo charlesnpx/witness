@@ -250,6 +250,7 @@ func Run(options Options) (*Result, error) {
 		PreflightRelayCapabilitiesDigest: strings.TrimSpace(options.Preflight.RelayCapabilitiesDigest),
 		IntegrationBundleDigest:          strings.TrimSpace(options.Preflight.IntegrationBundleDigest),
 		BatchSizeMaximum:                 MaxBatchFindings,
+		Batches:                          make([]BatchPlan, 0),
 		ConsumerIdentity:                 consumer,
 	}
 
@@ -617,6 +618,7 @@ func manifestSkeleton(plan PlanDocument) ManifestSkeleton {
 		ChangeSurface:       plan.ChangeSurface,
 		ChangeSurfaceDigest: plan.ChangeSurfaceDigest,
 		BaselinePass:        plan.BaselinePass,
+		Batches:             make([]ManifestSkeletonBatch, 0, len(plan.Batches)),
 		ExcludedFindings:    append([]ExcludedFinding(nil), plan.ExcludedFindings...),
 		ConsumerIdentity:    cloneIdentity(plan.ConsumerIdentity),
 	}

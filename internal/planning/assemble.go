@@ -105,7 +105,8 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 		CompatibilityManifest: options.EvidenceRefs.CompatibilityManifest,
 		RelayCapabilities:     options.EvidenceRefs.RelayCapabilities,
 		IntegrationBundle:     options.EvidenceRefs.IntegrationBundle,
-		SelectedContracts:     append([]contracts.ArtifactRef(nil), options.EvidenceRefs.SelectedContracts...),
+		SelectedContracts:     append(make([]contracts.ArtifactRef, 0, len(options.EvidenceRefs.SelectedContracts)), options.EvidenceRefs.SelectedContracts...),
+		Batches:               make([]contracts.VerificationManifestBatch, 0, len(options.Plan.Batches)),
 		ExcludedFindings:      manifestExcludedFindings(options.Plan.ExcludedFindings),
 		ConsumerIdentity:      sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
 	}
