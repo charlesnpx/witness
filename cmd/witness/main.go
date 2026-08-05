@@ -34,6 +34,11 @@ import (
 const (
 	verificationPlanMissingPreflight = "verification_plan_missing_preflight"
 	verificationPlanInvalidPreflight = "verification_plan_invalid_preflight"
+
+	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
+	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
+	assembleStateDirIntegrationBundle     = "integration-bundle.json"
+	assembleStateDirSelectedContract      = "selected-contract.json"
 )
 
 var witnessCommands = map[string]map[string]bool{
@@ -498,6 +503,13 @@ func runVerificationAssemble(args []string) error {
 	if *planPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble requires -plan.")
 	}
+	missingStateDirDefaults := applyVerificationAssembleStateDirDefaults(
+		*stateDir,
+		compatibilityPath,
+		capabilitiesPath,
+		integrationBundlePath,
+		&selectedContractPaths,
+	)
 	protected := []protectedInput{
 		{role: "plan", path: *planPath},
 		{role: "base-manifest", path: *baseManifestPath},
@@ -582,6 +594,7 @@ func runVerificationAssemble(args []string) error {
 		ReceiptHMACKeyFile: *receiptHMACKeyFile,
 	})
 	if err != nil {
+		addStateDirDefaultPathDetails(err, missingStateDirDefaults)
 		if result != nil {
 			if writeErr := writeCanonical(*out, result.Manifest); writeErr != nil {
 				return writeErr
@@ -590,6 +603,76 @@ func runVerificationAssemble(args []string) error {
 		return err
 	}
 	return writeCanonical(*out, verificationAssembleOutput(result))
+}
+
+func applyVerificationAssembleStateDirDefaults(
+	stateDir string,
+	compatibilityPath *string,
+	capabilitiesPath *string,
+	integrationBundlePath *string,
+	selectedContractPaths *repeatedStrings,
+) map[string]string {
+	if stateDir == "" {
+		return nil
+	}
+	missing := map[string]string{}
+	for _, item := range []struct {
+		ref      string
+		relative string
+		path     *string
+	}{
+		{ref: "compatibility_manifest", relative: assembleStateDirCompatibilityManifest, path: compatibilityPath},
+		{ref: "relay_capabilities", relative: assembleStateDirRelayCapabilities, path: capabilitiesPath},
+		{ref: "integration_bundle", relative: assembleStateDirIntegrationBundle, path: integrationBundlePath},
+	} {
+		if *item.path != "" {
+			continue
+		}
+		candidate, exists := stateDirRetainedArtifactPath(stateDir, item.relative)
+		if exists {
+			*item.path = candidate
+			continue
+		}
+		missing[item.ref] = candidate
+	}
+	if len(*selectedContractPaths) == 0 {
+		candidate, exists := stateDirRetainedArtifactPath(stateDir, assembleStateDirSelectedContract)
+		if exists {
+			*selectedContractPaths = append(*selectedContractPaths, candidate)
+		} else {
+			missing["selected_contracts"] = candidate
+		}
+	}
+	return missing
+}
+
+func stateDirRetainedArtifactPath(stateDir string, relativePath string) (string, bool) {
+	candidate := filepath.Join(stateDir, relativePath)
+	info, err := os.Stat(candidate)
+	if err != nil {
+		return candidate, false
+	}
+	return candidate, !info.IsDir()
+}
+
+func addStateDirDefaultPathDetails(err error, missing map[string]string) {
+	if len(missing) == 0 {
+		return
+	}
+	var validation *planning.ValidationError
+	if !errors.As(err, &validation) {
+		return
+	}
+	for index := range validation.Diagnostics {
+		diagnostic := &validation.Diagnostics[index]
+		if diagnostic.Code != planning.CodeMissingEvidenceRef || diagnostic.Details == nil {
+			continue
+		}
+		ref, _ := diagnostic.Details["ref"].(string)
+		if candidate, ok := missing[ref]; ok {
+			diagnostic.Details["state_dir_default_path"] = candidate
+		}
+	}
 }
 
 func verificationAssembleOutput(result *planning.AssembleResult) any {

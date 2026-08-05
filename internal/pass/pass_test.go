@@ -1832,6 +1832,7 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 	contractDigestDoc := preflight.ContractDigestDocument(result)
 	result.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, config.StateDir, "contract-digests.json", contractDigestDoc)
 	result.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(result))
+	result.RetainedArtifacts = preflight.RetainedArtifacts(config.StateDir, config.SnapshotManifestPath, result.ArtifactDigests)
 	writeCanonicalForTest(t, config.Outputs.PreflightPath, result)
 	return result
 }

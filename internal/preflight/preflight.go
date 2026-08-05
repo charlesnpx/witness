@@ -72,6 +72,7 @@ type Result struct {
 	SchemaVersion        string            `json:"schema_version"`
 	OK                   bool              `json:"ok"`
 	StateDir             string            `json:"state_dir"`
+	RetainedArtifacts    map[string]string `json:"retained_artifacts"`
 	RelayVersion         string            `json:"relay_version,omitempty"`
 	ArtifactDigests      map[string]string `json:"artifact_digests"`
 	CompileReportDigests map[string]string `json:"compile_report_digests"`
@@ -166,6 +167,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	result := &Result{
 		SchemaVersion:        SchemaVersion,
 		StateDir:             options.StateDir,
+		RetainedArtifacts:    map[string]string{},
 		ArtifactDigests:      map[string]string{},
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
@@ -182,7 +184,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		if diagnostic, err := stateDirInsideSourceDiagnostic(options.SourceDir, options.StateDir); err != nil {
 			return result, err
 		} else if diagnostic.Code != "" {
-			return finish(result, []diag.Diagnostic{diagnostic})
+			return finish(result, options, []diag.Diagnostic{diagnostic})
 		}
 	}
 	if err := os.MkdirAll(options.StateDir, 0o755); err != nil {
@@ -226,7 +228,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 			return runRelayAbsentPreflight(result, options, err, diagnostics)
 		}
 		diagnostics = append(diagnostics, commandDiagnostic("capabilities", err))
-		return finish(result, diagnostics)
+		return finish(result, options, diagnostics)
 	}
 	result.RelayVersion = capabilities.ConvoRelayVersion
 	if retainedDigest, err := retain(options.StateDir, "relay-capabilities.json", capabilities); err != nil {
@@ -239,7 +241,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	recipes, err := client.RecipesList(ctx)
 	if err != nil {
 		diagnostics = append(diagnostics, commandDiagnostic("recipes list", err))
-		return finish(result, diagnostics)
+		return finish(result, options, diagnostics)
 	}
 	if retainedDigest, err := retain(options.StateDir, "recipes-list.json", recipes); err != nil {
 		return result, err
@@ -251,7 +253,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	backends, err := client.BackendStatus(ctx)
 	if err != nil {
 		diagnostics = append(diagnostics, commandDiagnostic("backends status", err))
-		return finish(result, diagnostics)
+		return finish(result, options, diagnostics)
 	}
 	if retainedDigest, err := retain(options.StateDir, "backend-status.json", backends); err != nil {
 		return result, err
@@ -330,7 +332,7 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		result.ArtifactDigests["compatibility-manifest.json"] = retainedDigest
 	}
 
-	return finish(result, diagnostics)
+	return finish(result, options, diagnostics)
 }
 
 func existingSnapshotDigest(path string, expectedDigest string) (string, error) {
@@ -474,7 +476,7 @@ func runRelayAbsentPreflight(result *Result, options Options, launchErr error, d
 	} else {
 		result.ArtifactDigests["compatibility-manifest.json"] = retainedDigest
 	}
-	return finish(result, diagnostics)
+	return finish(result, options, diagnostics)
 }
 
 func ValidateCapabilities(capabilities relayclient.Capabilities) []diag.Diagnostic {
@@ -1919,7 +1921,54 @@ func sortedBoolMapKeys(values map[string]bool) []string {
 	return keys
 }
 
-func finish(result *Result, diagnostics []diag.Diagnostic) (*Result, error) {
+// RetainedArtifacts returns the state-directory-relative artifact paths that
+// downstream Witness phases can reuse directly. A source snapshot keeps both
+// source and workspace identities in one manifest, so those roles intentionally
+// point to the same retained file.
+func RetainedArtifacts(stateDir string, snapshotManifestPath string, artifactDigests map[string]string) map[string]string {
+	artifacts := map[string]string{}
+	for _, item := range []struct {
+		role string
+		path string
+	}{
+		{role: "compatibility_manifest", path: "compatibility-manifest.json"},
+		{role: "relay_capabilities", path: "relay-capabilities.json"},
+		{role: "integration_bundle", path: "integration-bundle.json"},
+	} {
+		if strings.TrimSpace(artifactDigests[item.path]) != "" {
+			artifacts[item.role] = item.path
+		}
+	}
+	if strings.TrimSpace(artifactDigests["source-snapshot-manifest"]) == "" {
+		return artifacts
+	}
+	if relativePath, ok := stateDirRelativePath(stateDir, snapshotManifestPath); ok {
+		artifacts["source_manifest"] = relativePath
+		artifacts["workspace_manifest"] = relativePath
+	}
+	return artifacts
+}
+
+func stateDirRelativePath(stateDir string, path string) (string, bool) {
+	if strings.TrimSpace(stateDir) == "" || strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	relativePath, err := filepath.Rel(stateDir, path)
+	if err != nil {
+		return "", false
+	}
+	if relativePath == "." || relativePath == ".." || filepath.IsAbs(relativePath) || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(relativePath), true
+}
+
+func finish(result *Result, options Options, diagnostics []diag.Diagnostic) (*Result, error) {
+	snapshotManifestPath := options.SnapshotManifestPath
+	if snapshotManifestPath == "" && options.SnapshotDir != "" {
+		snapshotManifestPath = filepath.Join(options.SnapshotDir, "manifest.json")
+	}
+	result.RetainedArtifacts = RetainedArtifacts(options.StateDir, snapshotManifestPath, result.ArtifactDigests)
 	diag.Sort(diagnostics)
 	result.Diagnostics = diagnostics
 	result.OK = len(diagnostics) == 0

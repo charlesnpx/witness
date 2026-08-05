@@ -563,6 +563,7 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		SchemaVersion:        preflight.SchemaVersion,
 		OK:                   true,
 		StateDir:             config.StateDir,
+		RetainedArtifacts:    map[string]string{},
 		ArtifactDigests:      map[string]string{},
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
@@ -687,6 +688,7 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		return result, err
 	}
 	result.ArtifactDigests["compatibility-manifest.json"] = compatibilityDigest
+	result.RetainedArtifacts = preflight.RetainedArtifacts(config.StateDir, config.SnapshotManifestPath, result.ArtifactDigests)
 	return result, nil
 }
 

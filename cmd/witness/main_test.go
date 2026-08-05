@@ -711,6 +711,119 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 	}
 }
 
+func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	compatibility, capabilities, bundle, selectedContract := writeCLIStateDirAssembleArtifacts(t, stateDir)
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	batchPath := filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json")
+	explicitOut := filepath.Join(dir, "manifest-explicit.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", batchPath,
+		"-compatibility-manifest", compatibility,
+		"-relay-capabilities", capabilities,
+		"-integration-bundle", bundle,
+		"-selected-contract", selectedContract,
+		"-out", explicitOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with explicit inputs: %v", err)
+	}
+	defaultedOut := filepath.Join(dir, "manifest-defaulted.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", batchPath,
+		"-state-dir", stateDir,
+		"-out", defaultedOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with state-dir defaults: %v", err)
+	}
+	explicitBytes, err := os.ReadFile(explicitOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultedBytes, err := os.ReadFile(defaultedOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(defaultedBytes, explicitBytes) {
+		t.Fatalf("defaulted assemble output differs from explicit input output:\ndefaulted: %s\nexplicit: %s", defaultedBytes, explicitBytes)
+	}
+}
+
+func TestVerificationAssembleExplicitInputOverridesStateDirDefault(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	defaultCompatibility, capabilities, bundle, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
+	overrideCompatibility := writeCLICompatibilityArtifact(t, dir, "compatibility-override.json", filepath.Base(capabilities), filepath.Base(bundle))
+	if err := writeCanonical(defaultCompatibility, map[string]any{"not": "a compatibility manifest"}); err != nil {
+		t.Fatal(err)
+	}
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, overrideCompatibility, capabilities, bundle)
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	manifestOut := filepath.Join(dir, "manifest.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json"),
+		"-state-dir", stateDir,
+		"-compatibility-manifest", overrideCompatibility,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with compatibility override: %v", err)
+	}
+	data, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := manifest.CompatibilityManifest.ID, artifactIDFromPath(overrideCompatibility); got != want {
+		t.Fatalf("compatibility manifest ref = %q, want explicit override %q", got, want)
+	}
+}
+
 func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
@@ -2631,6 +2744,45 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 		}
 	}
 	if err := writeCanonical(path, value); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeCLIStateDirAssembleArtifacts(t *testing.T, stateDir string) (string, string, string, string) {
+	t.Helper()
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	capabilitiesPath := filepath.Join(stateDir, assembleStateDirRelayCapabilities)
+	if err := writeCanonical(capabilitiesPath, map[string]any{"name": assembleStateDirRelayCapabilities}); err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(stateDir, assembleStateDirIntegrationBundle)
+	if err := writeCanonical(bundlePath, map[string]any{"name": assembleStateDirIntegrationBundle}); err != nil {
+		t.Fatal(err)
+	}
+	compatibilityPath := writeCLICompatibilityArtifact(t, stateDir, assembleStateDirCompatibilityManifest, filepath.Base(capabilitiesPath), filepath.Base(bundlePath))
+	selectedContractPath := writeCLISelectedContractArtifact(t, stateDir, assembleStateDirSelectedContract)
+	return compatibilityPath, capabilitiesPath, bundlePath, selectedContractPath
+}
+
+func writeCLICompatibilityArtifact(t *testing.T, dir string, name string, capabilitiesName string, bundleName string) string {
+	t.Helper()
+	compatibility := validCLICompatibility(t, "compatibility.json")
+	compatibility.CapabilitiesDigest = cliWrittenCanonicalDigest(t, map[string]any{"name": capabilitiesName})
+	compatibility.IntegrationBundleDigest = cliSemanticDigest(t, map[string]any{"name": bundleName})
+	compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := writeCanonical(path, map[string]any{
+		"schema_version": "witness-retained-artifact-v1",
+		"digest_profile": digest.Profile,
+		"payload_digest": compatibilityDigest,
+		"payload":        compatibility,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return path
