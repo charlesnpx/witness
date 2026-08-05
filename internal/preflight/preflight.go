@@ -999,6 +999,14 @@ func ResolveRelayReportedContractDigests(contractDigests map[string]string, inte
 		)
 	}
 	if reportedDigest == "" && planDigest != "" {
+		if !digest.WellFormed(planDigest) {
+			return nil, diag.New(
+				CodeContractDigestMalformed,
+				"integration_contract_digest must be a well-formed sha256 digest.",
+				diag.WithDetail("contract_id", integrationContractID),
+				diag.WithDetail("value", planDigest),
+			)
+		}
 		resolved[integrationContractID] = planDigest
 	}
 	return resolved, nil
@@ -1062,6 +1070,19 @@ func DecodeCompileReportContractDigests(reportID string, rawDigests any) (map[st
 				diag.WithDetail("contract_id", contractID),
 				diag.WithDetail("contract_key", contractID),
 				diag.WithDetail("value_type", compileReportDigestValueType(rawDigest)),
+			)
+		}
+		if !digest.WellFormed(contractDigest) {
+			return nil, diag.New(
+				CodeContractDigestMalformed,
+				"compile report contract_digests values must be well-formed sha256 digests.",
+				diag.WithPath("/contract_digests/"+jsonPointerEscape(contractID)),
+				diag.WithDetail("report", reportID),
+				diag.WithDetail("report_id", reportID),
+				diag.WithDetail("recipe_id", reportID),
+				diag.WithDetail("contract_id", contractID),
+				diag.WithDetail("contract_key", contractID),
+				diag.WithDetail("value", contractDigest),
 			)
 		}
 		decoded[contractID] = contractDigest

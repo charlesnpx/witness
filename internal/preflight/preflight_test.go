@@ -343,6 +343,34 @@ func TestDecodeCompileReportContractDigestsRejectsEmptyDigest(t *testing.T) {
 	}
 }
 
+func TestDecodeCompileReportContractDigestsRejectsMalformedDigestSyntax(t *testing.T) {
+	reportID := RequiredRecipes[0].ID
+	contractID := RequiredRecipes[0].ContractID
+	_, err := DecodeCompileReportContractDigests(reportID, map[string]any{contractID: "not-a-digest"})
+	if err == nil {
+		t.Fatal("shared compile-report digest decoder accepted a syntactically invalid digest")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeContractDigestMalformed {
+		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeContractDigestMalformed)
+	}
+	if diagnostic.Details["contract_id"] != contractID || diagnostic.Details["value"] != "not-a-digest" {
+		t.Fatalf("diagnostic details = %#v", diagnostic.Details)
+	}
+}
+
+func TestResolveRelayReportedContractDigestsRejectsMalformedPlanDigest(t *testing.T) {
+	contractID := RequiredRecipes[0].ContractID
+	_, err := ResolveRelayReportedContractDigests(map[string]string{}, contractID, "not-a-digest")
+	if err == nil {
+		t.Fatal("resolver accepted a syntactically invalid plan digest")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeContractDigestMalformed {
+		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeContractDigestMalformed)
+	}
+}
+
 func TestSelectedContractDigestsRejectsDisagreeingCompileReportAndPlanDigest(t *testing.T) {
 	target := RequiredRecipes[0]
 	reportedDigest := digest.RawBytes([]byte("relay-reported:" + target.ContractID))
