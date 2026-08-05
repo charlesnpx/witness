@@ -39,6 +39,7 @@ const (
 	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
 	assembleStateDirIntegrationBundle     = "integration-bundle.json"
 	assembleStateDirSelectedContract      = "selected-contract.json"
+	assembleStateDirPreflightResult       = "preflight.json"
 )
 
 var witnessCommands = map[string]map[string]bool{
@@ -615,6 +616,7 @@ func applyVerificationAssembleStateDirDefaults(
 	if stateDir == "" {
 		return nil
 	}
+	retainedArtifacts, hasRetainedArtifacts := stateDirPreflightRetainedArtifacts(stateDir)
 	missing := map[string]string{}
 	for _, item := range []struct {
 		ref      string
@@ -628,7 +630,11 @@ func applyVerificationAssembleStateDirDefaults(
 		if *item.path != "" {
 			continue
 		}
-		candidate, exists := stateDirRetainedArtifactPath(stateDir, item.relative)
+		relativePath := item.relative
+		if hasRetainedArtifacts {
+			relativePath = retainedArtifacts[item.ref]
+		}
+		candidate, exists := stateDirRetainedArtifactPath(stateDir, relativePath)
 		if exists {
 			*item.path = candidate
 			continue
@@ -644,6 +650,25 @@ func applyVerificationAssembleStateDirDefaults(
 		}
 	}
 	return missing
+}
+
+func stateDirPreflightRetainedArtifacts(stateDir string) (map[string]string, bool) {
+	data, err := os.ReadFile(filepath.Join(stateDir, assembleStateDirPreflightResult))
+	if err != nil {
+		return nil, false
+	}
+	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return nil, false
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, false
+	}
+	if _, present := document["retained_artifacts"]; !present {
+		return nil, false
+	}
+	return result.RetainedArtifacts, true
 }
 
 func stateDirRetainedArtifactPath(stateDir string, relativePath string) (string, bool) {

@@ -772,6 +772,86 @@ func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
 	}
 }
 
+func TestVerificationAssembleStateDirDefaultsUseRetainedPreflightInventory(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	staleCompatibility, _, _, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
+	if err := writeCanonical(staleCompatibility, map[string]any{"not": "the retained compatibility manifest"}); err != nil {
+		t.Fatal(err)
+	}
+	retainedDir := filepath.Join(stateDir, "retained")
+	if err := os.MkdirAll(retainedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	capabilities := filepath.Join(retainedDir, "relay-capabilities-retained.json")
+	if err := writeCanonical(capabilities, map[string]any{"name": filepath.Base(capabilities)}); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(retainedDir, "integration-bundle-retained.json")
+	if err := writeCanonical(bundle, map[string]any{"name": filepath.Base(bundle)}); err != nil {
+		t.Fatal(err)
+	}
+	compatibility := writeCLICompatibilityArtifact(t, retainedDir, "compatibility-manifest-retained.json", filepath.Base(capabilities), filepath.Base(bundle))
+	preflightPath := writeCLIPreflightResult(t, stateDir, assembleStateDirPreflightResult, stateDir, compatibility, capabilities, bundle)
+	preflightData, err := os.ReadFile(preflightPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResult, err := strictjson.DecodeBytes[preflight.Result](preflightData, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResult.RetainedArtifacts = map[string]string{
+		"compatibility_manifest": filepath.ToSlash(filepath.Join("retained", filepath.Base(compatibility))),
+		"relay_capabilities":     filepath.ToSlash(filepath.Join("retained", filepath.Base(capabilities))),
+		"integration_bundle":     filepath.ToSlash(filepath.Join("retained", filepath.Base(bundle))),
+	}
+	if err := writeCanonical(preflightPath, preflightResult); err != nil {
+		t.Fatal(err)
+	}
+
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	manifestOut := filepath.Join(dir, "manifest.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json"),
+		"-state-dir", stateDir,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with retained preflight inventory: %v", err)
+	}
+	manifestData, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](manifestData, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := manifest.CompatibilityManifest.ID, artifactIDFromPath(compatibility); got != want {
+		t.Fatalf("compatibility manifest ref = %q, want retained inventory %q", got, want)
+	}
+}
+
 func TestVerificationAssembleExplicitInputOverridesStateDirDefault(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
