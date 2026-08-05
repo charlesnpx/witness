@@ -14,6 +14,7 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestPlanningBatchesDeterministicallyByRoleSeverityAndID(t *testing.T) {
@@ -456,7 +457,7 @@ func planningManifestFile(path string, mode string, content string) freeze.FileE
 	return freeze.FileEntry{
 		Path:   path,
 		Mode:   mode,
-		Size:   int64(len(content)),
+		Size:   strictjson.Int64(len(content)),
 		Digest: sum,
 		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
 	}

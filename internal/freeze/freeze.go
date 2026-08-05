@@ -15,6 +15,7 @@ import (
 	"github.com/charlesnpx/witness/internal/canonjson"
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (
@@ -72,11 +73,11 @@ type WorkspaceIdentity struct {
 }
 
 type FileEntry struct {
-	Path   string `json:"path"`
-	Mode   string `json:"mode"`
-	Size   int64  `json:"size"`
-	Digest string `json:"digest"`
-	Blob   string `json:"blob"`
+	Path   string           `json:"path"`
+	Mode   string           `json:"mode"`
+	Size   strictjson.Int64 `json:"size"`
+	Digest string           `json:"digest"`
+	Blob   string           `json:"blob"`
 }
 
 type sourceFile struct {
@@ -136,7 +137,7 @@ func DeriveManifest(ctx context.Context, options Options) (Result, error) {
 		entries = append(entries, FileEntry{
 			Path:   item.path,
 			Mode:   item.mode,
-			Size:   size,
+			Size:   strictjson.Int64(size),
 			Digest: sum,
 			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
 		})
@@ -223,7 +224,7 @@ func Create(ctx context.Context, options Options) (Result, error) {
 		entries = append(entries, FileEntry{
 			Path:   item.path,
 			Mode:   item.mode,
-			Size:   size,
+			Size:   strictjson.Int64(size),
 			Digest: sum,
 			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
 		})
