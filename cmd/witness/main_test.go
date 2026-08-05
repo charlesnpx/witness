@@ -3039,3 +3039,42 @@ func TestStateDirRetainedArtifactPathRejectsEscapingPaths(t *testing.T) {
 		t.Fatal("legitimate flat relative path rejected")
 	}
 }
+
+func TestStateDirRetainedArtifactPathRejectsSymlinkEscapes(t *testing.T) {
+	stateDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.json")
+	if err := os.WriteFile(outsideFile, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(stateDir, "escape.json")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "escape.json"); ok {
+		t.Fatal("symlink to a file outside the state directory was accepted")
+	}
+
+	linkedDir := filepath.Join(stateDir, "linked-dir")
+	if err := os.Symlink(outsideDir, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "linked-dir/outside.json"); ok {
+		t.Fatal("symlinked parent escaping the state directory was accepted")
+	}
+
+	insideFile := filepath.Join(stateDir, "inside.json")
+	if err := os.WriteFile(insideFile, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	insideLink := filepath.Join(stateDir, "inside-link.json")
+	if err := os.Symlink(insideFile, insideLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "inside-link.json"); !ok {
+		t.Fatal("symlink resolving inside the state directory was rejected")
+	}
+	if _, ok := stateDirRetainedArtifactPath(stateDir, "inside.json"); !ok {
+		t.Fatal("plain regular file inside the state directory was rejected")
+	}
+}

@@ -676,18 +676,33 @@ func stateDirRetainedArtifactPath(stateDir string, relativePath string) (string,
 		return relativePath, false
 	}
 	candidate := filepath.Join(stateDir, relativePath)
-	info, err := os.Stat(candidate)
+	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return candidate, false
 	}
-	return candidate, !info.IsDir()
+	resolvedStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		return candidate, false
+	}
+	relative, err := filepath.Rel(resolvedStateDir, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return candidate, false
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return candidate, false
+	}
+	return candidate, true
 }
 
 // stateDirContainedRelativePath reports whether a retained-artifact path is a
 // clean relative path that stays inside the state directory. Absolute paths
 // and any path that escapes upward (a leading ".." component after cleaning)
-// are rejected so an inventory value like "../../outside.json" can never make
-// assemble read outside the supplied state directory.
+// are rejected, and stateDirRetainedArtifactPath additionally resolves
+// symlinks and requires the resolved target to be a regular file inside the
+// resolved state directory. This is accident prevention against stale or
+// malformed inventories, not a security boundary against a local attacker
+// racing filesystem state between validation and open.
 func stateDirContainedRelativePath(relativePath string) bool {
 	if relativePath == "" || filepath.IsAbs(relativePath) {
 		return false
