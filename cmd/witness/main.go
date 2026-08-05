@@ -58,6 +58,10 @@ var witnessCommands = map[string]map[string]bool{
 		"release-caps":      true,
 		"check-application": true,
 	},
+	"role-output": {
+		"init":     true,
+		"validate": true,
+	},
 	"pass": {
 		"begin":  true,
 		"resume": true,
@@ -131,6 +135,9 @@ func route(args []string) error {
 			if args[0] == "policy" {
 				return runPolicy(args[1], args[2:])
 			}
+			if args[0] == "role-output" {
+				return runRoleOutput(args[1], args[2:])
+			}
 			if args[0] == "pass" {
 				return runPass(args[1], args[2:])
 			}
@@ -199,6 +206,94 @@ func runVerification(command string, args []string) error {
 	default:
 		return notImplemented("verification " + command)
 	}
+}
+
+type roleOutputValidationResult struct {
+	OK               bool   `json:"ok"`
+	SchemaVersion    string `json:"schema_version"`
+	RoleOutputDigest string `json:"role_output_digest"`
+}
+
+func runRoleOutput(command string, args []string) error {
+	switch command {
+	case "init":
+		return runRoleOutputInit(args)
+	case "validate":
+		return runRoleOutputValidate(args)
+	default:
+		return notImplemented("role-output " + command)
+	}
+}
+
+func runRoleOutputInit(args []string) error {
+	flags := newFlagSet("witness role-output init", "Create an empty role-output document.")
+	role := flags.String("role", "", "role-output role: defect or economy")
+	out := flags.String("out", "", "role-output output path")
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *role != contracts.RoleDefect && *role != contracts.RoleEconomy {
+		return diag.New(
+			diag.CodeInvalidCommand,
+			"witness role-output init requires -role defect or economy.",
+			diag.WithDetail("role", *role),
+		)
+	}
+	if *out == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness role-output init requires -out.")
+	}
+	document := contracts.RoleOutputDocument{
+		SchemaVersion:  contracts.RoleOutputV3,
+		Role:           *role,
+		CharterHash:    digest.RawBytes(nil),
+		ArtifactDigest: digest.RawBytes(nil),
+		SourceIdentity: map[string]any{
+			"kind": "placeholder",
+			"id":   "replace-before-use",
+		},
+		ConsumerIdentity: map[string]any{
+			"kind": "placeholder",
+			"id":   "replace-before-use",
+		},
+		Findings: make([]contracts.Finding, 0),
+	}
+	if err := contracts.RequireValidRoleOutput(document, nil); err != nil {
+		return err
+	}
+	return writeCanonical(*out, document)
+}
+
+func runRoleOutputValidate(args []string) error {
+	flags := newFlagSet("witness role-output validate", "Validate a role-output document.")
+	input := flags.String("input", "", "role-output JSON path")
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *input == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness role-output validate requires -input.")
+	}
+	document, err := readRoleOutputFile(*input)
+	if err != nil {
+		return err
+	}
+	if err := contracts.RequireValidRoleOutput(document, nil); err != nil {
+		return err
+	}
+	roleOutputDigest, err := contracts.RoleOutputDigest(document)
+	if err != nil {
+		return err
+	}
+	return diag.WriteCanonical(os.Stdout, roleOutputValidationResult{
+		OK:               true,
+		SchemaVersion:    document.SchemaVersion,
+		RoleOutputDigest: roleOutputDigest,
+	})
 }
 
 func runVerificationPreflight(args []string) error {
