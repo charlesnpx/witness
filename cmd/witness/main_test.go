@@ -3018,3 +3018,24 @@ func writeCLISelectedContractArtifact(t *testing.T, dir string, name string) str
 	}
 	return path
 }
+
+func TestStateDirRetainedArtifactPathRejectsEscapingPaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, malicious := range []string{
+		"../outside.json",
+		"../../outside.json",
+		"nested/../../outside.json",
+		"/etc/passwd",
+		"",
+	} {
+		if _, ok := stateDirRetainedArtifactPath(dir, malicious); ok {
+			t.Fatalf("retained-artifact path %q escaped the state directory", malicious)
+		}
+	}
+	if !stateDirContainedRelativePath("source-snapshot/manifest.json") {
+		t.Fatal("legitimate nested relative path rejected")
+	}
+	if !stateDirContainedRelativePath("compatibility-manifest.json") {
+		t.Fatal("legitimate flat relative path rejected")
+	}
+}

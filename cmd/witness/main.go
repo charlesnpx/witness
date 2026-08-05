@@ -672,12 +672,31 @@ func stateDirPreflightRetainedArtifacts(stateDir string) (map[string]string, boo
 }
 
 func stateDirRetainedArtifactPath(stateDir string, relativePath string) (string, bool) {
+	if !stateDirContainedRelativePath(relativePath) {
+		return relativePath, false
+	}
 	candidate := filepath.Join(stateDir, relativePath)
 	info, err := os.Stat(candidate)
 	if err != nil {
 		return candidate, false
 	}
 	return candidate, !info.IsDir()
+}
+
+// stateDirContainedRelativePath reports whether a retained-artifact path is a
+// clean relative path that stays inside the state directory. Absolute paths
+// and any path that escapes upward (a leading ".." component after cleaning)
+// are rejected so an inventory value like "../../outside.json" can never make
+// assemble read outside the supplied state directory.
+func stateDirContainedRelativePath(relativePath string) bool {
+	if relativePath == "" || filepath.IsAbs(relativePath) {
+		return false
+	}
+	cleaned := filepath.Clean(relativePath)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 func addStateDirDefaultPathDetails(err error, missing map[string]string) {
