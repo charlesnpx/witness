@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestAppendReplayRoundTripAndFilteredShow(t *testing.T) {
@@ -379,4 +381,23 @@ func validAcceptUnverifiedEvent() AcceptUnverifiedEvent {
 
 func td(value string) string {
 	return digest.RawBytes([]byte(value))
+}
+
+func TestQuestionEventDecodeHonorsCallerLimitAboveDefault(t *testing.T) {
+	event := validQuestionEvent()
+	event.Statement = strings.Repeat("q", int(strictjson.DefaultMaxBytes)+1024)
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if int64(len(encoded)) <= strictjson.DefaultMaxBytes {
+		t.Fatalf("test payload must exceed DefaultMaxBytes, got %d", len(encoded))
+	}
+	decoded, err := strictjson.DecodeBytes[QuestionEvent](encoded, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode with enlarged caller limit: %v", err)
+	}
+	if decoded.Statement != event.Statement {
+		t.Fatalf("statement round-trip mismatch")
+	}
 }

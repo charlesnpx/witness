@@ -230,7 +230,7 @@ type capReleaseRecordJSON struct {
 }
 
 func (event *AdjudicationRunEvent) UnmarshalJSON(data []byte) error {
-	decoded, err := strictjson.DecodeBytes[adjudicationRunEventJSON](data, strictjson.DefaultMaxBytes)
+	decoded, err := strictjson.DecodeBytes[adjudicationRunEventJSON](data, int64(len(data)))
 	if err != nil {
 		return err
 	}
@@ -255,7 +255,7 @@ func (event *AdjudicationRunEvent) UnmarshalJSON(data []byte) error {
 }
 
 func (event *QuestionEvent) UnmarshalJSON(data []byte) error {
-	decoded, err := strictjson.DecodeBytes[questionEventJSON](data, strictjson.DefaultMaxBytes)
+	decoded, err := strictjson.DecodeBytes[questionEventJSON](data, int64(len(data)))
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (event *QuestionEvent) UnmarshalJSON(data []byte) error {
 }
 
 func (event *MeasuredDeltaEvent) UnmarshalJSON(data []byte) error {
-	decoded, err := strictjson.DecodeBytes[measuredDeltaEventJSON](data, strictjson.DefaultMaxBytes)
+	decoded, err := strictjson.DecodeBytes[measuredDeltaEventJSON](data, int64(len(data)))
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func (event *MeasuredDeltaEvent) UnmarshalJSON(data []byte) error {
 }
 
 func (event *CapReleaseEvent) UnmarshalJSON(data []byte) error {
-	decoded, err := strictjson.DecodeBytes[capReleaseEventJSON](data, strictjson.DefaultMaxBytes)
+	decoded, err := strictjson.DecodeBytes[capReleaseEventJSON](data, int64(len(data)))
 	if err != nil {
 		return err
 	}

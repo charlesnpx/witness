@@ -133,7 +133,7 @@ type summaryJSON struct {
 }
 
 func (summary *Summary) UnmarshalJSON(data []byte) error {
-	decoded, err := strictjson.DecodeBytes[summaryJSON](data, strictjson.DefaultMaxBytes)
+	decoded, err := strictjson.DecodeBytes[summaryJSON](data, int64(len(data)))
 	if err != nil {
 		return err
 	}
