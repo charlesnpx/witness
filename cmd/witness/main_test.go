@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,87 @@ import (
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
+
+func TestRouteHelp(t *testing.T) {
+	tests := []struct {
+		name               string
+		args               []string
+		wantOutput         []string
+		wantDiagnosticCode string
+	}{
+		{
+			name: "leaf command",
+			args: []string{"verification", "plan", "--help"},
+			wantOutput: []string{
+				"usage: witness verification plan [flags]",
+				"-charter-freeze",
+			},
+		},
+		{
+			name: "top level",
+			args: []string{"--help"},
+			wantOutput: []string{
+				"available commands:",
+				"charter <subcommand>",
+				"verification <subcommand>",
+			},
+		},
+		{
+			name:               "bare witness remains invalid",
+			args:               []string{},
+			wantDiagnosticCode: diag.CodeInvalidCommand,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output, err := captureRouteStdout(t, test.args)
+			if test.wantDiagnosticCode != "" {
+				if err == nil {
+					t.Fatalf("route(%v) succeeded, want %s diagnostic", test.args, test.wantDiagnosticCode)
+				}
+				if got := diag.FromError(err).Code; got != test.wantDiagnosticCode {
+					t.Fatalf("diagnostic code = %s, want %s; err=%v", got, test.wantDiagnosticCode, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("route(%v): %v", test.args, err)
+			}
+			for _, want := range test.wantOutput {
+				if !strings.Contains(output, want) {
+					t.Fatalf("stdout = %q, want substring %q", output, want)
+				}
+			}
+		})
+	}
+}
+
+func captureRouteStdout(t *testing.T, args []string) (string, error) {
+	t.Helper()
+	originalStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+
+	routeErr := route(args)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = originalStdout
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(output), routeErr
+}
 
 func TestCharterCLIInitFreezeAmendShow(t *testing.T) {
 	dir := t.TempDir()
