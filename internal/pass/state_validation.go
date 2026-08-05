@@ -512,7 +512,7 @@ func validateFreezeManifestOutput(config Config, manifest freeze.Manifest) (stri
 		if err != nil {
 			return "", diag.Wrap(err, CodeStateInvalid, "snapshot manifest blob could not be read.", diag.WithDetail("path", blobPath))
 		}
-		if int64(len(blobBytes)) != entry.Size {
+		if int64(len(blobBytes)) != int64(entry.Size) {
 			return "", diag.New(CodeStateInvalid, "snapshot manifest blob size does not match file entry.", diag.WithDetail("path", entry.Path), diag.WithDetail("actual_size", len(blobBytes)), diag.WithDetail("expected_size", entry.Size))
 		}
 		if blobDigest := digest.RawBytes(blobBytes); blobDigest != entry.Digest {

@@ -1563,7 +1563,7 @@ func freezeFileEntryForTest(path string, mode string, content []byte) freeze.Fil
 	return freeze.FileEntry{
 		Path:   path,
 		Mode:   mode,
-		Size:   int64(len(content)),
+		Size:   strictjson.Int64(len(content)),
 		Digest: sum,
 		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
 	}

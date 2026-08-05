@@ -174,6 +174,150 @@ type AcceptUnverifiedEvent struct {
 	Rationale             string `json:"rationale"`
 }
 
+type adjudicationRunEventJSON struct {
+	RunDigest                 string         `json:"run_digest"`
+	ResultSchemaVersion       string         `json:"result_schema_version"`
+	PolicyID                  string         `json:"policy_id"`
+	PolicyDigest              string         `json:"policy_digest"`
+	RulesDigest               string         `json:"rules_digest"`
+	CharterHash               string         `json:"charter_hash"`
+	ArtifactDigest            string         `json:"artifact_digest"`
+	ManifestDigest            string         `json:"manifest_digest"`
+	CapReleaseCharterMismatch bool           `json:"cap_release_charter_mismatch"`
+	FindingCount              strictjson.Int `json:"finding_count"`
+	PendingVerificationCount  strictjson.Int `json:"pending_verification_count"`
+	AutomaticCandidateCount   strictjson.Int `json:"automatic_candidate_count"`
+	CallerDecisionCount       strictjson.Int `json:"caller_decision_count"`
+	PolicyDecisionRecordCount strictjson.Int `json:"policy_decision_record_count"`
+	MissingGoalQuestionCount  strictjson.Int `json:"missing_goal_question_count"`
+}
+
+type questionEventJSON struct {
+	RunDigest        string          `json:"run_digest,omitempty"`
+	QuestionID       string          `json:"question_id"`
+	FindingID        string          `json:"finding_id,omitempty"`
+	Dimension        string          `json:"dimension,omitempty"`
+	AnchorIndex      *strictjson.Int `json:"anchor_index,omitempty"`
+	Property         string          `json:"property,omitempty"`
+	Value            string          `json:"value,omitempty"`
+	AffectedDecision string          `json:"affected_decision,omitempty"`
+	CharterHash      string          `json:"charter_hash"`
+	Statement        string          `json:"statement"`
+}
+
+type measuredDeltaEventJSON struct {
+	Production *strictjson.Int `json:"production"`
+	Test       *strictjson.Int `json:"test"`
+	Unit       string          `json:"unit"`
+	FindingID  string          `json:"finding_id,omitempty"`
+}
+
+type capReleaseEventJSON struct {
+	Release capReleaseRecordJSON `json:"release"`
+}
+
+type capReleaseRecordJSON struct {
+	Unit          string         `json:"unit"`
+	ProductionCap strictjson.Int `json:"production_cap"`
+	TestCap       strictjson.Int `json:"test_cap"`
+	Basis         string         `json:"basis"`
+	Evidence      string         `json:"evidence,omitempty"`
+	Rationale     string         `json:"rationale,omitempty"`
+	Actor         string         `json:"actor"`
+	PolicyDigest  string         `json:"policy_digest"`
+	RulesDigest   string         `json:"rules_digest"`
+	CharterHash   string         `json:"charter_hash"`
+}
+
+func (event *AdjudicationRunEvent) UnmarshalJSON(data []byte) error {
+	decoded, err := strictjson.DecodeBytes[adjudicationRunEventJSON](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return err
+	}
+	*event = AdjudicationRunEvent{
+		RunDigest:                 decoded.RunDigest,
+		ResultSchemaVersion:       decoded.ResultSchemaVersion,
+		PolicyID:                  decoded.PolicyID,
+		PolicyDigest:              decoded.PolicyDigest,
+		RulesDigest:               decoded.RulesDigest,
+		CharterHash:               decoded.CharterHash,
+		ArtifactDigest:            decoded.ArtifactDigest,
+		ManifestDigest:            decoded.ManifestDigest,
+		CapReleaseCharterMismatch: decoded.CapReleaseCharterMismatch,
+		FindingCount:              int(decoded.FindingCount),
+		PendingVerificationCount:  int(decoded.PendingVerificationCount),
+		AutomaticCandidateCount:   int(decoded.AutomaticCandidateCount),
+		CallerDecisionCount:       int(decoded.CallerDecisionCount),
+		PolicyDecisionRecordCount: int(decoded.PolicyDecisionRecordCount),
+		MissingGoalQuestionCount:  int(decoded.MissingGoalQuestionCount),
+	}
+	return nil
+}
+
+func (event *QuestionEvent) UnmarshalJSON(data []byte) error {
+	decoded, err := strictjson.DecodeBytes[questionEventJSON](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return err
+	}
+	*event = QuestionEvent{
+		RunDigest:        decoded.RunDigest,
+		QuestionID:       decoded.QuestionID,
+		FindingID:        decoded.FindingID,
+		Dimension:        decoded.Dimension,
+		AnchorIndex:      strictIntPointer(decoded.AnchorIndex),
+		Property:         decoded.Property,
+		Value:            decoded.Value,
+		AffectedDecision: decoded.AffectedDecision,
+		CharterHash:      decoded.CharterHash,
+		Statement:        decoded.Statement,
+	}
+	return nil
+}
+
+func (event *MeasuredDeltaEvent) UnmarshalJSON(data []byte) error {
+	decoded, err := strictjson.DecodeBytes[measuredDeltaEventJSON](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return err
+	}
+	*event = MeasuredDeltaEvent{
+		Production: strictIntPointer(decoded.Production),
+		Test:       strictIntPointer(decoded.Test),
+		Unit:       decoded.Unit,
+		FindingID:  decoded.FindingID,
+	}
+	return nil
+}
+
+func (event *CapReleaseEvent) UnmarshalJSON(data []byte) error {
+	decoded, err := strictjson.DecodeBytes[capReleaseEventJSON](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return err
+	}
+	*event = CapReleaseEvent{
+		Release: contracts.CapReleaseRecord{
+			Unit:          decoded.Release.Unit,
+			ProductionCap: int(decoded.Release.ProductionCap),
+			TestCap:       int(decoded.Release.TestCap),
+			Basis:         decoded.Release.Basis,
+			Evidence:      decoded.Release.Evidence,
+			Rationale:     decoded.Release.Rationale,
+			Actor:         decoded.Release.Actor,
+			PolicyDigest:  decoded.Release.PolicyDigest,
+			RulesDigest:   decoded.Release.RulesDigest,
+			CharterHash:   decoded.Release.CharterHash,
+		},
+	}
+	return nil
+}
+
+func strictIntPointer(value *strictjson.Int) *int {
+	if value == nil {
+		return nil
+	}
+	converted := int(*value)
+	return &converted
+}
+
 type ShowOptions struct {
 	Kinds []string
 }

@@ -80,6 +80,41 @@ func TestStrictJSONLAppliesReaderPerLine(t *testing.T) {
 	}
 }
 
+func TestInt64AcceptsIntegralJSONNumbers(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    Int64
+		wantErr bool
+	}{
+		{name: "plain integer", raw: `2578`, want: 2578},
+		{name: "scientific integer", raw: `2.578e3`, want: 2578},
+		{name: "negative fractional scientific integer", raw: `-1.5e1`, want: -15},
+		{name: "fractional", raw: `2.5`, wantErr: true},
+		{name: "out of range", raw: `1e999`, wantErr: true},
+		{name: "non number", raw: `"2578"`, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got Int64
+			err := got.UnmarshalJSON([]byte(test.raw))
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalJSON succeeded, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalJSON returned error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("value = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func decodeFixture(mode string, data []byte, max int64) error {
 	switch mode {
 	case "document":

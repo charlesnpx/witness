@@ -1,6 +1,7 @@
 package freeze
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestCreateDeterministicManifestDigest(t *testing.T) {
@@ -38,6 +40,50 @@ func TestCreateDeterministicManifestDigest(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(firstOut, "blobs", "sha256", first.Manifest.Files[0].Digest[len("sha256:"):])); err != nil {
 		t.Fatalf("blob was not copied: %v", err)
+	}
+}
+
+func TestCanonicalManifestDecodeAcceptsExponentSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.json")
+	manifest := Manifest{
+		SchemaVersion: SchemaVersion,
+		DigestProfile: digest.Profile,
+		Source: SourceIdentity{
+			Path:           filepath.Join(dir, "source"),
+			GitTrackedOnly: false,
+		},
+		Workspace: WorkspaceIdentity{
+			Path:          dir,
+			Format:        Format,
+			BlobDirectory: filepath.Join(dir, "blobs"),
+			ManifestPath:  path,
+		},
+		Files: []FileEntry{{
+			Path:   "large.txt",
+			Mode:   "100644",
+			Size:   strictjson.Int64(2578),
+			Digest: digest.RawBytes([]byte("large")),
+			Blob:   "blobs/sha256/large",
+		}},
+	}
+
+	if err := writeCanonicalFile(path, manifest); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"size":2.578e3`)) {
+		t.Fatalf("canonical manifest size was not exponent form:\n%s", data)
+	}
+	decoded, err := strictjson.DecodeBytes[Manifest](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("DecodeBytes returned error: %v", err)
+	}
+	if len(decoded.Files) != 1 || decoded.Files[0].Size != strictjson.Int64(2578) {
+		t.Fatalf("decoded files = %#v, want size 2578", decoded.Files)
 	}
 }
 

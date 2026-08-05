@@ -135,11 +135,11 @@ type Inventory struct {
 }
 
 type InventoryFile struct {
-	Path   string `json:"path"`
-	Mode   string `json:"mode"`
-	Dir    bool   `json:"dir"`
-	Size   int64  `json:"size,omitempty"`
-	Digest string `json:"digest,omitempty"`
+	Path   string           `json:"path"`
+	Mode   string           `json:"mode"`
+	Dir    bool             `json:"dir"`
+	Size   strictjson.Int64 `json:"size,omitempty"`
+	Digest string           `json:"digest,omitempty"`
 }
 
 type WorkspaceDelta struct {
@@ -513,7 +513,7 @@ func InventorySourceSnapshot(manifest freeze.Manifest, manifestDir string) (Inve
 			Path:   entry.Path,
 			Mode:   entry.Mode,
 			Dir:    false,
-			Size:   int64(len(data)),
+			Size:   strictjson.Int64(len(data)),
 			Digest: digest.RawBytes(data),
 		})
 	}
@@ -558,7 +558,7 @@ func InventoryWorkspace(root string) (Inventory, error) {
 			Path:   rel,
 			Mode:   mode,
 			Dir:    false,
-			Size:   int64(len(data)),
+			Size:   strictjson.Int64(len(data)),
 			Digest: digest.RawBytes(data),
 		})
 		return nil
