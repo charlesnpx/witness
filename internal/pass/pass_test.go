@@ -453,6 +453,96 @@ func TestValidatePreflightCompileReportRejectsDisagreeingRelayLineage(t *testing
 	}
 }
 
+func TestValidatePreflightCompileReportRejectsMalformedDigestLikeGeneration(t *testing.T) {
+	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
+	rawDigests := map[string]any{requirement.ContractID: true}
+	payload := map[string]any{
+		"recipe_id":            requirement.RecipeID,
+		"status":               "usable",
+		"integration_contract": requirement.ContractID,
+		"contract_digests":     rawDigests,
+		"compiled_plan": map[string]any{
+			"recipe_id":                    requirement.RecipeID,
+			"integration_contract_id":      requirement.ContractID,
+			"integration_contract_digest":  digest.RawBytes([]byte("relay-projection:" + requirement.ContractID)),
+			"deterministic_test_fixture":   true,
+			"required_input_binding_count": 4,
+		},
+	}
+
+	_, _, err := validatePreflightCompileReport(payload, requirement, false)
+	if err == nil {
+		t.Fatal("validation accepted a boolean compile-report digest")
+	}
+	_, expectedErr := preflight.DecodeCompileReportContractDigests(requirement.RecipeID, rawDigests)
+	if expectedErr == nil {
+		t.Fatal("shared compile-report digest decoder accepted a boolean digest")
+	}
+	if actual, expected := diag.FromError(err), diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("validation diagnostic = %#v, want generation diagnostic %#v", actual, expected)
+	}
+}
+
+func TestValidatePreflightOutputProjectsExtraCompileReportDigest(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	generated := writeReadyPreflightForTest(t, state.Config)
+	generated.SnapshotDigest = generated.ArtifactDigests["source-snapshot-manifest"]
+	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
+	selectedDigest := generated.RelayReportedDigests[requirement.ContractID]
+	if selectedDigest == "" {
+		t.Fatalf("generated relay digest for %s is empty", requirement.ContractID)
+	}
+
+	extraContractID := "example/non-required-contract"
+	reportRelativePath := filepath.ToSlash(filepath.Join("compile-reports", requirement.RecipeID+".json"))
+	report := map[string]any{
+		"recipe_id":            requirement.RecipeID,
+		"status":               "usable",
+		"integration_contract": requirement.ContractID,
+		"contract_digests": map[string]any{
+			requirement.ContractID: selectedDigest,
+			extraContractID:        digest.RawBytes([]byte("relay-projection:" + extraContractID)),
+		},
+		"compiled_plan": map[string]any{
+			"schema_version":               "test-root-recipe-plan-v1",
+			"recipe_id":                    requirement.RecipeID,
+			"integration_contract_id":      requirement.ContractID,
+			"integration_contract_digest":  selectedDigest,
+			"deterministic_test_fixture":   true,
+			"required_input_binding_count": 4,
+		},
+	}
+	reportDigest := retainPreflightPayloadForTest(t, state.Config.StateDir, reportRelativePath, report)
+	generated.ArtifactDigests[reportRelativePath] = reportDigest
+	generated.CompileReportDigests[requirement.RecipeID] = reportDigest
+	if _, found := generated.RelayReportedDigests[extraContractID]; found {
+		t.Fatalf("generated relay lineage retained non-required contract %s", extraContractID)
+	}
+
+	generatedDocument := preflight.ContractDigestDocument(generated)
+	generated.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, state.Config.StateDir, "contract-digests.json", generatedDocument)
+	generated.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, state.Config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(generated))
+	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, generated)
+
+	if err := validatePreflightOutput(state.Config, generated); err != nil {
+		t.Fatalf("revalidation rejected projected compile-report lineage: %v", err)
+	}
+	reconstructed, err := expectedPreflightResult(state.Config)
+	if err != nil {
+		t.Fatalf("reconstruct preflight result: %v", err)
+	}
+	if actual := preflight.ContractDigestDocument(reconstructed); !reflect.DeepEqual(actual, generatedDocument) {
+		t.Fatalf("reconstructed contract-digests document = %#v, want %#v", actual, generatedDocument)
+	}
+	if _, found := reconstructed.RelayReportedDigests[extraContractID]; found {
+		t.Fatalf("reconstructed relay lineage retained non-required contract %s: %#v", extraContractID, reconstructed.RelayReportedDigests)
+	}
+}
+
 func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {
 	options := newBeginOptions(t)
 	root := filepath.Dir(options.StateDir)

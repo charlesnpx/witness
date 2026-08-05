@@ -1050,7 +1050,7 @@ func validatePreflightCompileReport(payload any, requirement contracts.RecipePla
 	if diagnostics, _ := object["diagnostics"].([]any); len(diagnostics) > 0 {
 		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report contains diagnostics.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("diagnostic_count", len(diagnostics)))
 	}
-	reportContractDigests, err := preflightCompileReportContractDigests(object)
+	reportContractDigests, err := preflight.DecodeCompileReportContractDigests(requirement.RecipeID, object["contract_digests"])
 	if err != nil {
 		return nil, "", err
 	}
@@ -1070,27 +1070,8 @@ func validatePreflightCompileReport(payload any, requirement contracts.RecipePla
 	if err != nil {
 		return nil, "", err
 	}
-	return plan, relayReportedDigests[requirement.ContractID], nil
-}
-
-func preflightCompileReportContractDigests(object map[string]any) (map[string]string, error) {
-	value, found := object["contract_digests"]
-	if !found || value == nil {
-		return map[string]string{}, nil
-	}
-	digests, ok := value.(map[string]any)
-	if !ok {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report contract_digests must be an object.")
-	}
-	result := make(map[string]string, len(digests))
-	for contractID, rawDigest := range digests {
-		contractDigest, ok := rawDigest.(string)
-		if !ok {
-			return nil, diag.New(CodeStateInvalid, "preflight compile-report contract_digests values must be strings.", diag.WithDetail("contract_id", contractID))
-		}
-		result[contractID] = contractDigest
-	}
-	return result, nil
+	projectedDigests := preflight.ProjectRelayReportedContractDigests(relayReportedDigests, requirement.ContractID)
+	return plan, projectedDigests[requirement.ContractID], nil
 }
 
 func preflightCompileReportPlan(payload any) (any, error) {

@@ -208,9 +208,17 @@ func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing
 	bundle := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
 	reports := map[string]relayclient.CompileReport{}
 	relayByContract := map[string]string{}
+	extraContractID := "example/non-required-contract"
+	extraDigest := digest.RawBytes([]byte("relay-projection:" + extraContractID))
 	for _, requirement := range RequiredRecipes {
 		relayDigest := digest.RawBytes([]byte("relay-projection:" + requirement.ContractID))
 		relayByContract[requirement.ContractID] = relayDigest
+		contractDigests := map[string]string{
+			requirement.ContractID: relayDigest,
+		}
+		if requirement.ID == RequiredRecipes[0].ID {
+			contractDigests[extraContractID] = extraDigest
+		}
 		reports[requirement.ID] = relayclient.CompileReport{
 			RecipeID:                  requirement.ID,
 			IntegrationContract:       requirement.ContractID,
@@ -222,12 +230,9 @@ func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing
 				"deterministic_test_fixture":   true,
 				"required_input_binding_count": 4,
 			},
-			ContractDigests: map[string]string{
-				requirement.ContractID: relayDigest,
-			},
+			ContractDigests: contractDigests,
 		}
 	}
-
 	witnessDigests, relayReportedDigests, diagnostics := selectedContractDigests(bundle, reports)
 	if len(diagnostics) > 0 {
 		t.Fatalf("diagnostics = %#v", diagnostics)
@@ -242,6 +247,9 @@ func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing
 		if witnessDigests[contractID] == relayReportedDigests[contractID] {
 			t.Fatalf("witness digest unexpectedly matched relay-reported digest for %s", contractID)
 		}
+	}
+	if _, found := relayReportedDigests[extraContractID]; found {
+		t.Fatalf("relay-reported digests retained non-required contract %s: %#v", extraContractID, relayReportedDigests)
 	}
 
 	result := Result{
@@ -274,6 +282,9 @@ func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing
 			t.Fatalf("lineage[%s] = %s, want %s", contractID, lineage[contractID], relayDigest)
 		}
 	}
+	if _, found := lineage[extraContractID]; found {
+		t.Fatalf("contract-digests document retained non-required contract %s: %#v", extraContractID, lineage)
+	}
 	compatibility := compatibilityManifest(&result, nil)
 	for _, selected := range compatibility.SelectedContracts {
 		if selected.Digest != witnessDigests[selected.ContractID] {
@@ -282,6 +293,53 @@ func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing
 		if selected.Digest == relayReportedDigests[selected.ContractID] {
 			t.Fatalf("compatibility selected digest for %s used relay-reported lineage", selected.ContractID)
 		}
+	}
+}
+
+func TestSelectedContractDigestsRejectsMalformedCompileReportDigest(t *testing.T) {
+	requirement := RequiredRecipes[0]
+	rawDigests := map[string]any{requirement.ContractID: true}
+	reports := map[string]relayclient.CompileReport{
+		requirement.ID: {
+			RecipeID:                  requirement.ID,
+			IntegrationContract:       requirement.ContractID,
+			IntegrationContractDigest: digest.RawBytes([]byte("relay-projection:" + requirement.ContractID)),
+			Payload: map[string]any{
+				"contract_digests": rawDigests,
+			},
+		},
+	}
+
+	_, _, diagnostics := selectedContractDigests(nil, reports)
+	actual, ok := findDiagnostic(diagnostics, CodeContractDigestMalformed)
+	if !ok {
+		t.Fatalf("diagnostics = %#v, want %s", diagnostics, CodeContractDigestMalformed)
+	}
+	_, expectedErr := DecodeCompileReportContractDigests(requirement.ID, rawDigests)
+	if expectedErr == nil {
+		t.Fatal("shared compile-report digest decoder accepted a boolean digest")
+	}
+	if expected := diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("generation diagnostic = %#v, want %#v", actual, expected)
+	}
+	if actual.Details["report_id"] != requirement.ID || actual.Details["contract_id"] != requirement.ContractID || actual.Details["value_type"] != "boolean" {
+		t.Fatalf("diagnostic details = %#v", actual.Details)
+	}
+}
+
+func TestDecodeCompileReportContractDigestsRejectsEmptyDigest(t *testing.T) {
+	reportID := RequiredRecipes[0].ID
+	contractID := RequiredRecipes[0].ContractID
+	_, err := DecodeCompileReportContractDigests(reportID, map[string]any{contractID: " "})
+	if err == nil {
+		t.Fatal("shared compile-report digest decoder accepted a blank digest")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeContractDigestMalformed {
+		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeContractDigestMalformed)
+	}
+	if diagnostic.Details["report_id"] != reportID || diagnostic.Details["contract_id"] != contractID || diagnostic.Details["value_type"] != "string" {
+		t.Fatalf("diagnostic details = %#v", diagnostic.Details)
 	}
 }
 
