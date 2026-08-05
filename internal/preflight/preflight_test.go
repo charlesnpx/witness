@@ -252,6 +252,19 @@ func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing
 		},
 	}
 	document := ContractDigestDocument(result)
+	if got := document["schema_version"]; got != ContractDigestDocumentV2 {
+		t.Fatalf("schema_version = %v, want %s", got, ContractDigestDocumentV2)
+	}
+	decoded, err := ReadContractDigestDocument(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.WitnessDigests, witnessDigests) {
+		t.Fatalf("decoded witness digests = %#v, want %#v", decoded.WitnessDigests, witnessDigests)
+	}
+	if !reflect.DeepEqual(decoded.RelayReportedDigests, relayReportedDigests) {
+		t.Fatalf("decoded relay-reported digests = %#v, want %#v", decoded.RelayReportedDigests, relayReportedDigests)
+	}
 	lineage, ok := document["relay_reported_contract_digests"].(map[string]string)
 	if !ok {
 		t.Fatalf("relay_reported_contract_digests = %#v, want map", document["relay_reported_contract_digests"])
@@ -269,6 +282,56 @@ func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing
 		if selected.Digest == relayReportedDigests[selected.ContractID] {
 			t.Fatalf("compatibility selected digest for %s used relay-reported lineage", selected.ContractID)
 		}
+	}
+}
+
+func TestSelectedContractDigestsRejectsDisagreeingCompileReportAndPlanDigest(t *testing.T) {
+	target := RequiredRecipes[0]
+	reportedDigest := digest.RawBytes([]byte("relay-reported:" + target.ContractID))
+	planDigest := digest.RawBytes([]byte("recipe-plan:" + target.ContractID))
+	reports := map[string]relayclient.CompileReport{}
+	for _, requirement := range RequiredRecipes {
+		digestForRequirement := digest.RawBytes([]byte("relay-reported:" + requirement.ContractID))
+		planDigestForRequirement := digestForRequirement
+		if requirement.ID == target.ID {
+			digestForRequirement = reportedDigest
+			planDigestForRequirement = planDigest
+		}
+		raw := map[string]any{
+			"recipe_id":            requirement.ID,
+			"status":               "usable",
+			"integration_contract": requirement.ContractID,
+			"contract_digests": map[string]any{
+				requirement.ContractID: digestForRequirement,
+			},
+			"compiled_plan": map[string]any{
+				"recipe_id":                   requirement.ID,
+				"integration_contract_id":     requirement.ContractID,
+				"integration_contract_digest": planDigestForRequirement,
+			},
+		}
+		report, err := relayclient.NewCompileReport(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reports[requirement.ID] = report
+	}
+
+	_, _, diagnostics := selectedContractDigests(nil, reports)
+	actual, ok := findDiagnostic(diagnostics, CodeContractDigestMismatch)
+	if !ok {
+		t.Fatalf("diagnostics = %#v, want %s", diagnostics, CodeContractDigestMismatch)
+	}
+	_, err := ResolveRelayReportedContractDigests(
+		map[string]string{target.ContractID: reportedDigest},
+		target.ContractID,
+		planDigest,
+	)
+	if err == nil {
+		t.Fatal("shared relay-lineage resolver accepted mismatched digests")
+	}
+	if expected := diag.FromError(err); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("generation diagnostic = %#v, want %#v", actual, expected)
 	}
 }
 

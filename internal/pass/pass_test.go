@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -387,6 +388,69 @@ func TestResumeRejectsPreflightWaitStateBackendStrataTampering(t *testing.T) {
 		t.Fatal("resume accepted tampered preflight backend strata in the role-output wait state")
 	}
 	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestValidatePreflightContractDigestDocumentReadsV1AsRelayLineage(t *testing.T) {
+	contractID := contracts.RequiredWitnessRecipeContractsV2[0].ContractID
+	witnessDigest := digest.RawBytes([]byte("witness-body:" + contractID))
+	relayDigest := digest.RawBytes([]byte("relay-lineage:" + contractID))
+	integrationBundleDigest := digest.RawBytes([]byte("integration-bundle"))
+	retained := map[string]any{
+		"schema_version": preflight.ContractDigestDocumentV1,
+		"digest_profile": digest.Profile,
+		"contract_digests": map[string]any{
+			contractID:           relayDigest,
+			"integration_bundle": integrationBundleDigest,
+		},
+	}
+	result := preflight.Result{
+		ContractDigests: map[string]string{
+			contractID:           witnessDigest,
+			"integration_bundle": integrationBundleDigest,
+		},
+		RelayReportedDigests: map[string]string{contractID: relayDigest},
+	}
+
+	if err := validatePreflightContractDigestDocument(retained, result); err != nil {
+		t.Fatalf("v1 document was compared to witness body digests: %v", err)
+	}
+}
+
+func TestValidatePreflightCompileReportRejectsDisagreeingRelayLineage(t *testing.T) {
+	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
+	reportedDigest := digest.RawBytes([]byte("relay-reported:" + requirement.ContractID))
+	planDigest := digest.RawBytes([]byte("recipe-plan:" + requirement.ContractID))
+	payload := map[string]any{
+		"recipe_id":            requirement.RecipeID,
+		"status":               "usable",
+		"integration_contract": requirement.ContractID,
+		"contract_digests": map[string]any{
+			requirement.ContractID: reportedDigest,
+		},
+		"compiled_plan": map[string]any{
+			"recipe_id":                    requirement.RecipeID,
+			"integration_contract_id":      requirement.ContractID,
+			"integration_contract_digest":  planDigest,
+			"deterministic_test_fixture":   true,
+			"required_input_binding_count": 4,
+		},
+	}
+
+	_, _, err := validatePreflightCompileReport(payload, requirement, false)
+	if err == nil {
+		t.Fatal("validation accepted disagreeing relay lineage")
+	}
+	_, expectedErr := preflight.ResolveRelayReportedContractDigests(
+		map[string]string{requirement.ContractID: reportedDigest},
+		requirement.ContractID,
+		planDigest,
+	)
+	if expectedErr == nil {
+		t.Fatal("shared relay-lineage resolver accepted mismatched digests")
+	}
+	if actual, expected := diag.FromError(err), diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("validation diagnostic = %#v, want %#v", actual, expected)
+	}
 }
 
 func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {

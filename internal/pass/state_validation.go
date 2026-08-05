@@ -666,12 +666,11 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		result.RecipePlanDigests[requirement.RecipeID] = retainedPlanDigest
 	}
 
-	contractDigestDoc := preflight.ContractDigestDocument(result)
 	retainedContractDigests, contractDigestArtifactDigest, err := readRetainedPreflightArtifact(config, "contract-digests.json")
 	if err != nil {
 		return result, err
 	}
-	if err := requireSemanticMatch("preflight contract digests", retainedContractDigests, contractDigestDoc); err != nil {
+	if err := validatePreflightContractDigestDocument(retainedContractDigests, result); err != nil {
 		return result, err
 	}
 	result.ArtifactDigests["contract-digests.json"] = contractDigestArtifactDigest
@@ -689,6 +688,36 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 	}
 	result.ArtifactDigests["compatibility-manifest.json"] = compatibilityDigest
 	return result, nil
+}
+
+func validatePreflightContractDigestDocument(retained any, result preflight.Result) error {
+	document, err := preflight.ReadContractDigestDocument(retained)
+	if err != nil {
+		return err
+	}
+	switch document.SchemaVersion {
+	case preflight.ContractDigestDocumentV1:
+		return requireSemanticMatch(
+			"preflight v1 contract-digest relay lineage",
+			document.RelayReportedDigests,
+			expectedV1ContractDigestLineage(result),
+		)
+	case preflight.ContractDigestDocumentV2:
+		return requireSemanticMatch("preflight contract digests", retained, preflight.ContractDigestDocument(result))
+	default:
+		return diag.New(CodeStateInvalid, "preflight contract-digests document schema_version is unsupported.", diag.WithDetail("actual", document.SchemaVersion))
+	}
+}
+
+func expectedV1ContractDigestLineage(result preflight.Result) map[string]string {
+	lineage := make(map[string]string, len(result.RelayReportedDigests)+1)
+	for contractID, contractDigest := range result.RelayReportedDigests {
+		lineage[contractID] = contractDigest
+	}
+	if integrationBundleDigest := strings.TrimSpace(result.ContractDigests["integration_bundle"]); integrationBundleDigest != "" {
+		lineage["integration_bundle"] = integrationBundleDigest
+	}
+	return lineage
 }
 
 func isPreflightRetainedOutputRole(role string) bool {
@@ -1021,6 +1050,10 @@ func validatePreflightCompileReport(payload any, requirement contracts.RecipePla
 	if diagnostics, _ := object["diagnostics"].([]any); len(diagnostics) > 0 {
 		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report contains diagnostics.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("diagnostic_count", len(diagnostics)))
 	}
+	reportContractDigests, err := preflightCompileReportContractDigests(object)
+	if err != nil {
+		return nil, "", err
+	}
 	plan, err := preflightCompileReportPlan(payload)
 	if err != nil {
 		return nil, "", err
@@ -1033,7 +1066,31 @@ func validatePreflightCompileReport(payload any, requirement contracts.RecipePla
 	if strings.TrimSpace(contractDigest) == "" {
 		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report recipe plan is missing integration_contract_digest.", diag.WithDetail("recipe_id", requirement.RecipeID))
 	}
-	return plan, strings.TrimSpace(contractDigest), nil
+	relayReportedDigests, err := preflight.ResolveRelayReportedContractDigests(reportContractDigests, requirement.ContractID, contractDigest)
+	if err != nil {
+		return nil, "", err
+	}
+	return plan, relayReportedDigests[requirement.ContractID], nil
+}
+
+func preflightCompileReportContractDigests(object map[string]any) (map[string]string, error) {
+	value, found := object["contract_digests"]
+	if !found || value == nil {
+		return map[string]string{}, nil
+	}
+	digests, ok := value.(map[string]any)
+	if !ok {
+		return nil, diag.New(CodeStateInvalid, "preflight compile-report contract_digests must be an object.")
+	}
+	result := make(map[string]string, len(digests))
+	for contractID, rawDigest := range digests {
+		contractDigest, ok := rawDigest.(string)
+		if !ok {
+			return nil, diag.New(CodeStateInvalid, "preflight compile-report contract_digests values must be strings.", diag.WithDetail("contract_id", contractID))
+		}
+		result[contractID] = contractDigest
+	}
+	return result, nil
 }
 
 func preflightCompileReportPlan(payload any) (any, error) {
