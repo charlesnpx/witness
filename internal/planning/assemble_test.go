@@ -99,6 +99,86 @@ func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
 	}
 }
 
+func TestAssembleSummarizesRelayCapturesAndPrefersConsumedRunRecord(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	stdout := "diagnostic stdout"
+	stderr := "diagnostic stderr"
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID: batch.Plan.BatchID,
+			RunRecords: []map[string]any{
+				{
+					"consumes_batch":   false,
+					"status":           "launch_failed",
+					"provider_invoked": "false",
+					"relay_launch": map[string]any{
+						"stdout":           stdout,
+						"stderr":           stderr,
+						"stdout_truncated": true,
+						"stderr_truncated": false,
+					},
+				},
+				{
+					"consumes_batch":   true,
+					"status":           contracts.RecordStatusUnavailable,
+					"provider_invoked": "unknown",
+				},
+			},
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].FailureReason != "relay_run_recorded_unavailable" {
+		t.Fatalf("manifest batches = %#v, want consuming record to determine unavailable reason", result.Manifest.Batches)
+	}
+	rawBatches, ok := result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", result.Manifest.ConsumerIdentity)
+	}
+	metadata, ok := rawBatches[batch.Plan.BatchID].(map[string]any)
+	if !ok {
+		t.Fatalf("relay batch metadata = %#v", rawBatches)
+	}
+	runRecords, ok := metadata["run_records"].([]map[string]any)
+	if !ok || len(runRecords) != 2 {
+		t.Fatalf("run records = %#v", metadata["run_records"])
+	}
+	launch, ok := runRecords[0]["relay_launch"].(map[string]any)
+	if !ok {
+		t.Fatalf("run record = %#v, missing launch metadata", runRecords[0])
+	}
+	if _, exists := launch["stdout"]; exists {
+		t.Fatalf("launch metadata retained raw stdout: %#v", launch)
+	}
+	if _, exists := launch["stderr"]; exists {
+		t.Fatalf("launch metadata retained raw stderr: %#v", launch)
+	}
+	if launch["stdout_digest"] != digest.RawBytes([]byte(stdout)) || launch["stdout_bytes"] != len([]byte(stdout)) || launch["stdout_truncated"] != true {
+		t.Fatalf("stdout metadata = %#v", launch)
+	}
+	if launch["stderr_digest"] != digest.RawBytes([]byte(stderr)) || launch["stderr_bytes"] != len([]byte(stderr)) || launch["stderr_truncated"] != false {
+		t.Fatalf("stderr metadata = %#v", launch)
+	}
+}
+
 func TestAssembleSanitizesForgedRelayLaunchStatusOnRelayPresent(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)

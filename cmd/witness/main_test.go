@@ -1778,7 +1778,8 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 		RelayLaunch: &relayrun.LaunchRecord{
 			Argv:             []string{"fake-relay", "run", "--recipe", "witness-falsify-v2-codex", "--json"},
 			WorkingDirectory: dir,
-			ExitCode:         1,
+			ExitCode:         -1,
+			StartFailed:      true,
 			Stdout:           `{"message":"authentication failed"}`,
 			Stderr:           "authentication failed",
 		},
@@ -1838,8 +1839,23 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 		t.Fatalf("retained run record = %#v", runRecords[0])
 	}
 	launch, ok := retained["relay_launch"].(map[string]any)
-	if !ok || launch["exit_code"] != json.Number("1") || launch["stderr"] != "authentication failed" {
-		t.Fatalf("retained launch = %#v", retained["relay_launch"])
+	if !ok || launch["exit_code"] != json.Number("-1") || launch["start_failed"] != true {
+		t.Fatalf("retained launch = %#v, want start-failure metadata", retained["relay_launch"])
+	}
+	if _, exists := launch["stdout"]; exists {
+		t.Fatalf("retained launch unexpectedly contains raw stdout: %#v", launch)
+	}
+	if _, exists := launch["stderr"]; exists {
+		t.Fatalf("retained launch unexpectedly contains raw stderr: %#v", launch)
+	}
+	if launch["stdout_digest"] != digest.RawBytes([]byte(`{"message":"authentication failed"}`)) || !jsonNumberMatches(launch["stdout_bytes"], len([]byte(`{"message":"authentication failed"}`))) || launch["stdout_truncated"] != false {
+		t.Fatalf("stdout metadata = %#v", launch)
+	}
+	if launch["stderr_digest"] != digest.RawBytes([]byte("authentication failed")) || !jsonNumberMatches(launch["stderr_bytes"], len([]byte("authentication failed"))) || launch["stderr_truncated"] != false {
+		t.Fatalf("stderr metadata = %#v", launch)
+	}
+	if retained["run_record_digest"] == "" {
+		t.Fatalf("retained run record = %#v, want local run-record reference digest", retained)
 	}
 	adjudication, err := adjudicate.Run(adjudicate.Options{
 		FrozenCharter: &frozen,
@@ -1851,6 +1867,40 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	}
 	if len(adjudication.Findings) != 1 || adjudication.Findings[0].Disposition != contracts.DispositionPendingVerification {
 		t.Fatalf("adjudication findings = %#v, want pending verification", adjudication.Findings)
+	}
+}
+
+func jsonNumberMatches(value any, want int) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	actual, err := number.Float64()
+	return err == nil && actual == float64(want)
+}
+
+func TestMergeRelayEvidenceRejectsMixedBatchConsumption(t *testing.T) {
+	_, err := mergeRelayEvidence(
+		[]planning.RelayEvidence{{
+			BatchID: "defect-batch-1",
+			RunRecords: []map[string]any{{
+				"consumes_batch": false,
+				"status":         relayrun.RunStatusLaunchFailed,
+			}},
+		}},
+		[]planning.RelayEvidence{{
+			BatchID: "defect-batch-1",
+			RunRecords: []map[string]any{{
+				"consumes_batch": true,
+				"status":         contracts.RecordStatusUnavailable,
+			}},
+		}},
+	)
+	if err == nil {
+		t.Fatal("mergeRelayEvidence accepted mixed consuming and non-consuming records")
+	}
+	if got := diag.FromError(err).Code; got != verificationAssembleMixedRunRecordConsumption {
+		t.Fatalf("diagnostic code = %q, want %q; err=%v", got, verificationAssembleMixedRunRecordConsumption, err)
 	}
 }
 

@@ -43,7 +43,7 @@ func (runner *fakeRelayRunner) Run(ctx context.Context, executable string, args 
 	return runner.result
 }
 
-func TestRunBatchesLaunchesEachBatchOnceAndRoutesFailurePending(t *testing.T) {
+func TestRunBatchesNonzeroWithoutArtifactsConsumesBatch(t *testing.T) {
 	dir := t.TempDir()
 	record, runner := runLaunchFailure(t, dir, relayclient.CommandResult{
 		Stdout:   []byte(`{"message":"auth failed"}`),
@@ -54,11 +54,11 @@ func TestRunBatchesLaunchesEachBatchOnceAndRoutesFailurePending(t *testing.T) {
 	if runner.runCalls != 1 {
 		t.Fatalf("run calls = %d, want 1", runner.runCalls)
 	}
-	if record.Status != RunStatusLaunchFailed {
-		t.Fatalf("status = %s, want %s", record.Status, RunStatusLaunchFailed)
+	if record.Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("status = %s, want %s", record.Status, contracts.RecordStatusUnavailable)
 	}
-	if record.ProviderInvoked != ProviderInvokedFalse || record.ConsumesBatch {
-		t.Fatalf("provider classification = %q consumes_batch=%t, want false/non-consuming", record.ProviderInvoked, record.ConsumesBatch)
+	if record.ProviderInvoked != ProviderInvokedUnknown || !record.ConsumesBatch {
+		t.Fatalf("provider classification = %q consumes_batch=%t, want unknown/consumed", record.ProviderInvoked, record.ConsumesBatch)
 	}
 	if record.RelayLaunch == nil {
 		t.Fatal("missing retained relay launch")
@@ -75,6 +75,28 @@ func TestRunBatchesLaunchesEachBatchOnceAndRoutesFailurePending(t *testing.T) {
 	}
 	if len(record.Diagnostics) != 1 || record.Diagnostics[0].Code != CodeRelayRunFailed {
 		t.Fatalf("diagnostics = %#v", record.Diagnostics)
+	}
+}
+
+func TestRunBatchesStartFailureDoesNotConsumeBatch(t *testing.T) {
+	dir := t.TempDir()
+	record, runner := runLaunchFailure(t, dir, relayclient.CommandResult{
+		Stderr:      []byte("relay executable not found"),
+		ExitCode:    -1,
+		Err:         errors.New("exec: fake-relay: executable file not found"),
+		StartFailed: true,
+	})
+	if runner.runCalls != 1 {
+		t.Fatalf("run calls = %d, want 1", runner.runCalls)
+	}
+	if record.Status != RunStatusLaunchFailed {
+		t.Fatalf("status = %s, want %s", record.Status, RunStatusLaunchFailed)
+	}
+	if record.ProviderInvoked != ProviderInvokedFalse || record.ConsumesBatch {
+		t.Fatalf("provider classification = %q consumes_batch=%t, want false/non-consuming", record.ProviderInvoked, record.ConsumesBatch)
+	}
+	if record.RelayLaunch == nil || !record.RelayLaunch.StartFailed {
+		t.Fatalf("launch = %#v, want retained start failure", record.RelayLaunch)
 	}
 }
 
@@ -126,7 +148,8 @@ func TestReadRunRecordsBytesAcceptsV2Index(t *testing.T) {
 			RelayLaunch: &LaunchRecord{
 				Argv:             []string{"fake-relay", "run", "--json"},
 				WorkingDirectory: "/tmp/workspace",
-				ExitCode:         1,
+				ExitCode:         -1,
+				StartFailed:      true,
 			},
 		}},
 	})
@@ -139,6 +162,31 @@ func TestReadRunRecordsBytesAcceptsV2Index(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].BatchID != "defect-batch-1" || runs[0].Status != RunStatusLaunchFailed {
 		t.Fatalf("runs = %#v", runs)
+	}
+}
+
+func TestReadRunRecordsBytesRejectsLaunchFailedProviderEvidence(t *testing.T) {
+	data, err := contracts.CanonicalBytes(RunRecord{
+		SchemaVersion:   RunRecordSchema,
+		BatchID:         "defect-batch-1",
+		Status:          RunStatusLaunchFailed,
+		RecipeID:        "witness-falsify-v2-codex",
+		ProviderInvoked: ProviderInvokedFalse,
+		ConsumesBatch:   false,
+		RelayLaunch: &LaunchRecord{
+			Argv:             []string{"fake-relay", "run", "--json"},
+			WorkingDirectory: "/tmp/workspace",
+			ExitCode:         -1,
+			StartFailed:      true,
+		},
+		PortableExportDir: "/tmp/relay-export",
+		RelayVerdicts:     &contracts.RelayWitnessVerdictsDocument{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRunRecordsBytes(data); err == nil || !strings.Contains(err.Error(), "cannot carry provider evidence") {
+		t.Fatalf("ReadRunRecordsBytes error = %v, want provider-evidence rejection", err)
 	}
 }
 

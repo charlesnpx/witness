@@ -440,6 +440,12 @@ func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned 
 
 func relayUnavailableFailureReason(relay RelayEvidence) string {
 	for _, record := range relay.RunRecords {
+		consumesBatch, _ := record["consumes_batch"].(bool)
+		if consumesBatch {
+			return "relay_run_recorded_unavailable"
+		}
+	}
+	for _, record := range relay.RunRecords {
 		status, _ := record["status"].(string)
 		providerInvoked, _ := record["provider_invoked"].(string)
 		if status == "launch_failed" && providerInvoked == "false" {
@@ -455,12 +461,45 @@ func relayUnavailableFailureReason(relay RelayEvidence) string {
 func cloneRelayRunRecords(records []map[string]any) []map[string]any {
 	cloned := make([]map[string]any, 0, len(records))
 	for _, record := range records {
-		copy := make(map[string]any, len(record))
-		for key, value := range record {
-			copy[key] = value
-		}
-		cloned = append(cloned, copy)
+		cloned = append(cloned, SanitizeRelayRunRecordMetadata(record))
 	}
+	return cloned
+}
+
+// SanitizeRelayRunRecordMetadata keeps locally retained relay run records
+// referencable from a manifest without copying captured stdout or stderr into
+// consumer identity metadata.
+func SanitizeRelayRunRecordMetadata(record map[string]any) map[string]any {
+	cloned := make(map[string]any, len(record))
+	for key, value := range record {
+		cloned[key] = value
+	}
+	rawLaunch, ok := record["relay_launch"].(map[string]any)
+	if !ok {
+		return cloned
+	}
+	launch := make(map[string]any, len(rawLaunch)+4)
+	for key, value := range rawLaunch {
+		launch[key] = value
+	}
+	for _, stream := range []string{"stdout", "stderr"} {
+		raw, present := launch[stream]
+		if !present {
+			continue
+		}
+		delete(launch, stream)
+		capture, ok := raw.(string)
+		if !ok {
+			continue
+		}
+		launch[stream+"_digest"] = digest.RawBytes([]byte(capture))
+		launch[stream+"_bytes"] = len([]byte(capture))
+		truncatedKey := stream + "_truncated"
+		if _, ok := launch[truncatedKey].(bool); !ok {
+			launch[truncatedKey] = false
+		}
+	}
+	cloned["relay_launch"] = launch
 	return cloned
 }
 

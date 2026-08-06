@@ -32,8 +32,10 @@ import (
 )
 
 const (
-	verificationPlanMissingPreflight = "verification_plan_missing_preflight"
-	verificationPlanInvalidPreflight = "verification_plan_invalid_preflight"
+	verificationPlanMissingPreflight                = "verification_plan_missing_preflight"
+	verificationPlanInvalidPreflight                = "verification_plan_invalid_preflight"
+	verificationAssembleInvalidRunRecordConsumption = "verification_assemble_invalid_run_record_consumption"
+	verificationAssembleMixedRunRecordConsumption   = "verification_assemble_mixed_run_record_consumption"
 
 	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
 	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
@@ -558,7 +560,10 @@ func runVerificationAssemble(args []string) error {
 	if err != nil {
 		return err
 	}
-	relayEvidence = mergeRelayEvidence(relayEvidence, runRecordEvidence)
+	relayEvidence, err = mergeRelayEvidence(relayEvidence, runRecordEvidence)
+	if err != nil {
+		return err
+	}
 	if *runRelay {
 		runBatches, err := relayRunBatchInputs(plan, batches, *stateDir)
 		if err != nil {
@@ -1873,10 +1878,15 @@ func relayRunRecordMetadata(record relayrun.RunRecord) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return strictjson.DecodeBytes[map[string]any](data, strictjson.DefaultMaxBytes*32)
+	metadata, err := strictjson.DecodeBytes[map[string]any](data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, err
+	}
+	metadata["run_record_digest"] = digest.RawBytes(data)
+	return planning.SanitizeRelayRunRecordMetadata(metadata), nil
 }
 
-func mergeRelayEvidence(sources ...[]planning.RelayEvidence) []planning.RelayEvidence {
+func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEvidence, error) {
 	byBatch := map[string]planning.RelayEvidence{}
 	for _, source := range sources {
 		for _, incoming := range source {
@@ -1897,7 +1907,11 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) []planning.RelayEvi
 			if incoming.Verdicts != nil {
 				current.Verdicts = incoming.Verdicts
 			}
-			current.RunRecords = append(current.RunRecords, incoming.RunRecords...)
+			runRecords, err := mergeRelayRunRecords(incoming.BatchID, current.RunRecords, incoming.RunRecords)
+			if err != nil {
+				return nil, err
+			}
+			current.RunRecords = runRecords
 			byBatch[incoming.BatchID] = current
 		}
 	}
@@ -1905,7 +1919,40 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) []planning.RelayEvi
 	for _, batchID := range sortedRelayEvidenceBatchIDs(byBatch) {
 		result = append(result, byBatch[batchID])
 	}
-	return result
+	return result, nil
+}
+
+func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[string]any, error) {
+	records := make([]map[string]any, 0)
+	for _, source := range sources {
+		records = append(records, source...)
+	}
+	var consuming, nonConsuming bool
+	for index, record := range records {
+		value, present := record["consumes_batch"]
+		consumesBatch, ok := value.(bool)
+		if !present || !ok {
+			return nil, diag.New(
+				verificationAssembleInvalidRunRecordConsumption,
+				"relay run record consumption must be a boolean before evidence can be merged.",
+				diag.WithDetail("batch_id", batchID),
+				diag.WithDetail("record_index", index),
+			)
+		}
+		if consumesBatch {
+			consuming = true
+		} else {
+			nonConsuming = true
+		}
+	}
+	if consuming && nonConsuming {
+		return nil, diag.New(
+			verificationAssembleMixedRunRecordConsumption,
+			"relay run records for one batch mix consuming and non-consuming evidence; refusing to merge conflicting coverage.",
+			diag.WithDetail("batch_id", batchID),
+		)
+	}
+	return records, nil
 }
 
 func readReceipts(paths []string) ([]contracts.ExecutionReceipt, error) {

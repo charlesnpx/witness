@@ -17,6 +17,13 @@ func (fn runnerFunc) Run(ctx context.Context, executable string, args ...string)
 	return fn(ctx, executable, args...)
 }
 
+func TestExecRunnerMarksProcessStartFailure(t *testing.T) {
+	result := (ExecRunner{}).Run(context.Background(), filepath.Join(t.TempDir(), "missing-relay"))
+	if result.Err == nil || !result.StartFailed || result.ExitCode != -1 {
+		t.Fatalf("result = %#v, want retained process start failure", result)
+	}
+}
+
 func TestRealRelayFixturesStrictDecode(t *testing.T) {
 	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	if _, err := decodeFixture[Capabilities](filepath.Join(fixtures, "relay-capabilities-v1.json")); err != nil {

@@ -32,8 +32,8 @@ const (
 	CodeInvalidBatchInput = "relayrun_invalid_batch_input"
 	CodeInvalidRunRecord  = "relayrun_invalid_run_record"
 
-	// RunStatusLaunchFailed marks a nonzero relay run with no session or
-	// provider artifact. It is the only status that does not consume the
+	// RunStatusLaunchFailed marks a relay command that failed before its
+	// process could start. It is the only status that does not consume the
 	// batch's single verification run.
 	RunStatusLaunchFailed = "launch_failed"
 
@@ -78,6 +78,7 @@ type LaunchRecord struct {
 	Argv             []string `json:"argv"`
 	WorkingDirectory string   `json:"working_directory"`
 	ExitCode         int      `json:"exit_code"`
+	StartFailed      bool     `json:"start_failed"`
 	Stdout           string   `json:"stdout"`
 	Stderr           string   `json:"stderr"`
 	StdoutTruncated  bool     `json:"stdout_truncated"`
@@ -92,18 +93,19 @@ type RunRecord struct {
 	InputBindings []string      `json:"input_bindings"`
 	RelayLaunch   *LaunchRecord `json:"relay_launch,omitempty"`
 	// ProviderInvoked is one of true, false, or unknown. False is assigned
-	// only to a nonzero launch with no session or provider artifact.
+	// only when the relay process failed to start before a child ran.
 	ProviderInvoked string `json:"provider_invoked"`
 	// ConsumesBatch is false only for provider_invoked=false launch_failed
 	// records; true and unknown remain fail-closed and consume the batch.
-	ConsumesBatch        bool              `json:"consumes_batch"`
-	SessionDir           string            `json:"session_dir,omitempty"`
-	PortableExportDir    string            `json:"portable_export_dir,omitempty"`
-	PortableExportDigest string            `json:"portable_export_digest,omitempty"`
-	RelayRunResult       map[string]any    `json:"relay_run_result,omitempty"`
-	ProducerCheck        map[string]any    `json:"producer_check,omitempty"`
-	WitnessCheck         *portable.Report  `json:"witness_check,omitempty"`
-	Diagnostics          []diag.Diagnostic `json:"diagnostics,omitempty"`
+	ConsumesBatch        bool                                    `json:"consumes_batch"`
+	SessionDir           string                                  `json:"session_dir,omitempty"`
+	PortableExportDir    string                                  `json:"portable_export_dir,omitempty"`
+	PortableExportDigest string                                  `json:"portable_export_digest,omitempty"`
+	RelayRunResult       map[string]any                          `json:"relay_run_result,omitempty"`
+	RelayVerdicts        *contracts.RelayWitnessVerdictsDocument `json:"relay_verdicts,omitempty"`
+	ProducerCheck        map[string]any                          `json:"producer_check,omitempty"`
+	WitnessCheck         *portable.Report                        `json:"witness_check,omitempty"`
+	Diagnostics          []diag.Diagnostic                       `json:"diagnostics,omitempty"`
 }
 
 func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Result, error) {
@@ -265,7 +267,7 @@ func requireValidRunRecord(record RunRecord) error {
 	if record.Status != contracts.RecordStatusValid && record.Status != contracts.RecordStatusFailed && record.Status != contracts.RecordStatusUnavailable && record.Status != RunStatusLaunchFailed {
 		return diag.New(CodeInvalidRunRecord, "relay run record status is unsupported.", diag.WithDetail("value", record.Status))
 	}
-	providerArtifactPresent := strings.TrimSpace(record.SessionDir) != "" || containsSessionOrProviderArtifact(record.RelayRunResult)
+	providerEvidence := runRecordProviderEvidence(record)
 	if record.ProviderInvoked == ProviderInvokedFalse {
 		if record.Status != RunStatusLaunchFailed {
 			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires launch_failed status.", diag.WithDetail("status", record.Status))
@@ -273,11 +275,15 @@ func requireValidRunRecord(record RunRecord) error {
 		if record.ConsumesBatch {
 			return diag.New(CodeInvalidRunRecord, "provider_invoked=false run records must not consume the batch.")
 		}
-		if record.RelayLaunch == nil || record.RelayLaunch.ExitCode <= 0 {
-			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires a retained nonzero relay launch exit status.")
+		if len(providerEvidence) > 0 {
+			return diag.New(
+				CodeInvalidRunRecord,
+				"provider_invoked=false / launch_failed run records cannot carry provider evidence.",
+				diag.WithDetail("provider_evidence", providerEvidence),
+			)
 		}
-		if providerArtifactPresent {
-			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires no session or provider artifact.")
+		if record.RelayLaunch == nil || !record.RelayLaunch.StartFailed {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires retained proof that the relay process failed to start.")
 		}
 		return nil
 	}
@@ -287,10 +293,10 @@ func requireValidRunRecord(record RunRecord) error {
 	if !record.ConsumesBatch {
 		return diag.New(CodeInvalidRunRecord, "provider_invoked=true or unknown run records must consume the batch.")
 	}
-	if providerArtifactPresent && record.ProviderInvoked != ProviderInvokedTrue {
+	if len(providerEvidence) > 0 && record.ProviderInvoked != ProviderInvokedTrue {
 		return diag.New(CodeInvalidRunRecord, "session or provider artifacts require provider_invoked=true.")
 	}
-	if !providerArtifactPresent && record.ProviderInvoked == ProviderInvokedTrue {
+	if len(providerEvidence) == 0 && record.ProviderInvoked == ProviderInvokedTrue {
 		return diag.New(CodeInvalidRunRecord, "provider_invoked=true requires a session or provider artifact.")
 	}
 	return nil
@@ -324,6 +330,7 @@ func launchRecord(result relayclient.CommandResult, workingDirectory string) *La
 		Argv:             argv,
 		WorkingDirectory: workingDirectory,
 		ExitCode:         result.ExitCode,
+		StartFailed:      result.StartFailed,
 		Stdout:           stdout,
 		Stderr:           stderr,
 		StdoutTruncated:  stdoutTruncated,
@@ -354,10 +361,30 @@ func classifyProviderInvocation(launch *LaunchRecord, sessionDir string, runResu
 	if strings.TrimSpace(sessionDir) != "" || containsSessionOrProviderArtifact(runResult) {
 		return ProviderInvokedTrue
 	}
-	if launch != nil && launch.ExitCode > 0 {
+	if launch != nil && launch.StartFailed {
 		return ProviderInvokedFalse
 	}
 	return ProviderInvokedUnknown
+}
+
+func runRecordProviderEvidence(record RunRecord) []string {
+	evidence := make([]string, 0, 5)
+	if strings.TrimSpace(record.SessionDir) != "" {
+		evidence = append(evidence, "session_dir")
+	}
+	if strings.TrimSpace(record.PortableExportDir) != "" {
+		evidence = append(evidence, "portable_export_dir")
+	}
+	if strings.TrimSpace(record.PortableExportDigest) != "" {
+		evidence = append(evidence, "portable_export_digest")
+	}
+	if record.RelayVerdicts != nil {
+		evidence = append(evidence, "relay_verdicts")
+	}
+	if containsSessionOrProviderArtifact(record.RelayRunResult) {
+		evidence = append(evidence, "relay_run_result")
+	}
+	return evidence
 }
 
 func containsSessionOrProviderArtifact(value any) bool {

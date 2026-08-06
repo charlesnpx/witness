@@ -28,12 +28,13 @@ type Runner interface {
 }
 
 type CommandResult struct {
-	Command  string
-	Args     []string
-	Stdout   []byte
-	Stderr   []byte
-	ExitCode int
-	Err      error
+	Command     string
+	Args        []string
+	Stdout      []byte
+	Stderr      []byte
+	ExitCode    int
+	Err         error
+	StartFailed bool
 }
 
 type ExecRunner struct{}
@@ -43,7 +44,16 @@ func (ExecRunner) Run(ctx context.Context, executable string, args ...string) Co
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	err := command.Run()
+	if err := command.Start(); err != nil {
+		return CommandResult{
+			Stdout:      stdout.Bytes(),
+			Stderr:      stderr.Bytes(),
+			ExitCode:    -1,
+			Err:         err,
+			StartFailed: true,
+		}
+	}
+	err := command.Wait()
 	result := CommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: 0, Err: err}
 	if err == nil {
 		return result
