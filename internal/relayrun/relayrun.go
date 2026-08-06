@@ -52,14 +52,19 @@ type Options struct {
 	IntegrationBundlePath string
 	CharterPath           string
 	ArtifactPaths         []string
-	OutputDir             string
-	Backend               string
-	WorkspaceIsolation    string
-	RelayHome             string
-	LaunchCWD             string
-	SettingsPath          string
-	AllowDirtySource      bool
-	Runner                relayclient.Runner
+	// The planned digests are retained with the run record, rather than passed
+	// to relay. Relay's --input contract takes plain paths.
+	CharterDigest           string
+	ArtifactDigest          string
+	IntegrationBundleDigest string
+	OutputDir               string
+	Backend                 string
+	WorkspaceIsolation      string
+	RelayHome               string
+	LaunchCWD               string
+	SettingsPath            string
+	AllowDirtySource        bool
+	Runner                  relayclient.Runner
 }
 
 type BatchInput struct {
@@ -131,6 +136,7 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			ProviderInvoked: ProviderInvokedUnknown,
 			ConsumesBatch:   true,
 		}
+		record.InputBindings = recordedInputBindings(options, batch)
 		if strings.TrimSpace(batch.Path) == "" {
 			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeMissingBatchPath, "relay verification requires a persisted verification-batch path.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
 			result.Runs = append(result.Runs, record)
@@ -141,12 +147,12 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		record.InputBindings = inputBindings(options.CharterPath, batch.Path, options.ArtifactPaths)
+		launchInputBindings := inputBindings(options.CharterPath, batch.Path, options.ArtifactPaths)
 		runResult, commandResult, err := client.RunRecipeWithCommandResult(ctx, relayclient.RunRecipeOptions{
 			Task:                  relayTask(batch),
 			RecipeID:              record.RecipeID,
 			IntegrationBundlePath: options.IntegrationBundlePath,
-			InputBindings:         record.InputBindings,
+			InputBindings:         launchInputBindings,
 			WorkspaceIsolation:    defaultWorkspaceIsolation(options.WorkspaceIsolation),
 			RelayHome:             options.RelayHome,
 			LaunchCWD:             options.LaunchCWD,
@@ -881,6 +887,45 @@ func inputBindings(charterPath string, batchPath string, artifactPaths []string)
 		}
 	}
 	return bindings
+}
+
+// recordedInputBindings retains the frozen input provenance that pass resume
+// validates. The relay launch intentionally receives inputBindings instead:
+// relay's documented --input form is name=path, not name=path@digest.
+func recordedInputBindings(options Options, batch BatchInput) []string {
+	bindings := make([]string, 0, 4)
+	bindings = appendRecordedInputBinding(bindings, "charter", options.CharterPath, firstPlannedDigest(options.CharterDigest, batch.Plan.CharterDigest))
+	bindings = appendRecordedInputBinding(bindings, "findings", batch.Path, batch.Plan.BatchDigest)
+	bindings = appendRecordedInputBinding(bindings, "artifact", firstArtifactPath(options.ArtifactPaths), firstPlannedDigest(options.ArtifactDigest, batch.Plan.PreflightSnapshotDigest, batch.Plan.ArtifactDigest))
+	bindings = appendRecordedInputBinding(bindings, "integration_bundle", options.IntegrationBundlePath, firstPlannedDigest(options.IntegrationBundleDigest, batch.Plan.IntegrationBundleDigest))
+	return bindings
+}
+
+func appendRecordedInputBinding(bindings []string, name string, path string, valueDigest string) []string {
+	path = strings.TrimSpace(path)
+	valueDigest = strings.TrimSpace(valueDigest)
+	if path == "" || valueDigest == "" {
+		return bindings
+	}
+	return append(bindings, name+"="+path+"@"+valueDigest)
+}
+
+func firstArtifactPath(paths []string) string {
+	for _, path := range paths {
+		if path = strings.TrimSpace(path); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func firstPlannedDigest(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func relayTask(batch BatchInput) string {

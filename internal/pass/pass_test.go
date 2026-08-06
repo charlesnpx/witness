@@ -1901,6 +1901,74 @@ func TestPassResumeConsumesRecordedUnavailableRelayRun(t *testing.T) {
 	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
 }
 
+func TestRunBatchesRecordPassesConsumingBindingValidation(t *testing.T) {
+	_, state, batch := readyPassAtRelayBatchActionForTest(t, true)
+	plan := readJSONForTest[planning.PlanDocument](t, state.Config.Outputs.PlanPath)
+	var plannedBatch planning.BatchPlan
+	for _, candidate := range plan.Batches {
+		if candidate.BatchID == batch.BatchID {
+			plannedBatch = candidate
+			break
+		}
+	}
+	if plannedBatch.BatchID == "" {
+		t.Fatalf("plan batches = %#v, missing %q", plan.Batches, batch.BatchID)
+	}
+	batchBytes, err := os.ReadFile(batch.BatchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchDocument, err := contracts.ReadVerificationBatchBytes(batchBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrationBundlePath, err := retainedIntegrationBundlePath(state.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
+	relayPath := filepath.Join(t.TempDir(), "failing-relay")
+	if err := os.WriteFile(relayPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := relayrun.RunBatches(context.Background(), []relayrun.BatchInput{{
+		Plan:     plannedBatch,
+		Document: batchDocument,
+		Path:     batch.BatchPath,
+		RawBytes: batchBytes,
+	}}, relayrun.Options{
+		RelayPath:               relayPath,
+		IntegrationBundlePath:   integrationBundlePath,
+		CharterPath:             state.Config.Outputs.CharterFreezePath,
+		ArtifactPaths:           []string{state.Config.SnapshotManifestPath},
+		CharterDigest:           plan.CharterDigest,
+		ArtifactDigest:          plan.PreflightSnapshotDigest,
+		IntegrationBundleDigest: preflightResult.ContractDigests["integration_bundle"],
+		OutputDir:               state.Config.StateDir,
+		Backend:                 state.Config.Backend,
+	})
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if len(result.Runs) != 1 {
+		t.Fatalf("runs = %#v, want one", result.Runs)
+	}
+	record := result.Runs[0]
+	if record.Status != contracts.RecordStatusUnavailable || !record.ConsumesBatch {
+		t.Fatalf("record = %#v, want consuming unavailable record", record)
+	}
+	if record.RelayLaunch == nil || record.RelayLaunch.StartFailed || record.RelayLaunch.ExitCode != 1 {
+		t.Fatalf("relay launch = %#v, want started nonzero exit", record.RelayLaunch)
+	}
+	if want := plannedRelayInputBindingsForTest(t, state.Config, batch); !reflect.DeepEqual(record.InputBindings, want) {
+		t.Fatalf("input bindings = %#v, want %#v", record.InputBindings, want)
+	}
+	if _, err := readRecordedRelayRuns(state, []RelayBatchRecord{batch}); err != nil {
+		t.Fatalf("real relayrun record did not validate for pass resume: %v", err)
+	}
+}
+
 func TestReadRecordedRelayRunsRequiresCompleteBindingsForConsumingRecord(t *testing.T) {
 	_, state, batch := readyPassAtRelayBatchActionForTest(t, true)
 	validBindings := plannedRelayInputBindingsForTest(t, state.Config, batch)

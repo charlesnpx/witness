@@ -601,18 +601,21 @@ func runVerificationAssemble(args []string) error {
 			return err
 		}
 		runResult, err := relayrun.RunBatches(context.Background(), runBatches, relayrun.Options{
-			RelayPath:             resolveRelayExecutable(*relayPath),
-			IntegrationBundlePath: *integrationBundlePath,
-			CharterPath:           *charterPath,
-			ArtifactPaths:         append([]string(nil), artifactPaths...),
-			OutputDir:             *stateDir,
-			Backend:               *backend,
-			WorkspaceIsolation:    *workspaceIsolation,
-			RelayHome:             *relayHome,
-			LaunchCWD:             *launchCWD,
-			SettingsPath:          *settingsPath,
-			AllowDirtySource:      *allowDirtySource,
-			Runner:                verificationAssembleRelayRunner,
+			RelayPath:               resolveRelayExecutable(*relayPath),
+			IntegrationBundlePath:   *integrationBundlePath,
+			CharterPath:             *charterPath,
+			ArtifactPaths:           append([]string(nil), artifactPaths...),
+			CharterDigest:           plan.CharterDigest,
+			ArtifactDigest:          plan.PreflightSnapshotDigest,
+			IntegrationBundleDigest: plan.IntegrationBundleDigest,
+			OutputDir:               *stateDir,
+			Backend:                 *backend,
+			WorkspaceIsolation:      *workspaceIsolation,
+			RelayHome:               *relayHome,
+			LaunchCWD:               *launchCWD,
+			SettingsPath:            *settingsPath,
+			AllowDirtySource:        *allowDirtySource,
+			Runner:                  verificationAssembleRelayRunner,
 		})
 		if err != nil {
 			return err
