@@ -109,6 +109,11 @@ Record these values from that JSON before preparing finder output:
 - `next_action.snapshot_digest`
 - each `next_action.roles[].path`
 
+Confirm that `next_action.charter_hash` equals the `charter_hash` in
+`$RUN/charter.owner.freeze.json`. The pass freezes whatever Charter file it was
+given, so a mismatch means `charter.json` changed between the owner freeze and
+`pass begin`; stop and re-freeze before continuing.
+
 It also writes `preflight.json` and retains the preflight evidence described
 in the [artifact inventory](#artifact-inventory).
 
@@ -150,7 +155,11 @@ document still carries role-output init placeholder identities; replace them bef
 Replace the placeholder `charter_hash`, `artifact_digest`, and both identities
 in each file. In a real pass, these documents are produced by finder agents the
 operator runs outside Witness (using any agent harness), one per role, each
-examining the frozen source snapshot against the Charter goals. The manual
+examining the frozen source snapshot against the Charter goals. Point finders
+at the snapshot retained under the state directory's `source-snapshot/` — the
+manifest lists every captured file with its content digest and the blobs hold
+the exact captured bytes — rather than at the live checkout, which can change
+after the freeze. The manual
 editing below is solely a stand-in used to demonstrate the required document
 shape and the zero-findings flow. A hand-authored zero-findings document is the
 vacuous case: Witness will record and adjudicate it, but its verdict carries no
