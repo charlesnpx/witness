@@ -3,9 +3,11 @@ package planning
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/adjudicate"
@@ -1498,4 +1500,47 @@ func testArtifactRef(kind string, id string, seed string) contracts.ArtifactRef 
 
 func testDigest(seed string) string {
 	return digest.RawBytes([]byte(seed))
+}
+
+func TestSanitizeRelayRunRecordMetadataDropsUnsafeIdentifiers(t *testing.T) {
+	record := map[string]any{
+		"schema_version":   "witness-relay-verification-run-v2",
+		"batch_id":         "batch-1",
+		"recipe_id":        "witness-falsify-v2-codex",
+		"status":           "unavailable",
+		"provider_invoked": "unknown",
+		"consumes_batch":   true,
+		"diagnostics": []any{
+			map[string]any{"code": "relay_nonzero_exit"},
+			map[string]any{"code": "token=sk-SECRET-VALUE leaked"},
+		},
+		"relay_launch": map[string]any{
+			"argv":              []any{"/home/user/secret dir/relay --token=sk-SECRET", "run"},
+			"working_directory": "/home/user/secret",
+			"exit_code":         float64(1),
+			"start_failed":      false,
+		},
+	}
+	metadata := SanitizeRelayRunRecordMetadata(record)
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	if strings.Contains(string(encoded), "SECRET") {
+		t.Fatalf("sanitized metadata retains unsafe identifier bytes: %s", encoded)
+	}
+	codes, _ := metadata["diagnostics"].([]map[string]any)
+	if len(codes) != 1 || codes[0]["code"] != "relay_nonzero_exit" {
+		t.Fatalf("expected only the conforming diagnostic code, got %v", metadata["diagnostics"])
+	}
+	launch, _ := metadata["relay_launch"].(map[string]any)
+	if launch == nil {
+		t.Fatalf("expected relay_launch summary to survive")
+	}
+	if _, present := launch["executable"]; present {
+		t.Fatalf("expected non-conforming executable basename to be dropped, got %v", launch["executable"])
+	}
+	if _, present := launch["argv_digest"]; !present {
+		t.Fatalf("expected argv_digest to remain for correlation")
+	}
 }

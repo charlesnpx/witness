@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -621,10 +622,15 @@ func SanitizeRelayRunRecordMetadata(record map[string]any) map[string]any {
 	return metadata
 }
 
+// manifestSafeIdentifier bounds the identifier-like strings the manifest
+// projection will carry: run records can be supplied externally, so anything
+// not matching this conservative shape is dropped rather than published.
+var manifestSafeIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
 func relayRunRecordDiagnosticCodes(value any) []map[string]any {
 	codes := make([]map[string]any, 0)
 	appendCode := func(code string) {
-		if code = strings.TrimSpace(code); code != "" {
+		if code = strings.TrimSpace(code); manifestSafeIdentifier.MatchString(code) {
 			codes = append(codes, map[string]any{"code": code})
 		}
 	}
@@ -659,14 +665,16 @@ func relayLaunchMetadataSummary(value any) map[string]any {
 	summary := make(map[string]any, 9)
 	if argv, ok := relayLaunchArgv(launch["argv"]); ok {
 		if len(argv) > 0 {
-			summary["executable"] = filepath.Base(argv[0])
+			if executable := filepath.Base(argv[0]); manifestSafeIdentifier.MatchString(executable) {
+				summary["executable"] = executable
+			}
 		}
 		if argvDigest, err := digest.SemanticJSON(argv); err == nil {
 			summary["argv_digest"] = argvDigest
 		}
 	} else {
-		if executable, ok := launch["executable"].(string); ok && strings.TrimSpace(executable) != "" {
-			summary["executable"] = executable
+		if executable, ok := launch["executable"].(string); ok && manifestSafeIdentifier.MatchString(strings.TrimSpace(executable)) {
+			summary["executable"] = strings.TrimSpace(executable)
 		}
 		if argvDigest, ok := launch["argv_digest"].(string); ok && digest.WellFormed(argvDigest) {
 			summary["argv_digest"] = argvDigest
