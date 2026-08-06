@@ -345,7 +345,7 @@ func runRoleOutputValidate(args []string) error {
 // deliberately retain their existing path semantics, while an unresolved bare
 // name is left unchanged for the existing relay_missing degradation path.
 func resolveRelayExecutable(path string) string {
-	if path == "" || strings.ContainsRune(path, rune(filepath.Separator)) {
+	if path == "" || strings.ContainsRune(path, '/') || strings.ContainsRune(path, rune(filepath.Separator)) {
 		return path
 	}
 	resolved, err := exec.LookPath(path)
