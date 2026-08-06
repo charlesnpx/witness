@@ -16,8 +16,8 @@
         "created_at": "bound",
         "nested": [100, "café", "<tag>&value", "line\nnext"]
       },
-      "canonical": "{\"created_at\":\"bound\",\"nested\":[1e2,\"café\",\"<tag>&value\",\"line\\nnext\"],\"path\":\"/still/semantic\",\"storage_id\":\"semantic\"}",
-      "digest": "sha256:8215f2555a93eb0536259e81e6edcbc4ee46083ef6b2b8f702a8812378ffc3d2"
+      "canonical": "{\"created_at\":\"bound\",\"nested\":[100,\"café\",\"<tag>&value\",\"line\\nnext\"],\"path\":\"/still/semantic\",\"storage_id\":\"semantic\"}",
+      "digest": "sha256:2a64ef02ed094fecd6553a422d95f6bd43b3861dba3139aec4e1b57c79fc2dd9"
     },
     {
       "id": "workspace-storage-envelope",

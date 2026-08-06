@@ -16,6 +16,8 @@ import (
 
 var jsonNumberPattern = regexp.MustCompile(`^(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$`)
 
+const maxSafeInteger = "9007199254740991"
+
 // Marshal returns the deterministic canonical JSON form used by Witness and
 // relay-root-digests-v1 semantic JSON digests.
 func Marshal(value any) ([]byte, error) {
@@ -198,6 +200,15 @@ func appendFloat(buffer *bytes.Buffer, value float64, bits int) error {
 	return appendNumber(buffer, strconv.FormatFloat(value, 'g', -1, bits))
 }
 
+// normalizeNumber emits Witness's deterministic JSON number spelling.
+//
+// RFC 8785 section 3.2.2.3 specifies JCS number serialization in terms of
+// ECMAScript Number-to-string behavior. Witness preserves the exact decimal
+// value supplied by JSON rather than first rounding it through float64: zero
+// is "0"; mathematically integral values with |v| < 2^53 use plain decimal
+// integer notation; and fractional or out-of-range values retain a minimal,
+// normalized significand-exponent form. This keeps equivalent spellings
+// canonical while avoiding loss of precision outside the safe-integer range.
 func normalizeNumber(raw string) (string, error) {
 	parts := jsonNumberPattern.FindStringSubmatch(raw)
 	if parts == nil {
@@ -219,6 +230,9 @@ func normalizeNumber(raw string) (string, error) {
 		}
 	}
 	exponent.Add(exponent, big.NewInt(int64(len(integer)-firstNonZero-1)))
+	if integer, ok := safeIntegerNotation(sign, significand, exponent); ok {
+		return integer, nil
+	}
 
 	var builder strings.Builder
 	builder.WriteString(sign)
@@ -232,4 +246,21 @@ func normalizeNumber(raw string) (string, error) {
 		builder.WriteString(exponent.String())
 	}
 	return builder.String(), nil
+}
+
+func safeIntegerNotation(sign, significand string, exponent *big.Int) (string, bool) {
+	shift := new(big.Int).Sub(exponent, big.NewInt(int64(len(significand)-1)))
+	if shift.Sign() < 0 || shift.Cmp(big.NewInt(int64(len(maxSafeInteger)))) > 0 {
+		return "", false
+	}
+	zeros := int(shift.Int64())
+	digitCount := len(significand) + zeros
+	if digitCount > len(maxSafeInteger) {
+		return "", false
+	}
+	integer := significand + strings.Repeat("0", zeros)
+	if digitCount == len(maxSafeInteger) && integer > maxSafeInteger {
+		return "", false
+	}
+	return sign + integer, true
 }
