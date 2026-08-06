@@ -217,6 +217,44 @@ func TestCreateRejectsDirtyGitWorktreeContentMutationDuringCapture(t *testing.T)
 	}
 }
 
+func TestVerifyDirtyGitCaptureRejectsCleanTrackedFileMutationRestoredBeforeInventory(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	cleanPath := filepath.Join(repo, "clean.txt")
+	cleanBytes := []byte("clean\n")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	mustWriteFile(t, cleanPath, cleanBytes, 0o644)
+	runGit(t, repo, "add", "app.txt", "clean.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	before, err := collectDirtyGitInventory(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("collect before capture inventory: %v", err)
+	}
+
+	// The clean file changes while bytes are captured, then the existing
+	// post-capture seam restores its Git-visible state before the re-inventory.
+	mustWriteFile(t, cleanPath, []byte("transient-captured-bytes\n"), 0o644)
+	entries := make([]FileEntry, 0, len(before.files))
+	for _, item := range before.files {
+		data, _, err := readSnapshotBytes(repo, item)
+		if err != nil {
+			t.Fatalf("capture %s: %v", item.path, err)
+		}
+		entries = append(entries, FileEntry{Path: item.path, Digest: digest.RawBytes(data)})
+	}
+
+	err = verifyDirtyGitCapture(context.Background(), repo, before, entries, func() {
+		mustWriteFile(t, cleanPath, cleanBytes, 0o644)
+	})
+	if got := errorCode(err); got != CodeSourceChangedDuringCapture {
+		t.Fatalf("freeze error code = %q, want %q; err=%v", got, CodeSourceChangedDuringCapture, err)
+	}
+}
+
 func TestCreateRejectsSymlinkedManifestPath(t *testing.T) {
 	source := t.TempDir()
 	mustWriteFile(t, filepath.Join(source, "file.txt"), []byte("content"), 0o644)
