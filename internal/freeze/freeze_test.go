@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/diag"
@@ -114,6 +115,79 @@ func TestCreateRejectsOutputInsideGitRepositoryRoot(t *testing.T) {
 	})
 	if errorCode(err) != CodeOutputInsideSource {
 		t.Fatalf("err = %v, want %s", err, CodeOutputInsideSource)
+	}
+}
+
+func TestCreateDirtyGitWorktreeRequiresOverrideAndCapturesWorkingBytes(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, ".gitignore"), []byte("ignored.txt\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	runGit(t, repo, "add", ".gitignore", "app.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "untracked.txt"), []byte("untracked\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "ignored.txt"), []byte("ignored\n"), 0o644)
+
+	_, err := Create(context.Background(), Options{
+		SourceDir: repo,
+		OutputDir: filepath.Join(t.TempDir(), "rejected"),
+	})
+	if got := errorCode(err); got != CodeSourceDirty {
+		t.Fatalf("dirty freeze error code = %q, want %q; err=%v", got, CodeSourceDirty, err)
+	}
+
+	snapshot, err := Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+	})
+	if err != nil {
+		t.Fatalf("dirty freeze with override: %v", err)
+	}
+	if !snapshot.Manifest.Source.GitDirty {
+		t.Fatalf("source identity = %#v, want dirty working tree metadata", snapshot.Manifest.Source)
+	}
+	if snapshot.Manifest.Source.GitTrackedOnly {
+		t.Fatalf("source identity = %#v, want untracked files recorded", snapshot.Manifest.Source)
+	}
+	for _, status := range []string{"M app.txt", "?? untracked.txt"} {
+		if !strings.Contains(snapshot.Manifest.Source.GitDirtyStatus, status) {
+			t.Fatalf("dirty status %q does not contain %q", snapshot.Manifest.Source.GitDirtyStatus, status)
+		}
+	}
+
+	entries := map[string]FileEntry{}
+	for _, entry := range snapshot.Manifest.Files {
+		entries[entry.Path] = entry
+	}
+	for path, want := range map[string][]byte{
+		"app.txt":       []byte("working-copy\n"),
+		"untracked.txt": []byte("untracked\n"),
+	} {
+		entry, found := entries[path]
+		if !found {
+			t.Fatalf("snapshot files = %#v, missing %s", snapshot.Manifest.Files, path)
+		}
+		if got := entry.Digest; got != digest.RawBytes(want) {
+			t.Fatalf("snapshot digest for %s = %s, want %s", path, got, digest.RawBytes(want))
+		}
+		blob, err := os.ReadFile(filepath.Join(filepath.Dir(snapshot.ManifestPath), filepath.FromSlash(entry.Blob)))
+		if err != nil {
+			t.Fatalf("read snapshot blob for %s: %v", path, err)
+		}
+		if !bytes.Equal(blob, want) {
+			t.Fatalf("snapshot blob for %s = %q, want %q", path, blob, want)
+		}
+	}
+	if _, found := entries["ignored.txt"]; found {
+		t.Fatalf("snapshot unexpectedly included ignored file: %#v", entries["ignored.txt"])
+	}
+	if digest, err := ManifestDigest(snapshot.Manifest); err != nil || digest != snapshot.ManifestDigest {
+		t.Fatalf("snapshot manifest digest = %q, %v; want %q", digest, err, snapshot.ManifestDigest)
 	}
 }
 

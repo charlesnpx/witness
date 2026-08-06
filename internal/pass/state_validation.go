@@ -31,6 +31,7 @@ func validateLoadedState(state *State) error {
 	diagnostics = append(diagnostics, validateEffectiveHeadManifestBinding(state)...)
 	diagnostics = append(diagnostics, validateMandatoryStageArtifacts(state)...)
 	diagnostics = append(diagnostics, validateRecordedArtifactDigestsAndOutputs(state)...)
+	diagnostics = append(diagnostics, validateSourceSnapshotContext(state)...)
 	diagnostics = append(diagnostics, validateDerivedRelayBatches(state)...)
 	diagnostics = append(diagnostics, validateStageCrossBindings(state)...)
 	if len(diagnostics) > 0 {
@@ -97,6 +98,34 @@ func validateEffectiveHeadManifestBinding(state *State) []diag.Diagnostic {
 		return []diag.Diagnostic{diag.FromError(err)}
 	}
 	return nil
+}
+
+func validateSourceSnapshotContext(state *State) []diag.Diagnostic {
+	if state == nil || !stageComplete(state, stageFreeze) {
+		return nil
+	}
+	if _, err := os.Stat(state.Config.SnapshotManifestPath); err != nil {
+		// Other stage validators own absent or unreadable artifact diagnostics;
+		// avoid changing their established failure ordering for fabricated state.
+		return nil
+	}
+	manifest, err := readFreezeManifest(state.Config.SnapshotManifestPath)
+	if err != nil {
+		return []diag.Diagnostic{diag.FromError(err)}
+	}
+	if state.SourceDirty == manifest.Source.GitDirty && state.SourceDirtyStatus == manifest.Source.GitDirtyStatus {
+		return nil
+	}
+	return []diag.Diagnostic{stateInvalidDiagnostic(
+		"pass dirty-source context does not match the frozen snapshot manifest.",
+		"/source_dirty",
+		map[string]any{
+			"actual_dirty":          state.SourceDirty,
+			"expected_dirty":        manifest.Source.GitDirty,
+			"actual_dirty_status":   state.SourceDirtyStatus,
+			"expected_dirty_status": manifest.Source.GitDirtyStatus,
+		},
+	)}
 }
 
 func validateMandatoryStageArtifacts(state *State) []diag.Diagnostic {
@@ -446,6 +475,9 @@ func validateFrozenCharterOutput(config Config, frozen charter.FrozenCharter) er
 	if err != nil {
 		return err
 	}
+	if err := requireReviewCharterGoals(input.Goals, config.AllowEmptyCharter); err != nil {
+		return err
+	}
 	var amendments []charter.OwnerEvent
 	if config.AmendmentsPath != "" {
 		amendments, err = charter.ReadAmendmentsFile(config.AmendmentsPath)
@@ -462,9 +494,10 @@ func validateFrozenCharterOutput(config Config, frozen charter.FrozenCharter) er
 
 func validateFreezeManifestOutput(config Config, manifest freeze.Manifest) (string, error) {
 	expected, err := freeze.DeriveManifest(context.Background(), freeze.Options{
-		SourceDir:   config.SourceDir,
-		OutputDir:   config.SnapshotDir,
-		AllowNonGit: config.AllowNonGitSource,
+		SourceDir:        config.SourceDir,
+		OutputDir:        config.SnapshotDir,
+		AllowNonGit:      config.AllowNonGitSource,
+		AllowDirtySource: config.AllowDirtySource,
 	})
 	if err != nil {
 		return "", err
@@ -601,6 +634,8 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 	}
 	result.SnapshotDigest = snapshotDigest
 	result.ArtifactDigests["source-snapshot-manifest"] = snapshotDigest
+	result.SourceDirty = manifest.Source.GitDirty
+	result.SourceDirtyStatus = manifest.Source.GitDirtyStatus
 
 	capabilities, capabilitiesDigest, err := readRetainedPreflightArtifact(config, "relay-capabilities.json")
 	if err != nil {

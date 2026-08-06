@@ -2,6 +2,7 @@ package pass
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -61,6 +62,49 @@ func assembleResultPath(config Config) string {
 
 func retainedIntegrationBundlePath(config Config) string {
 	return filepath.Join(config.StateDir, "integration-bundle.json")
+}
+
+// passRetainedArtifacts reports the retained artifacts already written by the
+// pass as state-directory-relative paths. It deliberately shares the
+// preflight retained_artifacts map shape so callers need only consume one
+// inventory format while a pass advances.
+func passRetainedArtifacts(config Config, preflightResult preflight.Result) map[string]string {
+	artifacts := map[string]string{}
+	for _, item := range []struct {
+		role string
+		path string
+	}{
+		{role: "pass_state", path: config.Outputs.StatePath},
+		{role: "charter_freeze", path: config.Outputs.CharterFreezePath},
+		{role: "preflight", path: config.Outputs.PreflightPath},
+		{role: "source_manifest", path: config.SnapshotManifestPath},
+		{role: "workspace_manifest", path: config.SnapshotManifestPath},
+	} {
+		if relativePath, ok := stateDirRelativeExistingFile(config.StateDir, item.path); ok {
+			artifacts[item.role] = relativePath
+		}
+	}
+	for role, relativePath := range preflightResult.RetainedArtifacts {
+		if relativePath != "" {
+			artifacts[role] = relativePath
+		}
+	}
+	return artifacts
+}
+
+func stateDirRelativeExistingFile(stateDir string, path string) (string, bool) {
+	if strings.TrimSpace(stateDir) == "" || strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	relativePath, err := filepath.Rel(stateDir, path)
+	if err != nil || relativePath == "." || relativePath == ".." || filepath.IsAbs(relativePath) || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	return filepath.ToSlash(relativePath), true
 }
 
 func roleOutputDir(config Config) string {

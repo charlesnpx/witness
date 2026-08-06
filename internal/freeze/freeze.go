@@ -37,9 +37,10 @@ const (
 )
 
 type Options struct {
-	SourceDir   string
-	OutputDir   string
-	AllowNonGit bool
+	SourceDir        string
+	OutputDir        string
+	AllowNonGit      bool
+	AllowDirtySource bool
 }
 
 type Result struct {
@@ -61,6 +62,8 @@ type SourceIdentity struct {
 	GitRoot        string `json:"git_root,omitempty"`
 	GitHead        string `json:"git_head,omitempty"`
 	GitTrackedOnly bool   `json:"git_tracked_only"`
+	GitDirty       bool   `json:"git_dirty,omitempty"`
+	GitDirtyStatus string `json:"git_dirty_status,omitempty"`
 	ManifestDigest string `json:"manifest_digest,omitempty"`
 }
 
@@ -111,19 +114,9 @@ func DeriveManifest(ctx context.Context, options Options) (Result, error) {
 		return zero, err
 	}
 
-	source := SourceIdentity{Path: sourceAbs}
-	files, gitSource, err := collectGitFiles(ctx, sourceAbs)
+	files, source, err := collectSourceFiles(ctx, sourceAbs, options)
 	if err != nil {
-		if !options.AllowNonGit || !isNonGitError(err) {
-			return zero, err
-		}
-		files, err = collectFilesystemFiles(sourceAbs)
-		if err != nil {
-			return zero, err
-		}
-		source.GitTrackedOnly = false
-	} else {
-		source = gitSource
+		return zero, err
 	}
 
 	entries := make([]FileEntry, 0, len(files))
@@ -189,19 +182,9 @@ func Create(ctx context.Context, options Options) (Result, error) {
 		return zero, err
 	}
 
-	source := SourceIdentity{Path: sourceAbs}
-	files, gitSource, err := collectGitFiles(ctx, sourceAbs)
+	files, source, err := collectSourceFiles(ctx, sourceAbs, options)
 	if err != nil {
-		if !options.AllowNonGit || !isNonGitError(err) {
-			return zero, err
-		}
-		files, err = collectFilesystemFiles(sourceAbs)
-		if err != nil {
-			return zero, err
-		}
-		source.GitTrackedOnly = false
-	} else {
-		source = gitSource
+		return zero, err
 	}
 
 	blobRoot := filepath.Join(outputAbs, "blobs", "sha256")
@@ -312,7 +295,24 @@ func gitRepositoryRoot(ctx context.Context, sourceAbs string) (string, error) {
 	return canonicalPath(strings.TrimSpace(root))
 }
 
-func collectGitFiles(ctx context.Context, sourceAbs string) ([]sourceFile, SourceIdentity, error) {
+func collectSourceFiles(ctx context.Context, sourceAbs string, options Options) ([]sourceFile, SourceIdentity, error) {
+	source := SourceIdentity{Path: sourceAbs}
+	files, gitSource, err := collectGitFiles(ctx, sourceAbs, options.AllowDirtySource)
+	if err != nil {
+		if !options.AllowNonGit || !isNonGitError(err) {
+			return nil, SourceIdentity{}, err
+		}
+		files, err = collectFilesystemFiles(sourceAbs)
+		if err != nil {
+			return nil, SourceIdentity{}, err
+		}
+		source.GitTrackedOnly = false
+		return files, source, nil
+	}
+	return files, gitSource, nil
+}
+
+func collectGitFiles(ctx context.Context, sourceAbs string, allowDirtySource bool) ([]sourceFile, SourceIdentity, error) {
 	root, err := gitOutput(ctx, sourceAbs, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, SourceIdentity{}, diag.Wrap(err, CodeSourceNotGit, "source directory must be a Git work tree unless non-Git freezing is explicitly enabled.")
@@ -330,6 +330,24 @@ func collectGitFiles(ctx context.Context, sourceAbs string) ([]sourceFile, Sourc
 		return nil, SourceIdentity{}, err
 	}
 	if status != "" {
+		if allowDirtySource {
+			files, trackedOnly, err := collectDirtyGitFiles(ctx, sourceAbs)
+			if err != nil {
+				return nil, SourceIdentity{}, err
+			}
+			summary, err := gitOutput(ctx, sourceAbs, "status", "--porcelain=v1", "--untracked-files=normal")
+			if err != nil {
+				return nil, SourceIdentity{}, err
+			}
+			return files, SourceIdentity{
+				Path:           sourceAbs,
+				GitRoot:        root,
+				GitHead:        strings.TrimSpace(head),
+				GitTrackedOnly: trackedOnly,
+				GitDirty:       true,
+				GitDirtyStatus: strings.TrimSpace(summary),
+			}, nil
+		}
 		return nil, SourceIdentity{}, diag.New(
 			CodeSourceDirty,
 			"source Git work tree must be clean before freezing.",
@@ -350,6 +368,88 @@ func collectGitFiles(ctx context.Context, sourceAbs string) ([]sourceFile, Sourc
 		GitHead:        strings.TrimSpace(head),
 		GitTrackedOnly: true,
 	}, nil
+}
+
+// collectDirtyGitFiles inventories the work tree as it is now: tracked files
+// use their on-disk mode and bytes, deleted tracked files are absent, and
+// non-ignored untracked files are included.
+func collectDirtyGitFiles(ctx context.Context, sourceAbs string) ([]sourceFile, bool, error) {
+	stage, err := gitOutput(ctx, sourceAbs, "ls-files", "--stage", "-z")
+	if err != nil {
+		return nil, false, err
+	}
+	tracked, err := parseGitStage(stage)
+	if err != nil {
+		return nil, false, err
+	}
+	files := make(map[string]sourceFile, len(tracked))
+	for _, item := range tracked {
+		file, present, err := sourceFileFromWorkingTree(sourceAbs, item.path)
+		if err != nil {
+			return nil, false, err
+		}
+		if present {
+			files[file.path] = file
+		}
+	}
+
+	untrackedOutput, err := gitOutput(ctx, sourceAbs, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, false, err
+	}
+	untracked, err := parseGitPaths(untrackedOutput)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, path := range untracked {
+		file, present, err := sourceFileFromWorkingTree(sourceAbs, path)
+		if err != nil {
+			return nil, false, err
+		}
+		if present {
+			files[file.path] = file
+		}
+	}
+
+	items := make([]sourceFile, 0, len(files))
+	for _, item := range files {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].path < items[j].path })
+	return items, len(untracked) == 0, nil
+}
+
+func parseGitPaths(output string) ([]string, error) {
+	if output == "" {
+		return nil, nil
+	}
+	paths := make([]string, 0, strings.Count(output, "\x00"))
+	for _, path := range strings.Split(output, "\x00") {
+		if path == "" {
+			continue
+		}
+		if err := validateRelativePath(path); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func sourceFileFromWorkingTree(sourceAbs string, relativePath string) (sourceFile, bool, error) {
+	path := filepath.Join(sourceAbs, filepath.FromSlash(relativePath))
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return sourceFile{}, false, nil
+	}
+	if err != nil {
+		return sourceFile{}, false, err
+	}
+	mode, err := fileModeString(info.Mode())
+	if err != nil {
+		return sourceFile{}, false, err
+	}
+	return sourceFile{path: relativePath, mode: mode}, true, nil
 }
 
 func collectFilesystemFiles(sourceAbs string) ([]sourceFile, error) {

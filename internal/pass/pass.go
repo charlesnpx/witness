@@ -49,6 +49,7 @@ const (
 	CodePassStateConfigMismatch = "pass_state_config_mismatch"
 	CodeHeadManifestMismatch    = "pass_head_manifest_snapshot_mismatch"
 	CodeNextActionDrift         = "pass_next_action_drift"
+	CodeCharterZeroGoals        = "charter_zero_goals"
 
 	stageFreeze     = "freeze"
 	stagePreflight  = "preflight"
@@ -89,6 +90,8 @@ type BeginOptions struct {
 	SourceDir             string
 	SnapshotDir           string
 	AllowNonGitSource     bool
+	AllowDirtySource      bool
+	AllowEmptyCharter     bool
 	RelayPath             string
 	IntegrationBundlePath string
 	Backend               string
@@ -122,6 +125,8 @@ type Config struct {
 	SnapshotDir           string           `json:"snapshot_dir"`
 	SnapshotManifestPath  string           `json:"snapshot_manifest_path"`
 	AllowNonGitSource     bool             `json:"allow_non_git_source,omitempty"`
+	AllowDirtySource      bool             `json:"allow_dirty_source,omitempty"`
+	AllowEmptyCharter     bool             `json:"allow_empty_charter,omitempty"`
 	RelayPath             string           `json:"relay_path,omitempty"`
 	IntegrationBundlePath string           `json:"integration_bundle_path"`
 	Backend               string           `json:"backend,omitempty"`
@@ -152,15 +157,17 @@ type Outputs struct {
 }
 
 type State struct {
-	SchemaVersion string             `json:"schema_version"`
-	DigestProfile string             `json:"digest_profile"`
-	StateDigest   string             `json:"state_digest"`
-	StateDir      string             `json:"state_dir"`
-	Config        Config             `json:"config"`
-	Stages        []StageRecord      `json:"stages"`
-	RelayBatches  []RelayBatchRecord `json:"relay_batches,omitempty"`
-	NextAction    NextAction         `json:"next_action"`
-	Complete      bool               `json:"complete"`
+	SchemaVersion     string             `json:"schema_version"`
+	DigestProfile     string             `json:"digest_profile"`
+	StateDigest       string             `json:"state_digest"`
+	StateDir          string             `json:"state_dir"`
+	SourceDirty       bool               `json:"source_dirty,omitempty"`
+	SourceDirtyStatus string             `json:"source_dirty_status,omitempty"`
+	Config            Config             `json:"config"`
+	Stages            []StageRecord      `json:"stages"`
+	RelayBatches      []RelayBatchRecord `json:"relay_batches,omitempty"`
+	NextAction        NextAction         `json:"next_action"`
+	Complete          bool               `json:"complete"`
 }
 
 type StageRecord struct {
@@ -228,14 +235,17 @@ type RelayBatchAction struct {
 }
 
 type Invocation struct {
-	SchemaVersion string            `json:"schema_version"`
-	DigestProfile string            `json:"digest_profile"`
-	PassState     ArtifactRecord    `json:"pass_state"`
-	StageRun      string            `json:"stage_run,omitempty"`
-	Complete      bool              `json:"complete"`
-	Degraded      bool              `json:"degraded,omitempty"`
-	BackendStrata map[string]string `json:"backend_strata,omitempty"`
-	NextAction    NextAction        `json:"next_action"`
+	SchemaVersion     string            `json:"schema_version"`
+	DigestProfile     string            `json:"digest_profile"`
+	PassState         ArtifactRecord    `json:"pass_state"`
+	StageRun          string            `json:"stage_run,omitempty"`
+	Complete          bool              `json:"complete"`
+	Degraded          bool              `json:"degraded,omitempty"`
+	BackendStrata     map[string]string `json:"backend_strata,omitempty"`
+	RetainedArtifacts map[string]string `json:"retained_artifacts"`
+	SourceDirty       bool              `json:"source_dirty,omitempty"`
+	SourceDirtyStatus string            `json:"source_dirty_status,omitempty"`
+	NextAction        NextAction        `json:"next_action"`
 }
 
 type ValidationError struct {
@@ -342,7 +352,14 @@ func (invocation *Invocation) HumanSummary() string {
 	if invocation == nil {
 		return ""
 	}
-	return invocation.NextAction.Summary
+	summary := invocation.NextAction.Summary
+	if !invocation.SourceDirty {
+		return summary
+	}
+	if summary == "" {
+		return "reviewed a dirty working tree snapshot"
+	}
+	return summary + " (reviewed a dirty working tree snapshot)"
 }
 
 func advance(ctx context.Context, state *State) (*Invocation, error) {
@@ -414,6 +431,10 @@ func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 	preflightResult, _ := readPreflightResult(state.Config.Outputs.PreflightPath)
 	backendStrata := cloneStringMap(preflightResult.BackendStrata)
 	degraded := preflight.RelayAbsent(preflightResult)
+	sourceDirty, sourceDirtyStatus := state.SourceDirty, state.SourceDirtyStatus
+	if frozenDirty, frozenStatus := frozenSourceContext(state.Config); frozenDirty || frozenStatus != "" {
+		sourceDirty, sourceDirtyStatus = frozenDirty, frozenStatus
+	}
 	return &Invocation{
 		SchemaVersion: InvocationSchemaVersion,
 		DigestProfile: digest.Profile,
@@ -423,11 +444,14 @@ func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 			Digest:      state.StateDigest,
 			DigestClass: digestClassPassState,
 		},
-		StageRun:      stageRun,
-		Complete:      state.Complete,
-		Degraded:      degraded,
-		BackendStrata: backendStrata,
-		NextAction:    state.NextAction,
+		StageRun:          stageRun,
+		Complete:          state.Complete,
+		Degraded:          degraded,
+		BackendStrata:     backendStrata,
+		RetainedArtifacts: passRetainedArtifacts(state.Config, preflightResult),
+		SourceDirty:       sourceDirty,
+		SourceDirtyStatus: sourceDirtyStatus,
+		NextAction:        state.NextAction,
 	}, nil
 }
 
@@ -435,6 +459,9 @@ func runFreeze(ctx context.Context, state *State) error {
 	config := state.Config
 	input, err := charter.ReadFile(config.CharterPath)
 	if err != nil {
+		return err
+	}
+	if err := requireReviewCharterGoals(input.Goals, config.AllowEmptyCharter); err != nil {
 		return err
 	}
 	var amendments []charter.OwnerEvent
@@ -452,13 +479,16 @@ func runFreeze(ctx context.Context, state *State) error {
 		return err
 	}
 	snapshot, err := freeze.Create(ctx, freeze.Options{
-		SourceDir:   config.SourceDir,
-		OutputDir:   config.SnapshotDir,
-		AllowNonGit: config.AllowNonGitSource,
+		SourceDir:        config.SourceDir,
+		OutputDir:        config.SnapshotDir,
+		AllowNonGit:      config.AllowNonGitSource,
+		AllowDirtySource: config.AllowDirtySource,
 	})
 	if err != nil {
 		return err
 	}
+	state.SourceDirty = snapshot.Manifest.Source.GitDirty
+	state.SourceDirtyStatus = snapshot.Manifest.Source.GitDirtyStatus
 	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
 		{role: "charter", path: config.CharterPath, digestClass: digest.ClassRawBytes},
 		{role: "amendments", path: config.AmendmentsPath, digestClass: digest.ClassRawBytes},
@@ -482,6 +512,8 @@ func runFreeze(ctx context.Context, state *State) error {
 			"charter_hash":           frozen.CharterHash,
 			"snapshot_digest":        snapshot.ManifestDigest,
 			"snapshot_manifest_path": snapshot.ManifestPath,
+			"source_dirty":           snapshot.Manifest.Source.GitDirty,
+			"source_dirty_status":    snapshot.Manifest.Source.GitDirtyStatus,
 		},
 	})
 	return nil
@@ -492,12 +524,18 @@ func runPreflight(ctx context.Context, state *State) error {
 	if err := validateEffectiveHeadManifest(config); err != nil {
 		return err
 	}
+	frozen, _, err := readFrozenCharter(config.Outputs.CharterFreezePath)
+	if err != nil {
+		return err
+	}
 	result, err := preflight.Run(ctx, preflight.Options{
 		RelayPath:              config.RelayPath,
 		IntegrationBundlePath:  config.IntegrationBundlePath,
 		StateDir:               config.StateDir,
 		SnapshotManifestPath:   config.SnapshotManifestPath,
 		ExpectedSnapshotDigest: stageOutputDigest(state, "source-snapshot-manifest"),
+		FrozenCharter:          &frozen,
+		AllowEmptyCharter:      config.AllowEmptyCharter,
 		ConsumerIdentity:       map[string]any{"kind": "witness", "id": "pass-driver"},
 	})
 	if err != nil {
@@ -523,8 +561,10 @@ func runPreflight(ctx context.Context, state *State) error {
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"relay_absent":   preflight.RelayAbsent(*result),
-			"backend_strata": cloneStringMap(result.BackendStrata),
+			"relay_absent":        preflight.RelayAbsent(*result),
+			"backend_strata":      cloneStringMap(result.BackendStrata),
+			"source_dirty":        result.SourceDirty,
+			"source_dirty_status": result.SourceDirtyStatus,
 		},
 	})
 	return nil
@@ -903,6 +943,8 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		SnapshotDir:          snapshotDir,
 		SnapshotManifestPath: filepath.Join(snapshotDir, "manifest.json"),
 		AllowNonGitSource:    options.AllowNonGitSource,
+		AllowDirtySource:     options.AllowDirtySource,
+		AllowEmptyCharter:    options.AllowEmptyCharter,
 		Backend:              strings.TrimSpace(options.Backend),
 		BaselinePass:         options.BaselinePass,
 		Outputs: Outputs{
@@ -1388,6 +1430,25 @@ func stageDetailString(state *State, stageName string, key string) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+func requireReviewCharterGoals(goals []charter.Statement, allowEmptyCharter bool) error {
+	if len(goals) != 0 || allowEmptyCharter {
+		return nil
+	}
+	return diag.New(
+		CodeCharterZeroGoals,
+		"review requires at least one Charter goal because an empty Charter makes review vacuous; pass -allow-empty-charter to override.",
+		diag.WithPath("/goals"),
+	)
+}
+
+func frozenSourceContext(config Config) (bool, string) {
+	manifest, err := readFreezeManifest(config.SnapshotManifestPath)
+	if err != nil {
+		return false, ""
+	}
+	return manifest.Source.GitDirty, manifest.Source.GitDirtyStatus
 }
 
 func currentCharterHash(config Config) string {
