@@ -87,6 +87,12 @@ See [skill/SKILL.md](skill/SKILL.md) for the complete orchestration procedure
 and [docs/witnessed-adversarial-review-spec-corrected.md](docs/witnessed-adversarial-review-spec-corrected.md)
 for the architecture and contract model.
 
+## Operator walkthrough
+
+For the copy-pasteable pass flow—from an owner-authored Charter through finder
+output, adjudication, ledger, and a zero-findings result—see
+[docs/operator-walkthrough.md](docs/operator-walkthrough.md).
+
 ## Security and trust model
 
 `witness-harness` is an evidence producer, not a security sandbox. It launches
