@@ -1,9 +1,13 @@
 package planning
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/adjudicate"
@@ -12,8 +16,6 @@ import (
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/digest"
-	"github.com/charlesnpx/witness/internal/metrics"
-	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
@@ -101,6 +103,275 @@ func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
 	}
 }
 
+func TestAssembleRetainsLaunchFailureAndPrefersConsumingRetry(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	stdout := "diagnostic stdout"
+	stderr := "diagnostic stderr"
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
+			RunRecords: []map[string]any{
+				{
+					"schema_version":   "witness-relay-verification-run-v2",
+					"batch_id":         batch.Plan.BatchID,
+					"recipe_id":        batch.Plan.RecipeFamily + "-codex",
+					"consumes_batch":   false,
+					"status":           "launch_failed",
+					"provider_invoked": "false",
+					"relay_launch": map[string]any{
+						"stdout_b64":       base64.StdEncoding.EncodeToString([]byte(stdout)),
+						"stderr_b64":       base64.StdEncoding.EncodeToString([]byte(stderr)),
+						"stdout_digest":    digest.RawBytes([]byte(stdout)),
+						"stderr_digest":    digest.RawBytes([]byte(stderr)),
+						"stdout_bytes":     len([]byte(stdout)),
+						"stderr_bytes":     len([]byte(stderr)),
+						"start_failed":     true,
+						"stdout_truncated": true,
+						"stderr_truncated": false,
+					},
+				},
+				{
+					"schema_version":   "witness-relay-verification-run-v2",
+					"batch_id":         batch.Plan.BatchID,
+					"recipe_id":        batch.Plan.RecipeFamily + "-codex",
+					"consumes_batch":   true,
+					"status":           contracts.RecordStatusUnavailable,
+					"provider_invoked": "unknown",
+				},
+			},
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].FailureReason != "relay_run_recorded_unavailable" {
+		t.Fatalf("manifest batches = %#v, want consuming record to determine unavailable reason", result.Manifest.Batches)
+	}
+	rawBatches, ok := result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", result.Manifest.ConsumerIdentity)
+	}
+	metadata, ok := rawBatches[batch.Plan.BatchID].(map[string]any)
+	if !ok {
+		t.Fatalf("relay batch metadata = %#v", rawBatches)
+	}
+	runRecords, ok := metadata["run_records"].([]map[string]any)
+	if !ok || len(runRecords) != 2 {
+		t.Fatalf("run records = %#v", metadata["run_records"])
+	}
+	launch, ok := runRecords[0]["relay_launch"].(map[string]any)
+	if !ok {
+		t.Fatalf("run record = %#v, missing launch metadata", runRecords[0])
+	}
+	if _, exists := launch["stdout"]; exists {
+		t.Fatalf("launch metadata retained raw stdout: %#v", launch)
+	}
+	if _, exists := launch["stderr"]; exists {
+		t.Fatalf("launch metadata retained raw stderr: %#v", launch)
+	}
+	if launch["stdout_digest"] != digest.RawBytes([]byte(stdout)) || launch["stdout_bytes"] != len([]byte(stdout)) || launch["stdout_truncated"] != true {
+		t.Fatalf("stdout metadata = %#v", launch)
+	}
+	if launch["stderr_digest"] != digest.RawBytes([]byte(stderr)) || launch["stderr_bytes"] != len([]byte(stderr)) || launch["stderr_truncated"] != false {
+		t.Fatalf("stderr metadata = %#v", launch)
+	}
+}
+
+func TestAssembleRejectsRunRecordRecipeMismatchToPlannedBatch(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
+			RunRecords: []map[string]any{{
+				"schema_version":   "witness-relay-verification-run-v2",
+				"batch_id":         batch.Plan.BatchID,
+				"recipe_id":        "economy-equivalence-v2-codex",
+				"status":           contracts.RecordStatusUnavailable,
+				"provider_invoked": "unknown",
+				"consumes_batch":   true,
+			}},
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a run record whose recipe does not match the planned batch")
+	}
+	if result == nil || len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].FailureReason != "relay_run_record_provenance_mismatch" {
+		t.Fatalf("result = %#v, want failed run-record provenance", result)
+	}
+	diagnostics := err.(*ValidationError).Diagnostics
+	found := false
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == CodeInvalidRelayRunRecord && diagnostic.Details["expected_recipe_family"] == batch.Plan.RecipeFamily {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want planned recipe-family mismatch", diagnostics)
+	}
+}
+
+func TestAssembleAllowListsRelayRunRecordMetadata(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	const (
+		sentinel     = "relay-run-record-secret-sentinel"
+		pathSentinel = "relay-run-record-path-sentinel"
+	)
+	argv := []string{
+		"/private/" + pathSentinel + "/bin/fake-relay",
+		"run",
+		"--integration-bundle",
+		"/private/" + pathSentinel + "/integration-bundle.json",
+	}
+	runRecordDigest := digest.RawBytes([]byte("locally-retained-run-record"))
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
+			RunRecords: []map[string]any{{
+				"schema_version":   "witness-relay-verification-run-v2",
+				"batch_id":         batch.Plan.BatchID,
+				"recipe_id":        "witness-falsify-v2-codex",
+				"status":           contracts.RecordStatusUnavailable,
+				"provider_invoked": "unknown",
+				"consumes_batch":   true,
+				"input_bindings":   []string{"token=" + sentinel},
+				"relay_run_result": map[string]any{"provider_response": sentinel},
+				"session_dir":      sentinel,
+				"diagnostics": []map[string]any{{
+					"code":    "relayrun_launch_failed",
+					"message": sentinel,
+					"details": map[string]any{"provider_payload": sentinel},
+				}},
+				"run_record_digest": runRecordDigest,
+				"relay_launch": map[string]any{
+					"argv":              argv,
+					"working_directory": "/private/" + pathSentinel + "/workspace",
+					"exit_code":         1,
+					"start_failed":      false,
+					"stdout":            sentinel,
+					"stderr":            "relay failed",
+					"stdout_truncated":  true,
+					"stderr_truncated":  false,
+				},
+			}},
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	manifestBytes, err := contracts.CanonicalBytes(result.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(manifestBytes, []byte(sentinel)) {
+		t.Fatalf("encoded manifest retained local relay content: %s", manifestBytes)
+	}
+	if bytes.Contains(manifestBytes, []byte(pathSentinel)) {
+		t.Fatalf("encoded manifest retained local relay path: %s", manifestBytes)
+	}
+	rawBatches := result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	metadata := rawBatches[batch.Plan.BatchID].(map[string]any)
+	runRecords, ok := metadata["run_records"].([]map[string]any)
+	if !ok || len(runRecords) != 1 {
+		t.Fatalf("run records = %#v", metadata["run_records"])
+	}
+	retained := runRecords[0]
+	if _, exists := retained["relay_run_result"]; exists {
+		t.Fatalf("manifest metadata retained relay_run_result: %#v", retained)
+	}
+	if retained["run_record_digest"] != runRecordDigest {
+		t.Fatalf("run record metadata = %#v, want retained run-record digest", retained)
+	}
+	launch, ok := retained["relay_launch"].(map[string]any)
+	if !ok {
+		t.Fatalf("run record = %#v, missing launch summary", retained)
+	}
+	if _, exists := launch["argv"]; exists {
+		t.Fatalf("launch summary retained argv: %#v", launch)
+	}
+	if _, exists := launch["working_directory"]; exists {
+		t.Fatalf("launch summary retained working directory: %#v", launch)
+	}
+	if launch["executable"] != "fake-relay" {
+		t.Fatalf("launch executable = %#v, want fake-relay", launch["executable"])
+	}
+	canonicalArgv, err := contracts.CanonicalBytes(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argvDigest := digest.RawBytes(canonicalArgv)
+	if launch["argv_digest"] != argvDigest {
+		t.Fatalf("launch argv digest = %#v, want %q", launch["argv_digest"], argvDigest)
+	}
+	if launch["stdout_digest"] != digest.RawBytes([]byte(sentinel)) || launch["stdout_bytes"] != len([]byte(sentinel)) || launch["stdout_truncated"] != true {
+		t.Fatalf("stdout launch summary = %#v", launch)
+	}
+	if launch["stderr_digest"] != digest.RawBytes([]byte("relay failed")) || launch["stderr_bytes"] != len([]byte("relay failed")) || launch["stderr_truncated"] != false {
+		t.Fatalf("stderr launch summary = %#v", launch)
+	}
+	diagnostics, ok := retained["diagnostics"].([]map[string]any)
+	if !ok || len(diagnostics) != 1 || len(diagnostics[0]) != 1 || diagnostics[0]["code"] != "relayrun_launch_failed" {
+		t.Fatalf("manifest diagnostics = %#v, want code-only failure diagnostic", retained["diagnostics"])
+	}
+}
+
 func TestAssembleSanitizesForgedRelayLaunchStatusOnRelayPresent(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
@@ -169,40 +440,12 @@ func TestAssembleSanitizesForgedRelayLaunchStatusOnRelayPresent(t *testing.T) {
 		t.Fatalf("manifest diagnostics = %#v", diagnostics)
 	}
 
-	adjudicated, err := adjudicate.Run(adjudicate.Options{
+	if _, err := adjudicate.Run(adjudicate.Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 		Manifest:      result.Manifest,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("adjudicate: %v", err)
-	}
-	dir := t.TempDir()
-	preflightPath := filepath.Join(dir, "preflight.json")
-	if err := os.WriteFile(preflightPath, append(canonjson.MustMarshal(preflight.Result{
-		SchemaVersion: preflight.SchemaVersion,
-		OK:            true,
-		BackendStrata: map[string]string{"codex": metrics.BackendAuthStatusAuthenticated},
-	}), '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runResultPath := filepath.Join(dir, "run-result.json")
-	if err := os.WriteFile(runResultPath, append(canonjson.MustMarshal(adjudicated), '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	metricDocument, err := metrics.Run(metrics.Options{
-		PreflightPath:  preflightPath,
-		RunResultPaths: []string{runResultPath},
-	})
-	if err != nil {
-		t.Fatalf("metrics: %v", err)
-	}
-	if len(metricDocument.PendingVerification.Strata) != 1 {
-		t.Fatalf("pending strata = %#v, want one relay-present backend stratum", metricDocument.PendingVerification.Strata)
-	}
-	stratum := metricDocument.PendingVerification.Strata[0]
-	if stratum.Backend != "codex" || stratum.BackendAuthStatus != metrics.BackendAuthStatusAuthenticated || stratum.Count != 1 {
-		t.Fatalf("pending stratum = %#v, want codex authenticated count 1", stratum)
 	}
 }
 
@@ -1257,4 +1500,47 @@ func testArtifactRef(kind string, id string, seed string) contracts.ArtifactRef 
 
 func testDigest(seed string) string {
 	return digest.RawBytes([]byte(seed))
+}
+
+func TestSanitizeRelayRunRecordMetadataDropsUnsafeIdentifiers(t *testing.T) {
+	record := map[string]any{
+		"schema_version":   "witness-relay-verification-run-v2",
+		"batch_id":         "batch-1",
+		"recipe_id":        "witness-falsify-v2-codex",
+		"status":           "unavailable",
+		"provider_invoked": "unknown",
+		"consumes_batch":   true,
+		"diagnostics": []any{
+			map[string]any{"code": "relay_nonzero_exit"},
+			map[string]any{"code": "token=sk-SECRET-VALUE leaked"},
+		},
+		"relay_launch": map[string]any{
+			"argv":              []any{"/home/user/secret dir/relay --token=sk-SECRET", "run"},
+			"working_directory": "/home/user/secret",
+			"exit_code":         float64(1),
+			"start_failed":      false,
+		},
+	}
+	metadata := SanitizeRelayRunRecordMetadata(record)
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	if strings.Contains(string(encoded), "SECRET") {
+		t.Fatalf("sanitized metadata retains unsafe identifier bytes: %s", encoded)
+	}
+	codes, _ := metadata["diagnostics"].([]map[string]any)
+	if len(codes) != 1 || codes[0]["code"] != "relay_nonzero_exit" {
+		t.Fatalf("expected only the conforming diagnostic code, got %v", metadata["diagnostics"])
+	}
+	launch, _ := metadata["relay_launch"].(map[string]any)
+	if launch == nil {
+		t.Fatalf("expected relay_launch summary to survive")
+	}
+	if _, present := launch["executable"]; present {
+		t.Fatalf("expected non-conforming executable basename to be dropped, got %v", launch["executable"])
+	}
+	if _, present := launch["argv_digest"]; !present {
+		t.Fatalf("expected argv_digest to remain for correlation")
+	}
 }

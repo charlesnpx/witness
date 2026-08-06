@@ -31,6 +31,7 @@ func validateLoadedState(state *State) error {
 	diagnostics = append(diagnostics, validateEffectiveHeadManifestBinding(state)...)
 	diagnostics = append(diagnostics, validateMandatoryStageArtifacts(state)...)
 	diagnostics = append(diagnostics, validateRecordedArtifactDigestsAndOutputs(state)...)
+	diagnostics = append(diagnostics, validateSourceSnapshotContext(state)...)
 	diagnostics = append(diagnostics, validateDerivedRelayBatches(state)...)
 	diagnostics = append(diagnostics, validateStageCrossBindings(state)...)
 	if len(diagnostics) > 0 {
@@ -97,6 +98,34 @@ func validateEffectiveHeadManifestBinding(state *State) []diag.Diagnostic {
 		return []diag.Diagnostic{diag.FromError(err)}
 	}
 	return nil
+}
+
+func validateSourceSnapshotContext(state *State) []diag.Diagnostic {
+	if state == nil || !stageComplete(state, stageFreeze) {
+		return nil
+	}
+	if _, err := os.Stat(state.Config.SnapshotManifestPath); err != nil {
+		// Other stage validators own absent or unreadable artifact diagnostics;
+		// avoid changing their established failure ordering for fabricated state.
+		return nil
+	}
+	manifest, err := readFreezeManifest(state.Config.SnapshotManifestPath)
+	if err != nil {
+		return []diag.Diagnostic{diag.FromError(err)}
+	}
+	if state.SourceDirty == manifest.Source.GitDirty && state.SourceDirtyStatus == manifest.Source.GitDirtyStatus {
+		return nil
+	}
+	return []diag.Diagnostic{stateInvalidDiagnostic(
+		"pass dirty-source context does not match the frozen snapshot manifest.",
+		"/source_dirty",
+		map[string]any{
+			"actual_dirty":          state.SourceDirty,
+			"expected_dirty":        manifest.Source.GitDirty,
+			"actual_dirty_status":   state.SourceDirtyStatus,
+			"expected_dirty_status": manifest.Source.GitDirtyStatus,
+		},
+	)}
 }
 
 func validateMandatoryStageArtifacts(state *State) []diag.Diagnostic {
@@ -314,11 +343,7 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 			_, err = validateFreezeManifestOutput(state.Config, manifest)
 		}
 	case artifact.Role == "preflight":
-		var result preflight.Result
-		result, err = strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
-		if err == nil {
-			err = validatePreflightOutput(state.Config, result)
-		}
+		err = validatePreflightOutputDocument(state.Config, data)
 	case isPreflightRetainedOutputRole(artifact.Role):
 		err = validatePreflightRetainedOutput(state.Config, artifact)
 	case artifact.Role == roleOutputChangeSurfaceRole:
@@ -450,6 +475,9 @@ func validateFrozenCharterOutput(config Config, frozen charter.FrozenCharter) er
 	if err != nil {
 		return err
 	}
+	if err := requireReviewCharterGoals(input.Goals, config.AllowEmptyCharter); err != nil {
+		return err
+	}
 	var amendments []charter.OwnerEvent
 	if config.AmendmentsPath != "" {
 		amendments, err = charter.ReadAmendmentsFile(config.AmendmentsPath)
@@ -466,9 +494,10 @@ func validateFrozenCharterOutput(config Config, frozen charter.FrozenCharter) er
 
 func validateFreezeManifestOutput(config Config, manifest freeze.Manifest) (string, error) {
 	expected, err := freeze.DeriveManifest(context.Background(), freeze.Options{
-		SourceDir:   config.SourceDir,
-		OutputDir:   config.SnapshotDir,
-		AllowNonGit: config.AllowNonGitSource,
+		SourceDir:        config.SourceDir,
+		OutputDir:        config.SnapshotDir,
+		AllowNonGit:      config.AllowNonGitSource,
+		AllowDirtySource: config.AllowDirtySource,
 	})
 	if err != nil {
 		return "", err
@@ -512,7 +541,7 @@ func validateFreezeManifestOutput(config Config, manifest freeze.Manifest) (stri
 		if err != nil {
 			return "", diag.Wrap(err, CodeStateInvalid, "snapshot manifest blob could not be read.", diag.WithDetail("path", blobPath))
 		}
-		if int64(len(blobBytes)) != entry.Size {
+		if int64(len(blobBytes)) != int64(entry.Size) {
 			return "", diag.New(CodeStateInvalid, "snapshot manifest blob size does not match file entry.", diag.WithDetail("path", entry.Path), diag.WithDetail("actual_size", len(blobBytes)), diag.WithDetail("expected_size", entry.Size))
 		}
 		if blobDigest := digest.RawBytes(blobBytes); blobDigest != entry.Digest {
@@ -551,9 +580,32 @@ func safeSlashRelativePath(value string) bool {
 }
 
 func validatePreflightOutput(config Config, result preflight.Result) error {
+	return validatePreflightOutputWithRetainedArtifacts(config, result, true)
+}
+
+func validatePreflightOutputDocument(config Config, data []byte) error {
+	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return err
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	_, retainedArtifactsPresent := document["retained_artifacts"]
+	return validatePreflightOutputWithRetainedArtifacts(config, result, retainedArtifactsPresent)
+}
+
+func validatePreflightOutputWithRetainedArtifacts(config Config, result preflight.Result, retainedArtifactsPresent bool) error {
 	expected, err := expectedPreflightResult(config)
 	if err != nil {
 		return err
+	}
+	if !retainedArtifactsPresent {
+		// Preflight v1 documents emitted before retained_artifacts was added share
+		// the schema version. Preserve their semantics while requiring the field
+		// from every document that carries it.
+		expected.RetainedArtifacts = nil
 	}
 	return requireSemanticMatch("preflight", result, expected)
 }
@@ -563,10 +615,12 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		SchemaVersion:        preflight.SchemaVersion,
 		OK:                   true,
 		StateDir:             config.StateDir,
+		RetainedArtifacts:    map[string]string{},
 		ArtifactDigests:      map[string]string{},
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
 		ContractDigests:      map[string]string{},
+		RelayReportedDigests: map[string]string{},
 		BackendStrata:        map[string]string{},
 		ConsumerIdentity:     map[string]any{"kind": "witness", "id": "pass-driver"},
 	}
@@ -580,6 +634,8 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 	}
 	result.SnapshotDigest = snapshotDigest
 	result.ArtifactDigests["source-snapshot-manifest"] = snapshotDigest
+	result.SourceDirty = manifest.Source.GitDirty
+	result.SourceDirtyStatus = manifest.Source.GitDirtyStatus
 
 	capabilities, capabilitiesDigest, err := readRetainedPreflightArtifact(config, "relay-capabilities.json")
 	if err != nil {
@@ -643,9 +699,12 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		}
 		result.ArtifactDigests[relativePath] = compileReportDigest
 		result.CompileReportDigests[requirement.RecipeID] = compileReportDigest
-		recipePlan, err := validatePreflightCompileReport(compileReport, requirement, relayAbsent, selectedDigests)
+		recipePlan, relayReportedDigest, err := validatePreflightCompileReport(compileReport, requirement, relayAbsent)
 		if err != nil {
 			return result, err
+		}
+		if relayReportedDigest != "" {
+			result.RelayReportedDigests[requirement.ContractID] = relayReportedDigest
 		}
 		if relayAbsent {
 			continue
@@ -662,16 +721,11 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		result.RecipePlanDigests[requirement.RecipeID] = retainedPlanDigest
 	}
 
-	contractDigestDoc := map[string]any{
-		"schema_version":   "witness-preflight-contract-digests-v1",
-		"digest_profile":   digest.Profile,
-		"contract_digests": result.ContractDigests,
-	}
 	retainedContractDigests, contractDigestArtifactDigest, err := readRetainedPreflightArtifact(config, "contract-digests.json")
 	if err != nil {
 		return result, err
 	}
-	if err := requireSemanticMatch("preflight contract digests", retainedContractDigests, contractDigestDoc); err != nil {
+	if err := validatePreflightContractDigestDocument(retainedContractDigests, result); err != nil {
 		return result, err
 	}
 	result.ArtifactDigests["contract-digests.json"] = contractDigestArtifactDigest
@@ -688,7 +742,71 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 		return result, err
 	}
 	result.ArtifactDigests["compatibility-manifest.json"] = compatibilityDigest
+	result.RetainedArtifacts = preflight.RetainedArtifacts(config.StateDir, config.SnapshotManifestPath, result.ArtifactDigests)
 	return result, nil
+}
+
+func validatePreflightContractDigestDocument(retained any, result preflight.Result) error {
+	document, err := preflight.ReadContractDigestDocument(retained)
+	if err != nil {
+		return err
+	}
+	switch document.SchemaVersion {
+	case preflight.ContractDigestDocumentV1:
+		return requireV1ContractDigestLineage(
+			document.RelayReportedDigests,
+			expectedV1ContractDigestLineage(result),
+		)
+	case preflight.ContractDigestDocumentV2:
+		return requireSemanticMatch("preflight contract digests", retained, preflight.ContractDigestDocument(result))
+	default:
+		return diag.New(CodeStateInvalid, "preflight contract-digests document schema_version is unsupported.", diag.WithDetail("actual", document.SchemaVersion))
+	}
+}
+
+func expectedV1ContractDigestLineage(result preflight.Result) map[string]string {
+	lineage := make(map[string]string, len(result.RelayReportedDigests)+1)
+	for contractID, contractDigest := range result.RelayReportedDigests {
+		lineage[contractID] = contractDigest
+	}
+	if integrationBundleDigest := strings.TrimSpace(result.ContractDigests["integration_bundle"]); integrationBundleDigest != "" {
+		lineage["integration_bundle"] = integrationBundleDigest
+	}
+	return lineage
+}
+
+func requireV1ContractDigestLineage(retained map[string]string, expected map[string]string) error {
+	projected := make(map[string]string, len(expected))
+	for _, contractID := range sortedStringMapKeys(expected) {
+		if contractDigest, found := retained[contractID]; found {
+			projected[contractID] = contractDigest
+		}
+	}
+	if err := requireSemanticMatch("preflight v1 contract-digest relay lineage", projected, expected); err != nil {
+		return err
+	}
+	for _, contractID := range sortedStringMapKeys(retained) {
+		if _, projectedContract := expected[contractID]; projectedContract {
+			continue
+		}
+		if requiredWitnessContractID(contractID) {
+			return diag.New(
+				CodeStateInvalid,
+				"preflight v1 contract-digest relay lineage contains an unexpected required contract.",
+				diag.WithDetail("contract_id", contractID),
+			)
+		}
+	}
+	return nil
+}
+
+func requiredWitnessContractID(contractID string) bool {
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		if requirement.ContractID == contractID {
+			return true
+		}
+	}
+	return false
 }
 
 func isPreflightRetainedOutputRole(role string) bool {
@@ -992,51 +1110,57 @@ func validatePreflightRecipes(payload any, relayAbsent bool) error {
 	return nil
 }
 
-func validatePreflightCompileReport(payload any, requirement contracts.RecipePlanDigest, relayAbsent bool, selectedDigests map[string]string) (any, error) {
+func validatePreflightCompileReport(payload any, requirement contracts.RecipePlanDigest, relayAbsent bool) (any, string, error) {
 	object, ok := payload.(map[string]any)
 	if !ok {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report retained payload must be an object.", diag.WithDetail("recipe_id", requirement.RecipeID))
+		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report retained payload must be an object.", diag.WithDetail("recipe_id", requirement.RecipeID))
 	}
 	if relayAbsent {
 		recipeID, _ := object["recipe_id"].(string)
 		contractID, _ := object["contract_id"].(string)
 		status, _ := object["status"].(string)
 		if recipeID != requirement.RecipeID || contractID != requirement.ContractID || status != contracts.RelayLaunchStatusAbsent {
-			return nil, diag.New(CodeStateInvalid, "relay-absent compile-report retained payload does not match the required recipe.", diag.WithDetail("recipe_id", requirement.RecipeID))
+			return nil, "", diag.New(CodeStateInvalid, "relay-absent compile-report retained payload does not match the required recipe.", diag.WithDetail("recipe_id", requirement.RecipeID))
 		}
-		return nil, nil
+		return nil, "", nil
 	}
 	if recipeID, _ := object["recipe_id"].(string); recipeID != "" && recipeID != requirement.RecipeID {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report recipe_id does not match the retained artifact path.", diag.WithDetail("actual", recipeID), diag.WithDetail("expected", requirement.RecipeID))
+		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report recipe_id does not match the retained artifact path.", diag.WithDetail("actual", recipeID), diag.WithDetail("expected", requirement.RecipeID))
 	}
 	status, _ := object["status"].(string)
 	switch status {
 	case "", "usable", "ok":
 	default:
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report status is not successful.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("status", status))
+		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report status is not successful.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("status", status))
 	}
 	if contractID, _ := object["integration_contract"].(string); contractID != "" && contractID != requirement.ContractID {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report integration contract does not match the required recipe.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("actual", contractID), diag.WithDetail("expected", requirement.ContractID))
+		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report integration contract does not match the required recipe.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("actual", contractID), diag.WithDetail("expected", requirement.ContractID))
 	}
 	if diagnostics, _ := object["diagnostics"].([]any); len(diagnostics) > 0 {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report contains diagnostics.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("diagnostic_count", len(diagnostics)))
+		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report contains diagnostics.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("diagnostic_count", len(diagnostics)))
+	}
+	reportContractDigests, err := preflight.DecodeCompileReportContractDigests(requirement.RecipeID, object["contract_digests"])
+	if err != nil {
+		return nil, "", err
 	}
 	plan, err := preflightCompileReportPlan(payload)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	planObject, ok := plan.(map[string]any)
 	if !ok {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report recipe plan must be an object.", diag.WithDetail("recipe_id", requirement.RecipeID))
+		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report recipe plan must be an object.", diag.WithDetail("recipe_id", requirement.RecipeID))
 	}
 	contractDigest, _ := planObject["integration_contract_digest"].(string)
 	if strings.TrimSpace(contractDigest) == "" {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report recipe plan is missing integration_contract_digest.", diag.WithDetail("recipe_id", requirement.RecipeID))
+		return nil, "", diag.New(CodeStateInvalid, "preflight compile-report recipe plan is missing integration_contract_digest.", diag.WithDetail("recipe_id", requirement.RecipeID))
 	}
-	if expected := selectedDigests[requirement.ContractID]; contractDigest != expected {
-		return nil, diag.New(CodeStateInvalid, "preflight compile-report integration contract digest does not match the configured bundle.", diag.WithDetail("recipe_id", requirement.RecipeID), diag.WithDetail("actual_digest", contractDigest), diag.WithDetail("expected_digest", expected))
+	relayReportedDigests, err := preflight.ResolveRelayReportedContractDigests(reportContractDigests, requirement.ContractID, contractDigest)
+	if err != nil {
+		return nil, "", err
 	}
-	return plan, nil
+	projectedDigests := preflight.ProjectRelayReportedContractDigests(relayReportedDigests, requirement.ContractID)
+	return plan, projectedDigests[requirement.ContractID], nil
 }
 
 func preflightCompileReportPlan(payload any) (any, error) {
@@ -1058,105 +1182,36 @@ func preflightCompileReportPlan(payload any) (any, error) {
 }
 
 func selectedContractDigestsFromBundle(bundle any) (map[string]string, error) {
-	wanted := map[string]bool{}
-	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
-		wanted[requirement.ContractID] = true
+	digests, diagnostics := preflight.SelectedContractDigestsFromBundle(bundle)
+	if len(diagnostics) == 0 {
+		return digests, nil
 	}
-	digests := map[string]string{}
-	var scan func(any) error
-	scan = func(value any) error {
-		switch typed := value.(type) {
-		case []any:
-			for _, item := range typed {
-				if err := scan(item); err != nil {
-					return err
-				}
-			}
-		case map[string]any:
-			if contractsMap, ok := typed["contracts"].(map[string]any); ok {
-				keys := make([]string, 0, len(contractsMap))
-				for key := range contractsMap {
-					keys = append(keys, key)
-				}
-				sortStrings(keys)
-				for _, contractID := range keys {
-					contractPayload := contractsMap[contractID]
-					if wanted[contractID] {
-						if err := recordSelectedContractDigest(digests, contractID, contractPayload); err != nil {
-							return err
-						}
-					}
-					if err := scan(contractPayload); err != nil {
-						return err
-					}
-				}
-			}
-			if id := contractIDValue(typed); wanted[id] {
-				if err := recordSelectedContractDigest(digests, id, typed); err != nil {
-					return err
-				}
-			}
-			keys := make([]string, 0, len(typed))
-			for key := range typed {
-				if key == "contracts" {
-					continue
-				}
-				keys = append(keys, key)
-			}
-			sortStrings(keys)
-			for _, key := range keys {
-				if err := scan(typed[key]); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
+	if len(diagnostics) == 1 {
+		return nil, diag.New(
+			CodeStateInvalid,
+			diagnostics[0].Message,
+			diag.WithPath(diagnostics[0].Path),
+			diag.WithDetail("diagnostic_code", diagnostics[0].Code),
+			diag.WithDetail("diagnostic_details", diagnostics[0].Details),
+		)
 	}
-	if err := scan(bundle); err != nil {
-		return nil, err
-	}
-	for contractID := range wanted {
-		if digests[contractID] == "" {
-			return nil, diag.New(CodeStateInvalid, "configured integration bundle is missing a required Witness contract.", diag.WithDetail("contract_id", contractID))
-		}
-	}
-	return digests, nil
+	return nil, &ValidationError{Diagnostics: prefixStateDiagnostics(diagnostics)}
 }
 
-func recordSelectedContractDigest(digests map[string]string, contractID string, payload any) error {
-	if digests[contractID] != "" {
-		return nil
+func prefixStateDiagnostics(diagnostics []diag.Diagnostic) []diag.Diagnostic {
+	prefixed := make([]diag.Diagnostic, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		prefixed = append(prefixed, diag.Diagnostic{
+			Code:    CodeStateInvalid,
+			Message: diagnostic.Message,
+			Path:    diagnostic.Path,
+			Details: map[string]any{
+				"diagnostic_code":    diagnostic.Code,
+				"diagnostic_details": diagnostic.Details,
+			},
+		})
 	}
-	object, ok := payload.(map[string]any)
-	if !ok {
-		return diag.New(CodeStateInvalid, "configured integration bundle contract must be an object.", diag.WithDetail("contract_id", contractID))
-	}
-	if bodyID := contractIDValue(object); bodyID != "" && bodyID != contractID {
-		return diag.New(CodeStateInvalid, "configured integration bundle contract body id does not match the contract map key.", diag.WithDetail("contract_id", contractID), diag.WithDetail("body_id", bodyID))
-	}
-	contractDigest, err := digest.SemanticJSON(object)
-	if err != nil {
-		return diag.Wrap(err, CodeStateInvalid, "configured integration bundle contract digest could not be computed.", diag.WithDetail("contract_id", contractID))
-	}
-	digests[contractID] = contractDigest
-	return nil
-}
-
-func contractIDValue(object map[string]any) string {
-	for _, key := range []string{"id", "contract_id"} {
-		if value, ok := object[key].(string); ok {
-			return value
-		}
-	}
-	return ""
-}
-
-func sortStrings(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
+	return prefixed
 }
 
 func expectedPreflightCompatibility(result preflight.Result) contracts.RelayCompatibility {

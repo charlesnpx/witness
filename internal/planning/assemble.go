@@ -1,7 +1,11 @@
 package planning
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -12,17 +16,19 @@ import (
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/portable"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (
-	CodeMissingEvidenceRef   = "assemble_missing_evidence_ref"
-	CodeMissingBatch         = "assemble_missing_batch"
-	CodeInvalidAssembleBatch = "assemble_invalid_batch"
-	CodeInvalidRelay         = "assemble_invalid_relay_verification"
-	CodeInvalidReceipt       = "assemble_invalid_execution_receipt"
-	CodeInvalidManifest      = "assemble_invalid_manifest"
-	CodeInvalidCompatibility = "assemble_invalid_relay_compatibility"
-	CodeInvalidPlanDigest    = "assemble_invalid_plan_digest"
+	CodeMissingEvidenceRef    = "assemble_missing_evidence_ref"
+	CodeMissingBatch          = "assemble_missing_batch"
+	CodeInvalidAssembleBatch  = "assemble_invalid_batch"
+	CodeInvalidRelay          = "assemble_invalid_relay_verification"
+	CodeInvalidReceipt        = "assemble_invalid_execution_receipt"
+	CodeInvalidManifest       = "assemble_invalid_manifest"
+	CodeInvalidCompatibility  = "assemble_invalid_relay_compatibility"
+	CodeInvalidPlanDigest     = "assemble_invalid_plan_digest"
+	CodeInvalidRelayRunRecord = "assemble_invalid_relay_run_record"
 )
 
 type AssembleOptions struct {
@@ -53,6 +59,7 @@ type RelayEvidence struct {
 	PortableExportDir string
 	PortableExportRef *contracts.ArtifactRef
 	Verdicts          *contracts.RelayWitnessVerdictsDocument
+	RunRecords        []map[string]any
 }
 
 type ManifestEvidenceRefs struct {
@@ -105,7 +112,8 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 		CompatibilityManifest: options.EvidenceRefs.CompatibilityManifest,
 		RelayCapabilities:     options.EvidenceRefs.RelayCapabilities,
 		IntegrationBundle:     options.EvidenceRefs.IntegrationBundle,
-		SelectedContracts:     append([]contracts.ArtifactRef(nil), options.EvidenceRefs.SelectedContracts...),
+		SelectedContracts:     append(make([]contracts.ArtifactRef, 0, len(options.EvidenceRefs.SelectedContracts)), options.EvidenceRefs.SelectedContracts...),
+		Batches:               make([]contracts.VerificationManifestBatch, 0, len(options.Plan.Batches)),
 		ExcludedFindings:      manifestExcludedFindings(options.Plan.ExcludedFindings),
 		ConsumerIdentity:      sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
 	}
@@ -157,6 +165,17 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			BatchDigest: planned.BatchDigest,
 		}
 		relay, hasRelay := relayByID[planned.BatchID]
+		if hasRelay {
+			if relayDiagnostics := validateRelayRunRecordEvidence(planned, relay); len(relayDiagnostics) > 0 {
+				record.Status = contracts.RecordStatusFailed
+				record.FailureReason = "relay_run_record_provenance_mismatch"
+				diagnostics = append(diagnostics, relayDiagnostics...)
+				result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
+				attachRelayBatchMetadata(&manifest, planned, RelayEvidence{}, relayLaunchStatus)
+				manifest.Batches = append(manifest.Batches, record)
+				continue
+			}
+		}
 		attachRelayBatchMetadata(&manifest, planned, relay, relayLaunchStatus)
 		batchEvidence, hasBatch := batchesByID[planned.BatchID]
 		if !hasBatch {
@@ -179,7 +198,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			continue
 		}
 		if !hasRelay || relay.PortableExportDir == "" {
-			record.FailureReason = "relay_verification_unavailable"
+			record.FailureReason = relayUnavailableFailureReason(relay)
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
 			manifest.Batches = append(manifest.Batches, record)
 			continue
@@ -430,7 +449,334 @@ func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned 
 	if backend := strings.TrimSpace(relay.Backend); backend != "" {
 		entry["backend"] = backend
 	}
+	if len(relay.RunRecords) > 0 {
+		entry["run_records"] = cloneRelayRunRecords(relay.RunRecords)
+	}
 	raw[planned.BatchID] = entry
+}
+
+func relayUnavailableFailureReason(relay RelayEvidence) string {
+	if consumingRelayRunRecord(relay.RunRecords) != nil {
+		return "relay_run_recorded_unavailable"
+	}
+	for _, record := range relay.RunRecords {
+		status, _ := record["status"].(string)
+		providerInvoked, _ := record["provider_invoked"].(string)
+		if status == "launch_failed" && providerInvoked == "false" {
+			return "relay_launch_failed"
+		}
+	}
+	if len(relay.RunRecords) > 0 {
+		return "relay_run_recorded_unavailable"
+	}
+	return "relay_verification_unavailable"
+}
+
+func consumingRelayRunRecord(records []map[string]any) map[string]any {
+	for _, record := range records {
+		consumesBatch, _ := record["consumes_batch"].(bool)
+		if consumesBatch {
+			return record
+		}
+	}
+	return nil
+}
+
+func validateRelayRunRecordEvidence(planned BatchPlan, relay RelayEvidence) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	expectedFamily := strings.TrimSpace(planned.RecipeFamily)
+	expectedBackend := strings.TrimSpace(relay.Backend)
+	consumingRecordIndexes := make([]int, 0, 1)
+	for index, record := range relay.RunRecords {
+		recordBatchID, batchIDOK := record["batch_id"].(string)
+		if !batchIDOK || strings.TrimSpace(recordBatchID) != planned.BatchID {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record batch_id does not bind to the planned batch.",
+				diag.WithDetail("actual_batch_id", recordBatchID),
+			))
+		}
+		recipeID, recipeIDOK := record["recipe_id"].(string)
+		if !recipeIDOK || strings.TrimSpace(recipeID) == "" {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record recipe_id is required for planned-batch provenance.",
+			))
+			continue
+		}
+		recipeFamily, backend := relayRunRecordRecipeIdentity(recipeID)
+		if expectedFamily != "" && recipeFamily != expectedFamily {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record recipe_id does not match the planned recipe family.",
+				diag.WithDetail("actual_recipe_id", recipeID),
+				diag.WithDetail("actual_recipe_family", recipeFamily),
+				diag.WithDetail("expected_recipe_family", expectedFamily),
+			))
+		}
+		if expectedBackend != "" && backend != expectedBackend {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record recipe_id does not match the expected relay backend.",
+				diag.WithDetail("actual_recipe_id", recipeID),
+				diag.WithDetail("actual_backend", backend),
+				diag.WithDetail("expected_backend", expectedBackend),
+			))
+		}
+		consumesBatch, consumesBatchOK := record["consumes_batch"].(bool)
+		if !consumesBatchOK {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record consumes_batch must be a boolean.",
+			))
+			continue
+		}
+		if consumesBatch {
+			consumingRecordIndexes = append(consumingRecordIndexes, index)
+			continue
+		}
+		if !relayRunRecordIsStartFailure(record) {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"non-consuming relay run records must be launch_failed records with relay_launch.start_failed=true.",
+			))
+		}
+	}
+	if len(consumingRecordIndexes) > 1 {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidRelayRunRecord,
+			"relay run records contain multiple consuming attempts for one batch; refusing reviewer-shopping evidence.",
+			diag.WithDetail("batch_id", planned.BatchID),
+			diag.WithDetail("consuming_record_indexes", consumingRecordIndexes),
+		)))
+	}
+	return diagnostics
+}
+
+func invalidRelayRunRecordDiagnostic(batchID string, recordIndex int, message string, options ...diag.Option) diag.Diagnostic {
+	options = append(options, diag.WithDetail("batch_id", batchID), diag.WithDetail("record_index", recordIndex))
+	return diag.FromError(diag.New(CodeInvalidRelayRunRecord, message, options...))
+}
+
+func relayRunRecordRecipeIdentity(recipeID string) (string, string) {
+	recipeID = strings.TrimSpace(recipeID)
+	for _, backend := range []string{"codex", "claude"} {
+		suffix := "-" + backend
+		if strings.HasSuffix(recipeID, suffix) {
+			return strings.TrimSuffix(recipeID, suffix), backend
+		}
+	}
+	return recipeID, ""
+}
+
+func relayRunRecordIsStartFailure(record map[string]any) bool {
+	status, _ := record["status"].(string)
+	providerInvoked, _ := record["provider_invoked"].(string)
+	launch, _ := record["relay_launch"].(map[string]any)
+	startFailed, _ := launch["start_failed"].(bool)
+	return status == "launch_failed" && providerInvoked == "false" && startFailed
+}
+
+func cloneRelayRunRecords(records []map[string]any) []map[string]any {
+	cloned := make([]map[string]any, 0, len(records))
+	for _, record := range records {
+		cloned = append(cloned, SanitizeRelayRunRecordMetadata(record))
+	}
+	return cloned
+}
+
+// SanitizeRelayRunRecordMetadata builds a manifest projection from an explicit
+// allow-list. Retained relay run records can include raw process output and
+// provider payloads, which must remain local-only.
+func SanitizeRelayRunRecordMetadata(record map[string]any) map[string]any {
+	metadata := make(map[string]any, 10)
+	for _, key := range []string{
+		"schema_version",
+		"batch_id",
+		"recipe_id",
+		"status",
+		"provider_invoked",
+	} {
+		if value, ok := record[key].(string); ok {
+			metadata[key] = value
+		}
+	}
+	if consumesBatch, ok := record["consumes_batch"].(bool); ok {
+		metadata["consumes_batch"] = consumesBatch
+	}
+	if diagnosticCodes := relayRunRecordDiagnosticCodes(record["diagnostics"]); len(diagnosticCodes) > 0 {
+		metadata["diagnostics"] = diagnosticCodes
+	}
+	if launch := relayLaunchMetadataSummary(record["relay_launch"]); len(launch) > 0 {
+		metadata["relay_launch"] = launch
+	}
+	if runRecordDigest, ok := record["run_record_digest"].(string); ok && digest.WellFormed(runRecordDigest) {
+		metadata["run_record_digest"] = runRecordDigest
+	}
+	return metadata
+}
+
+// manifestSafeIdentifier bounds the identifier-like strings the manifest
+// projection will carry: run records can be supplied externally, so anything
+// not matching this conservative shape is dropped rather than published.
+var manifestSafeIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+func relayRunRecordDiagnosticCodes(value any) []map[string]any {
+	codes := make([]map[string]any, 0)
+	appendCode := func(code string) {
+		if code = strings.TrimSpace(code); manifestSafeIdentifier.MatchString(code) {
+			codes = append(codes, map[string]any{"code": code})
+		}
+	}
+	switch diagnostics := value.(type) {
+	case []any:
+		for _, diagnostic := range diagnostics {
+			if diagnostic, ok := diagnostic.(map[string]any); ok {
+				if code, ok := diagnostic["code"].(string); ok {
+					appendCode(code)
+				}
+			}
+		}
+	case []map[string]any:
+		for _, diagnostic := range diagnostics {
+			if code, ok := diagnostic["code"].(string); ok {
+				appendCode(code)
+			}
+		}
+	case []diag.Diagnostic:
+		for _, diagnostic := range diagnostics {
+			appendCode(diagnostic.Code)
+		}
+	}
+	return codes
+}
+
+func relayLaunchMetadataSummary(value any) map[string]any {
+	launch, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	summary := make(map[string]any, 9)
+	if argv, ok := relayLaunchArgv(launch["argv"]); ok {
+		if len(argv) > 0 {
+			if executable := filepath.Base(argv[0]); manifestSafeIdentifier.MatchString(executable) {
+				summary["executable"] = executable
+			}
+		}
+		if argvDigest, err := digest.SemanticJSON(argv); err == nil {
+			summary["argv_digest"] = argvDigest
+		}
+	} else {
+		if executable, ok := launch["executable"].(string); ok && manifestSafeIdentifier.MatchString(strings.TrimSpace(executable)) {
+			summary["executable"] = strings.TrimSpace(executable)
+		}
+		if argvDigest, ok := launch["argv_digest"].(string); ok && digest.WellFormed(argvDigest) {
+			summary["argv_digest"] = argvDigest
+		}
+	}
+	if exitCode, ok := relayLaunchInteger(launch["exit_code"], false); ok {
+		summary["exit_code"] = exitCode
+	}
+	if startFailed, ok := launch["start_failed"].(bool); ok {
+		summary["start_failed"] = startFailed
+	}
+	appendRelayLaunchStreamSummary(summary, launch, "stdout")
+	appendRelayLaunchStreamSummary(summary, launch, "stderr")
+	return summary
+}
+
+func relayLaunchArgv(value any) ([]string, bool) {
+	switch argv := value.(type) {
+	case []string:
+		return append([]string(nil), argv...), true
+	case []any:
+		values := make([]string, 0, len(argv))
+		for _, value := range argv {
+			argument, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			values = append(values, argument)
+		}
+		return values, true
+	default:
+		return nil, false
+	}
+}
+
+func appendRelayLaunchStreamSummary(summary, launch map[string]any, stream string) {
+	digestKey := stream + "_digest"
+	bytesKey := stream + "_bytes"
+	truncatedKey := stream + "_truncated"
+	if capture, ok := relayLaunchRetainedStream(launch, stream); ok {
+		summary[digestKey] = digest.RawBytes(capture)
+		summary[bytesKey] = len(capture)
+		summary[truncatedKey] = relayLaunchTruncated(launch, truncatedKey)
+		return
+	}
+	if captureDigest, ok := launch[digestKey].(string); ok && digest.WellFormed(captureDigest) {
+		summary[digestKey] = captureDigest
+	}
+	if captureBytes, ok := relayLaunchInteger(launch[bytesKey], true); ok {
+		summary[bytesKey] = captureBytes
+	}
+	if truncated, ok := launch[truncatedKey].(bool); ok {
+		summary[truncatedKey] = truncated
+	}
+}
+
+func relayLaunchRetainedStream(launch map[string]any, stream string) ([]byte, bool) {
+	if encodedCapture, ok := launch[stream+"_b64"].(string); ok {
+		if capture, err := base64.StdEncoding.DecodeString(encodedCapture); err == nil {
+			return capture, true
+		}
+	}
+	if capture, ok := launch[stream].([]byte); ok {
+		return capture, true
+	}
+	if capture, ok := launch[stream].(string); ok {
+		return []byte(capture), true
+	}
+	return nil, false
+}
+
+func relayLaunchTruncated(launch map[string]any, key string) bool {
+	truncated, _ := launch[key].(bool)
+	return truncated
+}
+
+func relayLaunchInteger(value any, nonNegative bool) (int, bool) {
+	var result int64
+	switch value := value.(type) {
+	case int:
+		result = int64(value)
+	case int64:
+		result = value
+	case json.Number:
+		parsed, err := strictjson.ParseInt64JSON([]byte(value.String()))
+		if err != nil {
+			return 0, false
+		}
+		result = parsed
+	case strictjson.Int:
+		result = int64(value)
+	default:
+		return 0, false
+	}
+	if nonNegative && result < 0 {
+		return 0, false
+	}
+	converted := int(result)
+	if int64(converted) != result {
+		return 0, false
+	}
+	return converted, true
 }
 
 func relayLaunchStatusForCompatibility(compatibility *contracts.RelayCompatibility) string {

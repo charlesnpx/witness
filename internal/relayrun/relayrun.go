@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	SchemaVersion         = "witness-relay-verification-runs-v1"
-	RunRecordSchema       = "witness-relay-verification-run-v1"
+	SchemaVersion         = "witness-relay-verification-runs-v2"
+	RunRecordSchema       = "witness-relay-verification-run-v2"
 	CodeMissingBatchPath  = "relayrun_missing_batch_path"
 	CodeRelayRunFailed    = "relayrun_launch_failed"
 	CodeRelayExportFailed = "relayrun_export_failed"
@@ -30,6 +30,21 @@ const (
 	CodePortableInvalid   = "relayrun_portable_invalid"
 	CodeOutputFailed      = "relayrun_output_failed"
 	CodeInvalidBatchInput = "relayrun_invalid_batch_input"
+	CodeInvalidRunRecord  = "relayrun_invalid_run_record"
+	// CodeInvalidRunRecordStreamSummary identifies claimed launch stream
+	// summaries that do not match retained launch bytes.
+	CodeInvalidRunRecordStreamSummary = "relayrun_invalid_run_record_stream_summary"
+
+	// RunStatusLaunchFailed marks a relay command that failed before its
+	// process could start. It is the only status that does not consume the
+	// batch's single verification run.
+	RunStatusLaunchFailed = "launch_failed"
+
+	ProviderInvokedTrue    = "true"
+	ProviderInvokedFalse   = "false"
+	ProviderInvokedUnknown = "unknown"
+
+	launchCaptureLimitBytes = 64 * 1024
 )
 
 type Options struct {
@@ -59,30 +74,62 @@ type Result struct {
 	Runs          []RunRecord `json:"runs"`
 }
 
+// LaunchRecord is the bounded witness-side evidence for one relay run command.
+// Stdout and Stderr each retain at most launchCaptureLimitBytes of source
+// output, split evenly between the head and tail when truncated. They are raw
+// bytes (base64-encoded in JSON) so retained output stays byte-exact. Their
+// digest and byte-count summaries cover those retained bytes; the truncated
+// flags preserve that the original stream exceeded the retained capture.
+type LaunchRecord struct {
+	Argv             []string       `json:"argv"`
+	WorkingDirectory string         `json:"working_directory"`
+	ExitCode         int            `json:"exit_code"`
+	StartFailed      bool           `json:"start_failed"`
+	Stdout           []byte         `json:"stdout_b64"`
+	Stderr           []byte         `json:"stderr_b64"`
+	StdoutDigest     string         `json:"stdout_digest"`
+	StderrDigest     string         `json:"stderr_digest"`
+	StdoutBytes      strictjson.Int `json:"stdout_bytes"`
+	StderrBytes      strictjson.Int `json:"stderr_bytes"`
+	StdoutTruncated  bool           `json:"stdout_truncated"`
+	StderrTruncated  bool           `json:"stderr_truncated"`
+}
+
 type RunRecord struct {
-	SchemaVersion        string            `json:"schema_version"`
-	BatchID              string            `json:"batch_id"`
-	Status               string            `json:"status"`
-	RecipeID             string            `json:"recipe_id"`
-	InputBindings        []string          `json:"input_bindings"`
-	SessionDir           string            `json:"session_dir,omitempty"`
-	PortableExportDir    string            `json:"portable_export_dir,omitempty"`
-	PortableExportDigest string            `json:"portable_export_digest,omitempty"`
-	RelayRunResult       map[string]any    `json:"relay_run_result,omitempty"`
-	ProducerCheck        map[string]any    `json:"producer_check,omitempty"`
-	WitnessCheck         *portable.Report  `json:"witness_check,omitempty"`
-	Diagnostics          []diag.Diagnostic `json:"diagnostics,omitempty"`
+	SchemaVersion string        `json:"schema_version"`
+	BatchID       string        `json:"batch_id"`
+	Status        string        `json:"status"`
+	RecipeID      string        `json:"recipe_id"`
+	InputBindings []string      `json:"input_bindings"`
+	RelayLaunch   *LaunchRecord `json:"relay_launch,omitempty"`
+	// ProviderInvoked is one of true, false, or unknown. False is assigned
+	// only when the relay process failed to start before a child ran.
+	ProviderInvoked string `json:"provider_invoked"`
+	// ConsumesBatch is false only for provider_invoked=false launch_failed
+	// records; true and unknown remain fail-closed and consume the batch.
+	ConsumesBatch        bool                                    `json:"consumes_batch"`
+	SessionDir           string                                  `json:"session_dir,omitempty"`
+	PortableExportDir    string                                  `json:"portable_export_dir,omitempty"`
+	PortableExportDigest string                                  `json:"portable_export_digest,omitempty"`
+	RelayRunResult       map[string]any                          `json:"relay_run_result,omitempty"`
+	RelayVerdicts        *contracts.RelayWitnessVerdictsDocument `json:"relay_verdicts,omitempty"`
+	ProducerCheck        map[string]any                          `json:"producer_check,omitempty"`
+	WitnessCheck         *portable.Report                        `json:"witness_check,omitempty"`
+	Diagnostics          []diag.Diagnostic                       `json:"diagnostics,omitempty"`
 }
 
 func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Result, error) {
 	client := relayclient.Client{Executable: options.RelayPath, Runner: options.Runner}
 	result := &Result{SchemaVersion: SchemaVersion}
+	launchCWD := effectiveLaunchCWD(options.LaunchCWD)
 	for _, batch := range batches {
 		record := RunRecord{
-			SchemaVersion: RunRecordSchema,
-			BatchID:       batch.Plan.BatchID,
-			RecipeID:      RecipeID(batch.Plan.TaskShape, options.Backend),
-			Status:        contracts.RecordStatusUnavailable,
+			SchemaVersion:   RunRecordSchema,
+			BatchID:         batch.Plan.BatchID,
+			RecipeID:        RecipeID(batch.Plan.TaskShape, options.Backend),
+			Status:          contracts.RecordStatusUnavailable,
+			ProviderInvoked: ProviderInvokedUnknown,
+			ConsumesBatch:   true,
 		}
 		if strings.TrimSpace(batch.Path) == "" {
 			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeMissingBatchPath, "relay verification requires a persisted verification-batch path.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
@@ -95,7 +142,7 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			continue
 		}
 		record.InputBindings = inputBindings(options.CharterPath, batch.Path, options.ArtifactPaths)
-		runResult, err := client.RunRecipe(ctx, relayclient.RunRecipeOptions{
+		runResult, commandResult, err := client.RunRecipeWithCommandResult(ctx, relayclient.RunRecipeOptions{
 			Task:                  relayTask(batch),
 			RecipeID:              record.RecipeID,
 			IntegrationBundlePath: options.IntegrationBundlePath,
@@ -106,13 +153,24 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			SettingsPath:          options.SettingsPath,
 			AllowDirtySource:      options.AllowDirtySource,
 		})
+		record.RelayLaunch = launchRecord(commandResult, launchCWD)
+		if runResult == nil {
+			runResult = runResultFromFailedCommand(commandResult)
+		}
+		if runResult != nil {
+			record.RelayRunResult = runResult
+			record.SessionDir = firstString(runResult, "session_dir", "session_directory", "directory")
+		}
+		record.ProviderInvoked = classifyProviderInvocation(record.RelayLaunch, record.SessionDir, record.RelayRunResult)
+		if record.ProviderInvoked == ProviderInvokedFalse {
+			record.Status = RunStatusLaunchFailed
+			record.ConsumesBatch = false
+		}
 		if err != nil {
 			record.Diagnostics = append(record.Diagnostics, commandDiagnostic(CodeRelayRunFailed, "relay verification run failed.", err))
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		record.RelayRunResult = runResult
-		record.SessionDir = firstString(runResult, "session_dir", "session_directory", "directory")
 		if record.SessionDir == "" {
 			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeRelayRunFailed, "relay run result did not include a session_dir.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
 			result.Runs = append(result.Runs, record)
@@ -160,6 +218,326 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 		}
 	}
 	return result, nil
+}
+
+// ReadRunRecordsBytes accepts one v2 run record or a v2 runs index. The
+// version bump is required because strict JSON decoding rejects unknown fields.
+func ReadRunRecordsBytes(data []byte) ([]RunRecord, error) {
+	raw, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, err
+	}
+	document, ok := raw.(map[string]any)
+	if !ok {
+		return nil, diag.New(CodeInvalidRunRecord, "relay run record input must be a JSON object.")
+	}
+	schemaVersion, _ := document["schema_version"].(string)
+	switch schemaVersion {
+	case RunRecordSchema:
+		record, err := strictjson.DecodeBytes[RunRecord](data, strictjson.DefaultMaxBytes*32)
+		if err != nil {
+			return nil, err
+		}
+		if err := requireValidRunRecord(record, document); err != nil {
+			return nil, err
+		}
+		return []RunRecord{record}, nil
+	case SchemaVersion:
+		index, err := strictjson.DecodeBytes[Result](data, strictjson.DefaultMaxBytes*32)
+		if err != nil {
+			return nil, err
+		}
+		rawRuns, _ := document["runs"].([]any)
+		for index, record := range index.Runs {
+			var rawRecord map[string]any
+			if index < len(rawRuns) {
+				rawRecord, _ = rawRuns[index].(map[string]any)
+			}
+			if err := requireValidRunRecord(record, rawRecord); err != nil {
+				return nil, err
+			}
+		}
+		return index.Runs, nil
+	default:
+		return nil, diag.New(
+			CodeInvalidRunRecord,
+			"relay run record input has an unsupported schema_version.",
+			diag.WithDetail("actual", schemaVersion),
+			diag.WithDetail("record_schema", RunRecordSchema),
+			diag.WithDetail("index_schema", SchemaVersion),
+		)
+	}
+}
+
+func requireValidRunRecord(record RunRecord, source ...map[string]any) error {
+	var rawRecord map[string]any
+	if len(source) > 0 {
+		rawRecord = source[0]
+	}
+	if record.SchemaVersion != RunRecordSchema {
+		return diag.New(CodeInvalidRunRecord, "relay run record schema_version is unsupported.", diag.WithDetail("actual", record.SchemaVersion), diag.WithDetail("expected", RunRecordSchema))
+	}
+	if strings.TrimSpace(record.BatchID) == "" {
+		return diag.New(CodeInvalidRunRecord, "relay run record batch_id is required.")
+	}
+	if strings.TrimSpace(record.RecipeID) == "" {
+		return diag.New(CodeInvalidRunRecord, "relay run record recipe_id is required.")
+	}
+	if record.ProviderInvoked != ProviderInvokedTrue && record.ProviderInvoked != ProviderInvokedFalse && record.ProviderInvoked != ProviderInvokedUnknown {
+		return diag.New(CodeInvalidRunRecord, "relay run record provider_invoked is unsupported.", diag.WithDetail("value", record.ProviderInvoked))
+	}
+	if record.Status != contracts.RecordStatusValid && record.Status != contracts.RecordStatusFailed && record.Status != contracts.RecordStatusUnavailable && record.Status != RunStatusLaunchFailed {
+		return diag.New(CodeInvalidRunRecord, "relay run record status is unsupported.", diag.WithDetail("value", record.Status))
+	}
+	if err := requireValidRelayLaunchStreamSummaries(record.RelayLaunch, rawRelayLaunch(rawRecord)); err != nil {
+		return err
+	}
+	providerEvidence := runRecordProviderEvidence(record)
+	if record.RelayLaunch != nil && record.RelayLaunch.StartFailed {
+		if record.ProviderInvoked != ProviderInvokedFalse || record.Status != RunStatusLaunchFailed || record.ConsumesBatch || len(providerEvidence) > 0 {
+			return diag.New(
+				CodeInvalidRunRecord,
+				"relay_launch.start_failed=true requires provider_invoked=false, launch_failed status, a non-consuming batch, and no provider evidence.",
+				diag.WithDetail("provider_invoked", record.ProviderInvoked),
+				diag.WithDetail("status", record.Status),
+				diag.WithDetail("consumes_batch", record.ConsumesBatch),
+				diag.WithDetail("provider_evidence", providerEvidence),
+			)
+		}
+	}
+	if record.ProviderInvoked == ProviderInvokedFalse {
+		if record.Status != RunStatusLaunchFailed {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires launch_failed status.", diag.WithDetail("status", record.Status))
+		}
+		if record.ConsumesBatch {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false run records must not consume the batch.")
+		}
+		if len(providerEvidence) > 0 {
+			return diag.New(
+				CodeInvalidRunRecord,
+				"provider_invoked=false / launch_failed run records cannot carry provider evidence.",
+				diag.WithDetail("provider_evidence", providerEvidence),
+			)
+		}
+		if record.RelayLaunch == nil || !record.RelayLaunch.StartFailed {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires retained proof that the relay process failed to start.")
+		}
+		return nil
+	}
+	if record.Status == RunStatusLaunchFailed {
+		return diag.New(CodeInvalidRunRecord, "launch_failed status requires provider_invoked=false.")
+	}
+	if !record.ConsumesBatch {
+		return diag.New(CodeInvalidRunRecord, "provider_invoked=true or unknown run records must consume the batch.")
+	}
+	if len(providerEvidence) > 0 && record.ProviderInvoked != ProviderInvokedTrue {
+		return diag.New(CodeInvalidRunRecord, "session or provider artifacts require provider_invoked=true.")
+	}
+	if len(providerEvidence) == 0 && record.ProviderInvoked == ProviderInvokedTrue {
+		return diag.New(CodeInvalidRunRecord, "provider_invoked=true requires a session or provider artifact.")
+	}
+	return nil
+}
+
+func rawRelayLaunch(record map[string]any) map[string]any {
+	launch, _ := record["relay_launch"].(map[string]any)
+	return launch
+}
+
+func requireValidRelayLaunchStreamSummaries(launch *LaunchRecord, rawLaunch map[string]any) error {
+	if launch == nil {
+		return nil
+	}
+	for _, stream := range []struct {
+		name      string
+		retained  []byte
+		digest    string
+		bytes     strictjson.Int
+		truncated bool
+	}{
+		{name: "stdout", retained: launch.Stdout, digest: launch.StdoutDigest, bytes: launch.StdoutBytes, truncated: launch.StdoutTruncated},
+		{name: "stderr", retained: launch.Stderr, digest: launch.StderrDigest, bytes: launch.StderrBytes, truncated: launch.StderrTruncated},
+	} {
+		if err := requireValidRelayLaunchStreamSummary(stream.name, stream.retained, stream.digest, stream.bytes, stream.truncated, rawLaunch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireValidRelayLaunchStreamSummary(stream string, retained []byte, claimedDigest string, claimedBytes strictjson.Int, truncated bool, rawLaunch map[string]any) error {
+	digestKey := stream + "_digest"
+	bytesKey := stream + "_bytes"
+	_, digestClaimed := rawLaunch[digestKey]
+	_, bytesClaimed := rawLaunch[bytesKey]
+	if rawLaunch == nil {
+		digestClaimed = strings.TrimSpace(claimedDigest) != ""
+		bytesClaimed = claimedBytes != 0
+	}
+	if digestClaimed && strings.TrimSpace(claimedDigest) != "" && !digest.WellFormed(strings.TrimSpace(claimedDigest)) {
+		return invalidRelayLaunchStreamSummary(stream, digestKey, "relay launch stream digest must be a well-formed sha256 digest.", diag.WithDetail("claimed_digest", claimedDigest))
+	}
+	if bytesClaimed && claimedBytes < 0 {
+		return invalidRelayLaunchStreamSummary(stream, bytesKey, "relay launch stream byte count must not be negative.", diag.WithDetail("claimed_bytes", claimedBytes))
+	}
+	if retained == nil {
+		hasDigestClaim := digestClaimed && strings.TrimSpace(claimedDigest) != ""
+		hasBytesClaim := bytesClaimed && claimedBytes != 0
+		if (hasDigestClaim || hasBytesClaim) && !truncated {
+			return invalidRelayLaunchStreamSummary(stream, "retained_content", "relay launch stream summaries without retained content require a truncated capture.", diag.WithDetail("claimed_digest", claimedDigest), diag.WithDetail("claimed_bytes", claimedBytes))
+		}
+		return nil
+	}
+	actualDigest := digest.RawBytes(retained)
+	actualBytes := strictjson.Int(len(retained))
+	if digestClaimed && strings.TrimSpace(claimedDigest) != actualDigest {
+		return invalidRelayLaunchStreamSummary(stream, digestKey, "relay launch stream digest does not match retained content.", diag.WithDetail("claimed_digest", claimedDigest), diag.WithDetail("retained_digest", actualDigest))
+	}
+	if bytesClaimed && claimedBytes != actualBytes {
+		return invalidRelayLaunchStreamSummary(stream, bytesKey, "relay launch stream byte count does not match retained content.", diag.WithDetail("claimed_bytes", claimedBytes), diag.WithDetail("retained_bytes", actualBytes))
+	}
+	return nil
+}
+
+func invalidRelayLaunchStreamSummary(stream, field, message string, options ...diag.Option) error {
+	options = append(options, diag.WithDetail("stream", stream), diag.WithDetail("field", field))
+	return diag.New(CodeInvalidRunRecordStreamSummary, message, options...)
+}
+
+func effectiveLaunchCWD(value string) string {
+	if strings.TrimSpace(value) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		return cwd
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return value
+	}
+	return abs
+}
+
+func launchRecord(result relayclient.CommandResult, workingDirectory string) *LaunchRecord {
+	if result.Command == "" && len(result.Args) == 0 {
+		return nil
+	}
+	stdout, stdoutTruncated := boundedLaunchOutput(result.Stdout)
+	stderr, stderrTruncated := boundedLaunchOutput(result.Stderr)
+	argv := make([]string, 0, len(result.Args)+1)
+	argv = append(argv, result.Command)
+	argv = append(argv, result.Args...)
+	return &LaunchRecord{
+		Argv:             argv,
+		WorkingDirectory: workingDirectory,
+		ExitCode:         result.ExitCode,
+		StartFailed:      result.StartFailed,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		StdoutDigest:     digest.RawBytes(stdout),
+		StderrDigest:     digest.RawBytes(stderr),
+		StdoutBytes:      strictjson.Int(len(stdout)),
+		StderrBytes:      strictjson.Int(len(stderr)),
+		StdoutTruncated:  stdoutTruncated,
+		StderrTruncated:  stderrTruncated,
+	}
+}
+
+func boundedLaunchOutput(value []byte) ([]byte, bool) {
+	if len(value) <= launchCaptureLimitBytes {
+		retained := make([]byte, len(value))
+		copy(retained, value)
+		return retained, false
+	}
+	head := launchCaptureLimitBytes / 2
+	tail := launchCaptureLimitBytes - head
+	return append(append([]byte(nil), value[:head]...), value[len(value)-tail:]...), true
+}
+
+func runResultFromFailedCommand(result relayclient.CommandResult) map[string]any {
+	for _, output := range [][]byte{result.Stdout, result.Stderr} {
+		value, err := strictjson.DecodeBytes[map[string]any](output, strictjson.DefaultMaxBytes*32)
+		if err == nil && value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func classifyProviderInvocation(launch *LaunchRecord, sessionDir string, runResult map[string]any) string {
+	if strings.TrimSpace(sessionDir) != "" || containsSessionOrProviderArtifact(runResult) {
+		return ProviderInvokedTrue
+	}
+	if launch != nil && launch.StartFailed {
+		return ProviderInvokedFalse
+	}
+	return ProviderInvokedUnknown
+}
+
+func runRecordProviderEvidence(record RunRecord) []string {
+	evidence := make([]string, 0, 5)
+	if strings.TrimSpace(record.SessionDir) != "" {
+		evidence = append(evidence, "session_dir")
+	}
+	if strings.TrimSpace(record.PortableExportDir) != "" {
+		evidence = append(evidence, "portable_export_dir")
+	}
+	if strings.TrimSpace(record.PortableExportDigest) != "" {
+		evidence = append(evidence, "portable_export_digest")
+	}
+	if record.RelayVerdicts != nil {
+		evidence = append(evidence, "relay_verdicts")
+	}
+	if containsSessionOrProviderArtifact(record.RelayRunResult) {
+		evidence = append(evidence, "relay_run_result")
+	}
+	return evidence
+}
+
+func containsSessionOrProviderArtifact(value any) bool {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, item := range current {
+			if nonEmptyRelayArtifact(item) && isSessionOrProviderArtifactKey(key) {
+				return true
+			}
+			if containsSessionOrProviderArtifact(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range current {
+			if containsSessionOrProviderArtifact(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSessionOrProviderArtifactKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "session_dir", "session_directory", "provider_result", "provider_results", "provider_artifact", "provider_artifacts", "provider_output", "provider_outputs", "provider_response", "provider_responses", "provider_invocation", "provider_invocations", "provider_result_ref":
+		return true
+	default:
+		return false
+	}
+}
+
+func nonEmptyRelayArtifact(value any) bool {
+	switch current := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(current) != ""
+	case []any:
+		return len(current) > 0
+	case map[string]any:
+		return len(current) > 0
+	default:
+		return true
+	}
 }
 
 func validatePreLaunchBatchInput(batch BatchInput, options Options) []diag.Diagnostic {

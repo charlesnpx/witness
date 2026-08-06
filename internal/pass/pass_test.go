@@ -7,7 +7,9 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -94,6 +96,233 @@ func TestBeginWithSameOptionsResumesExistingPass(t *testing.T) {
 	assertInvocation(t, invocation, stagePreflight, actionCallerRoleOutputs, false)
 	if invocation.PassState.Path != filepath.Join(options.StateDir, StateFileName) {
 		t.Fatalf("pass state path = %s, want %s", invocation.PassState.Path, filepath.Join(options.StateDir, StateFileName))
+	}
+}
+
+func TestBeginAllowsDirtyGitSnapshotAndReportsRetainedArtifacts(t *testing.T) {
+	options := newBeginOptions(t)
+	options.AllowNonGitSource = false
+	runPassGit(t, options.SourceDir, "init")
+	runPassGit(t, options.SourceDir, "config", "user.email", "witness-test@example.com")
+	runPassGit(t, options.SourceDir, "config", "user.name", "Witness Test")
+	runPassGit(t, options.SourceDir, "add", "app.txt")
+	runPassGit(t, options.SourceDir, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(options.SourceDir, "app.txt"), []byte("working-copy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(options.SourceDir, "untracked.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Begin(context.Background(), options); diag.FromError(err).Code != freeze.CodeSourceDirty {
+		t.Fatalf("dirty begin error = %v, want %s", err, freeze.CodeSourceDirty)
+	}
+
+	options.AllowDirtySource = true
+	invocation, err := Begin(context.Background(), options)
+	if err != nil {
+		t.Fatalf("begin dirty pass with override: %v", err)
+	}
+	if !invocation.SourceDirty || !strings.Contains(invocation.SourceDirtyStatus, "M app.txt") {
+		t.Fatalf("invocation dirty source context = %#v", invocation)
+	}
+	for _, role := range []string{"pass_state", "charter_freeze", "source_manifest", "workspace_manifest"} {
+		relativePath := invocation.RetainedArtifacts[role]
+		if relativePath == "" || filepath.IsAbs(relativePath) {
+			t.Fatalf("begin retained artifact %s = %q", role, relativePath)
+		}
+		if _, err := os.Stat(filepath.Join(options.StateDir, filepath.FromSlash(relativePath))); err != nil {
+			t.Fatalf("begin retained artifact %s at %s: %v", role, relativePath, err)
+		}
+	}
+
+	state := readPassStateForTest(t, options.StateDir)
+	if !state.Config.AllowDirtySource {
+		t.Fatalf("pass config = %#v, want allow_dirty_source", state.Config)
+	}
+	if !state.SourceDirty || !strings.Contains(state.SourceDirtyStatus, "M app.txt") {
+		t.Fatalf("pass source context = dirty:%t status:%q", state.SourceDirty, state.SourceDirtyStatus)
+	}
+	freezeStage := state.Stages[0]
+	if got, _ := freezeStage.Details["source_dirty"].(bool); !got {
+		t.Fatalf("freeze stage details = %#v, want source_dirty", freezeStage.Details)
+	}
+	manifest := readJSONForTest[freeze.Manifest](t, state.Config.SnapshotManifestPath)
+	if !manifest.Source.GitDirty || !strings.Contains(manifest.Source.GitDirtyStatus, "?? untracked.txt") {
+		t.Fatalf("snapshot source identity = %#v", manifest.Source)
+	}
+
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume dirty pass preflight: %v", err)
+	}
+	if !invocation.SourceDirty {
+		t.Fatalf("preflight invocation lost dirty source context: %#v", invocation)
+	}
+	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
+	if !preflightResult.SourceDirty || preflightResult.SourceDirtyStatus != manifest.Source.GitDirtyStatus {
+		t.Fatalf("preflight dirty source context = %#v, want %#v", preflightResult, manifest.Source)
+	}
+	for role, relativePath := range invocation.RetainedArtifacts {
+		if filepath.IsAbs(relativePath) {
+			t.Fatalf("retained artifact %s has absolute path %q", role, relativePath)
+		}
+		if _, err := os.Stat(filepath.Join(options.StateDir, filepath.FromSlash(relativePath))); err != nil {
+			t.Fatalf("retained artifact %s at %s: %v", role, relativePath, err)
+		}
+	}
+}
+
+func TestPassRetainedArtifactsRejectsAdversarialPreflightEntries(t *testing.T) {
+	stateDir := t.TempDir()
+	retainedPath := filepath.Join(stateDir, "retained.json")
+	if err := os.WriteFile(retainedPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(filepath.Dir(stateDir), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		artifacts map[string]string
+		code      string
+	}{
+		{
+			name:      "absolute path",
+			artifacts: map[string]string{"external": outsidePath},
+			code:      CodeInvalidRetainedArtifact,
+		},
+		{
+			name:      "reserved core role",
+			artifacts: map[string]string{"pass_state": filepath.Base(retainedPath)},
+			code:      CodeReservedRetainedArtifactRole,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := passRetainedArtifacts(Config{StateDir: stateDir}, preflight.Result{RetainedArtifacts: test.artifacts})
+			if err == nil {
+				t.Fatal("pass retained-artifact inventory accepted adversarial preflight entry")
+			}
+			assertValidationCode(t, err, test.code)
+		})
+	}
+}
+
+func TestPassRetainedArtifactsRejectsInStateSymlinkToExternalFile(t *testing.T) {
+	stateDir := t.TempDir()
+	outsidePath := filepath.Join(filepath.Dir(stateDir), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	externalSymlink := filepath.Join(stateDir, "external-link.json")
+	if err := os.Symlink(outsidePath, externalSymlink); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := passRetainedArtifacts(Config{StateDir: stateDir}, preflight.Result{RetainedArtifacts: map[string]string{
+		"external": filepath.Base(externalSymlink),
+	}})
+	if err == nil {
+		t.Fatal("pass retained-artifact inventory accepted an in-state symlink to an external file")
+	}
+	assertValidationCode(t, err, CodeInvalidRetainedArtifact)
+}
+
+func TestPassRetainedArtifactsRequiresMatchingManifestRolePath(t *testing.T) {
+	stateDir := t.TempDir()
+	localManifestPath := filepath.Join(stateDir, "source-snapshot", "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(localManifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localManifestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherManifestPath := filepath.Join(stateDir, "other-manifest.json")
+	if err := os.WriteFile(otherManifestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{StateDir: stateDir, SnapshotManifestPath: localManifestPath}
+
+	_, err := passRetainedArtifacts(config, preflight.Result{RetainedArtifacts: map[string]string{
+		"source_manifest": filepath.Base(otherManifestPath),
+	}})
+	if err == nil {
+		t.Fatal("pass retained-artifact inventory accepted a conflicting source manifest path")
+	}
+	assertValidationCode(t, err, CodeRetainedArtifactRoleConflict)
+
+	artifacts, err := passRetainedArtifacts(config, preflight.Result{RetainedArtifacts: map[string]string{
+		"source_manifest": filepath.ToSlash(filepath.Join("source-snapshot", "manifest.json")),
+	}})
+	if err != nil {
+		t.Fatalf("pass retained-artifact inventory rejected matching source manifest path: %v", err)
+	}
+	if got, want := artifacts["source_manifest"], filepath.ToSlash(filepath.Join("source-snapshot", "manifest.json")); got != want {
+		t.Fatalf("source manifest path = %q, want %q", got, want)
+	}
+}
+
+func TestSaveAndReportRetainedArtifactFailureDoesNotPersistState(t *testing.T) {
+	stateDir := t.TempDir()
+	config := Config{StateDir: stateDir}
+	applyOutputDefaults(&config)
+	writeCanonicalForTest(t, config.Outputs.PreflightPath, preflight.Result{
+		RetainedArtifacts: map[string]string{"missing": "missing.json"},
+	})
+	state := &State{
+		Config:     config,
+		NextAction: NextAction{Type: actionComplete},
+	}
+
+	_, err := saveAndReport(state, "")
+	if err == nil {
+		t.Fatal("saveAndReport accepted a missing retained artifact")
+	}
+	assertValidationCode(t, err, CodeInvalidRetainedArtifact)
+	if _, statErr := os.Stat(config.Outputs.StatePath); !os.IsNotExist(statErr) {
+		t.Fatalf("pass state exists after retained-artifact refusal: %v", statErr)
+	}
+}
+
+func TestBeginRejectsZeroGoalCharterUnlessExplicitlyAllowed(t *testing.T) {
+	options := newBeginOptions(t)
+	writeCanonicalForTest(t, options.CharterPath, charter.Charter{
+		SchemaVersion: charter.SchemaVersion,
+		Goals:         []charter.Statement{},
+		NonGoals:      []charter.Statement{},
+		OwnerEvents: []charter.OwnerEvent{{
+			ID:      "initial-charter",
+			Type:    "charter_initialized",
+			Actor:   "owner",
+			Summary: "Initial owner-authorized charter.",
+		}},
+	})
+
+	if _, err := Begin(context.Background(), options); diag.FromError(err).Code != CodeCharterZeroGoals {
+		t.Fatalf("zero-goal begin error = %v, want %s", err, CodeCharterZeroGoals)
+	} else if !strings.Contains(err.Error(), "vacuous") || !strings.Contains(err.Error(), "-allow-empty-charter") {
+		t.Fatalf("zero-goal diagnostic = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(options.StateDir, StateFileName)); !os.IsNotExist(err) {
+		t.Fatalf("pass state exists after zero-goal refusal: %v", err)
+	}
+
+	options.AllowEmptyCharter = true
+	invocation, err := Begin(context.Background(), options)
+	if err != nil {
+		t.Fatalf("zero-goal begin with override: %v", err)
+	}
+	if invocation.StageRun != stageFreeze {
+		t.Fatalf("override invocation stage = %q, want %q", invocation.StageRun, stageFreeze)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	if !state.Config.AllowEmptyCharter {
+		t.Fatalf("pass config = %#v, want allow_empty_charter", state.Config)
+	}
+	frozen := readJSONForTest[charter.FrozenCharter](t, state.Config.Outputs.CharterFreezePath)
+	if len(frozen.Charter.Goals) != 0 {
+		t.Fatalf("frozen Charter goals = %#v, want empty override Charter", frozen.Charter.Goals)
 	}
 }
 
@@ -387,6 +616,243 @@ func TestResumeRejectsPreflightWaitStateBackendStrataTampering(t *testing.T) {
 		t.Fatal("resume accepted tampered preflight backend strata in the role-output wait state")
 	}
 	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestValidatePreflightContractDigestDocumentReadsV1AsRelayLineage(t *testing.T) {
+	contractID := contracts.RequiredWitnessRecipeContractsV2[0].ContractID
+	witnessDigest := digest.RawBytes([]byte("witness-body:" + contractID))
+	relayDigest := digest.RawBytes([]byte("relay-lineage:" + contractID))
+	integrationBundleDigest := digest.RawBytes([]byte("integration-bundle"))
+	retained := map[string]any{
+		"schema_version": preflight.ContractDigestDocumentV1,
+		"digest_profile": digest.Profile,
+		"contract_digests": map[string]any{
+			contractID:           relayDigest,
+			"integration_bundle": integrationBundleDigest,
+		},
+	}
+	result := preflight.Result{
+		ContractDigests: map[string]string{
+			contractID:           witnessDigest,
+			"integration_bundle": integrationBundleDigest,
+		},
+		RelayReportedDigests: map[string]string{contractID: relayDigest},
+	}
+
+	if err := validatePreflightContractDigestDocument(retained, result); err != nil {
+		t.Fatalf("v1 document was compared to witness body digests: %v", err)
+	}
+}
+
+func TestValidatePreflightContractDigestDocumentAllowsV1LegacyNonRequiredExtra(t *testing.T) {
+	contractID := contracts.RequiredWitnessRecipeContractsV2[0].ContractID
+	relayDigest := digest.RawBytes([]byte("relay-lineage:" + contractID))
+	integrationBundleDigest := digest.RawBytes([]byte("integration-bundle"))
+	extraContractID := "example/non-required-contract"
+	extraDigest := digest.RawBytes([]byte("relay-lineage:" + extraContractID))
+	retained := map[string]any{
+		"schema_version": preflight.ContractDigestDocumentV1,
+		"digest_profile": digest.Profile,
+		"contract_digests": map[string]any{
+			contractID:           relayDigest,
+			"integration_bundle": integrationBundleDigest,
+			extraContractID:      extraDigest,
+		},
+	}
+	result := preflight.Result{
+		ContractDigests: map[string]string{
+			"integration_bundle": integrationBundleDigest,
+		},
+		RelayReportedDigests: map[string]string{contractID: relayDigest},
+	}
+
+	if err := validatePreflightContractDigestDocument(retained, result); err != nil {
+		t.Fatalf("v1 persisted contract-digests rejected a non-required legacy extra: %v", err)
+	}
+}
+
+func TestValidatePreflightCompileReportRejectsDisagreeingRelayLineage(t *testing.T) {
+	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
+	reportedDigest := digest.RawBytes([]byte("relay-reported:" + requirement.ContractID))
+	planDigest := digest.RawBytes([]byte("recipe-plan:" + requirement.ContractID))
+	payload := map[string]any{
+		"recipe_id":            requirement.RecipeID,
+		"status":               "usable",
+		"integration_contract": requirement.ContractID,
+		"contract_digests": map[string]any{
+			requirement.ContractID: reportedDigest,
+		},
+		"compiled_plan": map[string]any{
+			"recipe_id":                    requirement.RecipeID,
+			"integration_contract_id":      requirement.ContractID,
+			"integration_contract_digest":  planDigest,
+			"deterministic_test_fixture":   true,
+			"required_input_binding_count": 4,
+		},
+	}
+
+	_, _, err := validatePreflightCompileReport(payload, requirement, false)
+	if err == nil {
+		t.Fatal("validation accepted disagreeing relay lineage")
+	}
+	_, expectedErr := preflight.ResolveRelayReportedContractDigests(
+		map[string]string{requirement.ContractID: reportedDigest},
+		requirement.ContractID,
+		planDigest,
+	)
+	if expectedErr == nil {
+		t.Fatal("shared relay-lineage resolver accepted mismatched digests")
+	}
+	if actual, expected := diag.FromError(err), diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("validation diagnostic = %#v, want %#v", actual, expected)
+	}
+}
+
+func TestValidatePreflightCompileReportRejectsMalformedDigestLikeGeneration(t *testing.T) {
+	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
+	rawDigests := map[string]any{requirement.ContractID: true}
+	payload := map[string]any{
+		"recipe_id":            requirement.RecipeID,
+		"status":               "usable",
+		"integration_contract": requirement.ContractID,
+		"contract_digests":     rawDigests,
+		"compiled_plan": map[string]any{
+			"recipe_id":                    requirement.RecipeID,
+			"integration_contract_id":      requirement.ContractID,
+			"integration_contract_digest":  digest.RawBytes([]byte("relay-projection:" + requirement.ContractID)),
+			"deterministic_test_fixture":   true,
+			"required_input_binding_count": 4,
+		},
+	}
+
+	_, _, err := validatePreflightCompileReport(payload, requirement, false)
+	if err == nil {
+		t.Fatal("validation accepted a boolean compile-report digest")
+	}
+	_, expectedErr := preflight.DecodeCompileReportContractDigests(requirement.RecipeID, rawDigests)
+	if expectedErr == nil {
+		t.Fatal("shared compile-report digest decoder accepted a boolean digest")
+	}
+	if actual, expected := diag.FromError(err), diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("validation diagnostic = %#v, want generation diagnostic %#v", actual, expected)
+	}
+}
+
+func TestValidatePreflightOutputProjectsExtraCompileReportDigest(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	generated := writeReadyPreflightForTest(t, state.Config)
+	generated.SnapshotDigest = generated.ArtifactDigests["source-snapshot-manifest"]
+	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
+	selectedDigest := generated.RelayReportedDigests[requirement.ContractID]
+	if selectedDigest == "" {
+		t.Fatalf("generated relay digest for %s is empty", requirement.ContractID)
+	}
+
+	extraContractID := "example/non-required-contract"
+	reportRelativePath := filepath.ToSlash(filepath.Join("compile-reports", requirement.RecipeID+".json"))
+	report := map[string]any{
+		"recipe_id":            requirement.RecipeID,
+		"status":               "usable",
+		"integration_contract": requirement.ContractID,
+		"contract_digests": map[string]any{
+			requirement.ContractID: selectedDigest,
+			extraContractID:        digest.RawBytes([]byte("relay-projection:" + extraContractID)),
+		},
+		"compiled_plan": map[string]any{
+			"schema_version":               "test-root-recipe-plan-v1",
+			"recipe_id":                    requirement.RecipeID,
+			"integration_contract_id":      requirement.ContractID,
+			"integration_contract_digest":  selectedDigest,
+			"deterministic_test_fixture":   true,
+			"required_input_binding_count": 4,
+		},
+	}
+	reportDigest := retainPreflightPayloadForTest(t, state.Config.StateDir, reportRelativePath, report)
+	generated.ArtifactDigests[reportRelativePath] = reportDigest
+	generated.CompileReportDigests[requirement.RecipeID] = reportDigest
+	if _, found := generated.RelayReportedDigests[extraContractID]; found {
+		t.Fatalf("generated relay lineage retained non-required contract %s", extraContractID)
+	}
+
+	generatedDocument := preflight.ContractDigestDocument(generated)
+	generated.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, state.Config.StateDir, "contract-digests.json", generatedDocument)
+	generated.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, state.Config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(generated))
+	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, generated)
+
+	if err := validatePreflightOutput(state.Config, generated); err != nil {
+		t.Fatalf("revalidation rejected projected compile-report lineage: %v", err)
+	}
+	reconstructed, err := expectedPreflightResult(state.Config)
+	if err != nil {
+		t.Fatalf("reconstruct preflight result: %v", err)
+	}
+	if actual := preflight.ContractDigestDocument(reconstructed); !reflect.DeepEqual(actual, generatedDocument) {
+		t.Fatalf("reconstructed contract-digests document = %#v, want %#v", actual, generatedDocument)
+	}
+	if _, found := reconstructed.RelayReportedDigests[extraContractID]; found {
+		t.Fatalf("reconstructed relay lineage retained non-required contract %s: %#v", extraContractID, reconstructed.RelayReportedDigests)
+	}
+}
+
+func TestResumeAcceptsLegacyPreflightResultWithoutRetainedArtifacts(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	result := writeReadyPreflightForTest(t, state.Config)
+	result.SnapshotDigest = result.ArtifactDigests["source-snapshot-manifest"]
+
+	data, err := canonjson.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyResult, ok := document.(map[string]any)
+	if !ok {
+		t.Fatalf("preflight document type = %T, want object", document)
+	}
+	delete(legacyResult, "retained_artifacts")
+	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, legacyResult)
+
+	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
+		{role: "integration-bundle", path: state.Config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
+		{role: "source-snapshot-manifest", path: state.Config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, err := artifactRecordsForExistingFiles(preflightOutputSpecs(state.Config, &result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markStageComplete(state, StageRecord{
+		Name:    stagePreflight,
+		Status:  statusComplete,
+		Inputs:  inputs,
+		Outputs: outputs,
+		Details: map[string]any{
+			"relay_absent":   false,
+			"backend_strata": cloneStringMap(result.BackendStrata),
+		},
+	})
+	if err := setNextAction(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume legacy preflight state: %v", err)
+	}
 }
 
 func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {
@@ -746,6 +1212,56 @@ func TestResumeRejectsForgedRelayBatchActionFields(t *testing.T) {
 		t.Fatal("resume accepted forged relay batch action fields")
 	}
 	assertValidationCode(t, err, CodeStateInvalid)
+}
+
+func TestPlanRoundTripsSafeIntegerEstimatedDeltaInVerificationBatch(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	writeRoleOutputsForState(t, options.StateDir, true)
+
+	state := readPassStateForTest(t, options.StateDir)
+	var defectPath string
+	for _, roleOutput := range state.Config.RoleOutputs {
+		if roleOutput.Role == contracts.RoleDefect {
+			defectPath = roleOutput.Path
+			break
+		}
+	}
+	if defectPath == "" {
+		t.Fatal("test pass has no defect role output")
+	}
+	roleOutput := readJSONForTest[contracts.RoleOutputDocument](t, defectPath)
+	roleOutput.Findings[0].EstimatedDelta.Test.Lines = 20
+	writeCanonicalForTest(t, defectPath, roleOutput)
+
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	state = readPassStateForTest(t, options.StateDir)
+	batchPath := filepath.Join(state.Config.StateDir, "verification", "batches", "defect-batch-1.json")
+	batchBytes, err := os.ReadFile(batchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(batchBytes, []byte(`"lines":20`)) {
+		t.Fatalf("verification batch = %s, want integer estimated_delta lines", batchBytes)
+	}
+	batch, err := contracts.ReadVerificationBatchBytes(batchBytes)
+	if err != nil {
+		t.Fatalf("re-decode verification batch: %v", err)
+	}
+	if diagnostics := contracts.ValidateVerificationBatch(batch, nil); len(diagnostics) > 0 {
+		t.Fatalf("re-validated verification batch diagnostics = %#v", diagnostics)
+	}
+
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume after plan validation: %v", err)
+	}
 }
 
 func TestResumeRejectsSurplusVerificationBatchOutput(t *testing.T) {
@@ -1368,6 +1884,14 @@ func TestDriverImportsNoRelayExecutionOrProviderInvocation(t *testing.T) {
 	}
 }
 
+func runPassGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+}
+
 func newBeginOptions(t *testing.T) BeginOptions {
 	t.Helper()
 	root := t.TempDir()
@@ -1563,7 +2087,7 @@ func freezeFileEntryForTest(path string, mode string, content []byte) freeze.Fil
 	return freeze.FileEntry{
 		Path:   path,
 		Mode:   mode,
-		Size:   int64(len(content)),
+		Size:   strictjson.Int64(len(content)),
 		Digest: sum,
 		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
 	}
@@ -1604,6 +2128,7 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		CompileReportDigests: map[string]string{},
 		RecipePlanDigests:    map[string]string{},
 		ContractDigests:      map[string]string{"integration_bundle": bundleDigest},
+		RelayReportedDigests: map[string]string{},
 		BackendStrata:        map[string]string{"claude": "ready", "codex": "ready"},
 		ConsumerIdentity:     map[string]any{"kind": "witness", "id": "pass-driver"},
 	}
@@ -1643,16 +2168,14 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		planRelative := filepath.ToSlash(filepath.Join("recipe-plans", requirement.RecipeID+".json"))
 		result.ArtifactDigests[reportRelative] = retainPreflightPayloadForTest(t, config.StateDir, reportRelative, report)
 		result.CompileReportDigests[requirement.RecipeID] = result.ArtifactDigests[reportRelative]
+		result.RelayReportedDigests[requirement.ContractID] = selectedDigests[requirement.ContractID]
 		result.ArtifactDigests[planRelative] = retainPreflightPayloadForTest(t, config.StateDir, planRelative, plan)
 		result.RecipePlanDigests[requirement.RecipeID] = result.ArtifactDigests[planRelative]
 	}
-	contractDigestDoc := map[string]any{
-		"schema_version":   "witness-preflight-contract-digests-v1",
-		"digest_profile":   digest.Profile,
-		"contract_digests": result.ContractDigests,
-	}
+	contractDigestDoc := preflight.ContractDigestDocument(result)
 	result.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, config.StateDir, "contract-digests.json", contractDigestDoc)
 	result.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(result))
+	result.RetainedArtifacts = preflight.RetainedArtifacts(config.StateDir, config.SnapshotManifestPath, result.ArtifactDigests)
 	writeCanonicalForTest(t, config.Outputs.PreflightPath, result)
 	return result
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (
@@ -102,7 +103,7 @@ type PlanDocument struct {
 	PreflightCompatibilityDigest     string                      `json:"preflight_compatibility_digest,omitempty"`
 	PreflightRelayCapabilitiesDigest string                      `json:"preflight_relay_capabilities_digest,omitempty"`
 	IntegrationBundleDigest          string                      `json:"integration_bundle_digest,omitempty"`
-	BatchSizeMaximum                 int                         `json:"batch_size_maximum"`
+	BatchSizeMaximum                 strictjson.Int              `json:"batch_size_maximum"`
 	Batches                          []BatchPlan                 `json:"batches"`
 	ExcludedFindings                 []ExcludedFinding           `json:"excluded_findings,omitempty"`
 	Diagnostics                      []diag.Diagnostic           `json:"diagnostics,omitempty"`
@@ -249,6 +250,7 @@ func Run(options Options) (*Result, error) {
 		PreflightRelayCapabilitiesDigest: strings.TrimSpace(options.Preflight.RelayCapabilitiesDigest),
 		IntegrationBundleDigest:          strings.TrimSpace(options.Preflight.IntegrationBundleDigest),
 		BatchSizeMaximum:                 MaxBatchFindings,
+		Batches:                          make([]BatchPlan, 0),
 		ConsumerIdentity:                 consumer,
 	}
 
@@ -616,6 +618,7 @@ func manifestSkeleton(plan PlanDocument) ManifestSkeleton {
 		ChangeSurface:       plan.ChangeSurface,
 		ChangeSurfaceDigest: plan.ChangeSurfaceDigest,
 		BaselinePass:        plan.BaselinePass,
+		Batches:             make([]ManifestSkeletonBatch, 0, len(plan.Batches)),
 		ExcludedFindings:    append([]ExcludedFinding(nil), plan.ExcludedFindings...),
 		ConsumerIdentity:    cloneIdentity(plan.ConsumerIdentity),
 	}

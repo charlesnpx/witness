@@ -122,6 +122,33 @@ type Summary struct {
 	FixpointEligible    bool `json:"fixpoint_eligible"`
 }
 
+type summaryJSON struct {
+	Admitted            strictjson.Int `json:"admitted"`
+	Advisory            strictjson.Int `json:"advisory"`
+	PendingVerification strictjson.Int `json:"pending_verification"`
+	AutomaticCandidate  strictjson.Int `json:"automatic_candidate"`
+	CallerDecision      strictjson.Int `json:"caller_decision"`
+	None                strictjson.Int `json:"none"`
+	FixpointEligible    bool           `json:"fixpoint_eligible"`
+}
+
+func (summary *Summary) UnmarshalJSON(data []byte) error {
+	decoded, err := strictjson.DecodeBytes[summaryJSON](data, int64(len(data)))
+	if err != nil {
+		return err
+	}
+	*summary = Summary{
+		Admitted:            int(decoded.Admitted),
+		Advisory:            int(decoded.Advisory),
+		PendingVerification: int(decoded.PendingVerification),
+		AutomaticCandidate:  int(decoded.AutomaticCandidate),
+		CallerDecision:      int(decoded.CallerDecision),
+		None:                int(decoded.None),
+		FixpointEligible:    decoded.FixpointEligible,
+	}
+	return nil
+}
+
 type FindingVerdict struct {
 	FindingID string `json:"finding_id"`
 	// FindingKey and EstimatedDelta are in-memory transport only (populated in

@@ -15,6 +15,7 @@ import (
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/planning"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestAdjudicationBranchTable(t *testing.T) {
@@ -904,7 +905,7 @@ func adjudicationManifestFile(path string, mode string, content string) freeze.F
 	return freeze.FileEntry{
 		Path:   path,
 		Mode:   mode,
-		Size:   int64(len(content)),
+		Size:   strictjson.Int64(len(content)),
 		Digest: sum,
 		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
 	}

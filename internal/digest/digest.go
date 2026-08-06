@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/charlesnpx/witness/internal/canonjson"
 	"github.com/charlesnpx/witness/internal/diag"
@@ -119,4 +120,23 @@ func Validate(expected string, actual string) error {
 		return fmt.Errorf("digest mismatch: got %s, want %s", actual, expected)
 	}
 	return nil
+}
+
+// WellFormed reports whether value has the canonical digest syntax used by
+// this profile: the "sha256:" prefix followed by exactly 64 lowercase
+// hexadecimal characters.
+func WellFormed(value string) bool {
+	if !strings.HasPrefix(value, Prefix) {
+		return false
+	}
+	hexPart := value[len(Prefix):]
+	if len(hexPart) != 64 {
+		return false
+	}
+	for _, r := range hexPart {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }

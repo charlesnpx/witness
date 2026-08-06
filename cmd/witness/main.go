@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -32,8 +33,17 @@ import (
 )
 
 const (
-	verificationPlanMissingPreflight = "verification_plan_missing_preflight"
-	verificationPlanInvalidPreflight = "verification_plan_invalid_preflight"
+	verificationPlanMissingPreflight                = "verification_plan_missing_preflight"
+	verificationPlanInvalidPreflight                = "verification_plan_invalid_preflight"
+	verificationAssembleInvalidRunRecordConsumption = "verification_assemble_invalid_run_record_consumption"
+	verificationAssembleMultipleConsumingRunRecords = "verification_assemble_multiple_consuming_run_records"
+	verificationAssembleConflictingRelayProvenance  = "verification_assemble_conflicting_relay_provenance"
+
+	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
+	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
+	assembleStateDirIntegrationBundle     = "integration-bundle.json"
+	assembleStateDirSelectedContract      = "selected-contract.json"
+	assembleStateDirPreflightResult       = "preflight.json"
 )
 
 var witnessCommands = map[string]map[string]bool{
@@ -57,6 +67,10 @@ var witnessCommands = map[string]map[string]bool{
 		"show":              true,
 		"release-caps":      true,
 		"check-application": true,
+	},
+	"role-output": {
+		"init":     true,
+		"validate": true,
 	},
 	"pass": {
 		"begin":  true,
@@ -90,6 +104,10 @@ func main() {
 }
 
 func route(args []string) error {
+	if len(args) == 1 && (isHelpRequest(args[0]) || args[0] == "help") {
+		writeTopLevelUsage()
+		return nil
+	}
 	if len(args) == 0 {
 		return diag.New(diag.CodeInvalidCommand, "missing witness command.")
 	}
@@ -103,6 +121,10 @@ func route(args []string) error {
 		return notImplemented(args[0])
 	}
 	if subcommands, ok := witnessCommands[args[0]]; ok {
+		if len(args) == 2 && isHelpRequest(args[1]) {
+			writeGroupUsage(args[0], subcommands)
+			return nil
+		}
 		if len(args) < 2 {
 			return diag.New(
 				diag.CodeInvalidCommand,
@@ -123,6 +145,9 @@ func route(args []string) error {
 			if args[0] == "policy" {
 				return runPolicy(args[1], args[2:])
 			}
+			if args[0] == "role-output" {
+				return runRoleOutput(args[1], args[2:])
+			}
 			if args[0] == "pass" {
 				return runPass(args[1], args[2:])
 			}
@@ -134,6 +159,50 @@ func route(args []string) error {
 		"unknown witness command.",
 		diag.WithDetail("args", args),
 	)
+}
+
+func isHelpRequest(arg string) bool {
+	return arg == "-h" || arg == "--help"
+}
+
+func writeTopLevelUsage() {
+	fmt.Fprintln(os.Stdout, "usage: witness <command> [flags]")
+	fmt.Fprintln(os.Stdout, "available commands:")
+	for _, group := range sortedCommandGroups() {
+		fmt.Fprintf(os.Stdout, "  %s <subcommand>\n", group)
+		for _, command := range sortedCommandNames(witnessCommands[group]) {
+			fmt.Fprintf(os.Stdout, "    %s\n", command)
+		}
+	}
+	for _, command := range sortedCommandNames(singleCommands) {
+		fmt.Fprintf(os.Stdout, "  %s [flags]\n", command)
+	}
+}
+
+func writeGroupUsage(group string, subcommands map[string]bool) {
+	fmt.Fprintf(os.Stdout, "usage: witness %s <subcommand> [flags]\n", group)
+	fmt.Fprintf(os.Stdout, "available %s subcommands:\n", group)
+	for _, command := range sortedCommandNames(subcommands) {
+		fmt.Fprintf(os.Stdout, "  %s\n", command)
+	}
+}
+
+func sortedCommandGroups() []string {
+	groups := make([]string, 0, len(witnessCommands))
+	for group := range witnessCommands {
+		groups = append(groups, group)
+	}
+	sort.Strings(groups)
+	return groups
+}
+
+func sortedCommandNames(commands map[string]bool) []string {
+	names := make([]string, 0, len(commands))
+	for name := range commands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func runVerification(command string, args []string) error {
@@ -149,17 +218,159 @@ func runVerification(command string, args []string) error {
 	}
 }
 
+type roleOutputValidationResult struct {
+	OK                  bool   `json:"ok"`
+	SchemaVersion       string `json:"schema_version"`
+	RoleOutputDigest    string `json:"role_output_digest"`
+	PlaceholdersPresent bool   `json:"placeholders_present,omitempty"`
+	Warning             string `json:"warning,omitempty"`
+}
+
+// roleOutputHasInitPlaceholders reports whether the document still carries
+// the identity markers written by `witness role-output init`. Such a
+// document is structurally valid but is a template: its digests and
+// identities can never bind to a real frozen Charter or artifact, and the
+// planner will reject it in any real pass.
+func roleOutputHasInitPlaceholders(document contracts.RoleOutputDocument) bool {
+	for _, identity := range []map[string]any{document.SourceIdentity, document.ConsumerIdentity} {
+		if identity == nil {
+			continue
+		}
+		if kind, _ := identity["kind"].(string); kind == "placeholder" {
+			return true
+		}
+	}
+	return false
+}
+
+func runRoleOutput(command string, args []string) error {
+	switch command {
+	case "init":
+		return runRoleOutputInit(args)
+	case "validate":
+		return runRoleOutputValidate(args)
+	default:
+		return notImplemented("role-output " + command)
+	}
+}
+
+func runRoleOutputInit(args []string) error {
+	flags := newFlagSet("witness role-output init", "Create an empty role-output document.")
+	role := flags.String("role", "", "role-output role: defect or economy")
+	out := flags.String("out", "", "role-output output path")
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *role != contracts.RoleDefect && *role != contracts.RoleEconomy {
+		return diag.New(
+			diag.CodeInvalidCommand,
+			"witness role-output init requires -role defect or economy.",
+			diag.WithDetail("role", *role),
+		)
+	}
+	if *out == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness role-output init requires -out.")
+	}
+	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+		return diag.Wrap(
+			err,
+			charter.CodeFileIO,
+			"file operation failed.",
+			diag.WithDetail("action", "create role-output parent directory"),
+			diag.WithDetail("path", filepath.Dir(*out)),
+			diag.WithDetail("error", err.Error()),
+		)
+	}
+	document := contracts.RoleOutputDocument{
+		SchemaVersion:  contracts.RoleOutputV3,
+		Role:           *role,
+		CharterHash:    digest.RawBytes(nil),
+		ArtifactDigest: digest.RawBytes(nil),
+		SourceIdentity: map[string]any{
+			"kind": "placeholder",
+			"id":   "replace-before-use",
+		},
+		ConsumerIdentity: map[string]any{
+			"kind": "placeholder",
+			"id":   "replace-before-use",
+		},
+		Findings: make([]contracts.Finding, 0),
+	}
+	if err := contracts.RequireValidRoleOutput(document, nil); err != nil {
+		return err
+	}
+	return writeCanonical(*out, document)
+}
+
+func runRoleOutputValidate(args []string) error {
+	flags := newFlagSet("witness role-output validate", "Validate a role-output document.")
+	input := flags.String("input", "", "role-output JSON path")
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return unexpectedArgs(flags.Args())
+	}
+	if *input == "" {
+		return diag.New(diag.CodeInvalidCommand, "witness role-output validate requires -input.")
+	}
+	document, err := readRoleOutputFile(*input)
+	if err != nil {
+		return err
+	}
+	if err := contracts.RequireValidRoleOutput(document, nil); err != nil {
+		return err
+	}
+	roleOutputDigest, err := contracts.RoleOutputDigest(document)
+	if err != nil {
+		return err
+	}
+	result := roleOutputValidationResult{
+		OK:               true,
+		SchemaVersion:    document.SchemaVersion,
+		RoleOutputDigest: roleOutputDigest,
+	}
+	if roleOutputHasInitPlaceholders(document) {
+		result.PlaceholdersPresent = true
+		result.Warning = "document still carries role-output init placeholder identities; replace them before filing it in a pass."
+	}
+	return diag.WriteCanonical(os.Stdout, result)
+}
+
+// resolveRelayExecutable resolves a bare -relay value before the pass driver
+// treats configured inputs as filesystem paths. Separator-containing values
+// deliberately retain their existing path semantics, while an unresolved bare
+// name is left unchanged for the existing relay_missing degradation path.
+func resolveRelayExecutable(path string) string {
+	if path == "" || strings.ContainsRune(path, '/') || strings.ContainsRune(path, rune(filepath.Separator)) {
+		return path
+	}
+	resolved, err := exec.LookPath(path)
+	if err != nil {
+		return path
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return resolved
+	}
+	return filepath.Clean(absolute)
+}
+
 func runVerificationPreflight(args []string) error {
-	flags := newFlagSet("witness verification preflight")
+	flags := newFlagSet("witness verification preflight", "Check prerequisites for a verification run.")
 	relayPath := flags.String("relay", "", "convo-relay executable path")
 	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
 	stateDir := flags.String("state-dir", "", "preflight state directory")
 	sourceDir := flags.String("source-dir", "", "reviewed source directory")
 	snapshotDir := flags.String("snapshot-dir", "", "frozen source snapshot directory")
 	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
+	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow freezing a dirty reviewed working tree snapshot; distinct from verification assemble -allow-dirty-source, which permits only a dirty relay launch source")
 	out := flags.String("out", "", "preflight result output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -174,12 +385,13 @@ func runVerificationPreflight(args []string) error {
 		return err
 	}
 	result, err := preflight.Run(context.Background(), preflight.Options{
-		RelayPath:             *relayPath,
+		RelayPath:             resolveRelayExecutable(*relayPath),
 		IntegrationBundlePath: *integrationBundlePath,
 		StateDir:              *stateDir,
 		SourceDir:             *sourceDir,
 		SnapshotDir:           *snapshotDir,
 		AllowNonGitSource:     *allowNonGitSource,
+		AllowDirtySource:      *allowDirtySource,
 	})
 	if err != nil {
 		return err
@@ -188,7 +400,7 @@ func runVerificationPreflight(args []string) error {
 }
 
 func runVerificationPlan(args []string) error {
-	flags := newFlagSet("witness verification plan")
+	flags := newFlagSet("witness verification plan", "Create a verification plan.")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	preflightPath := flags.String("preflight", "", "verification preflight result path")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
@@ -199,8 +411,8 @@ func runVerificationPlan(args []string) error {
 	out := flags.String("out", "", "verification plan output path")
 	var roleOutputPaths repeatedStrings
 	flags.Var(&roleOutputPaths, "role-output", "role-output JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -286,7 +498,7 @@ func runVerificationPlan(args []string) error {
 }
 
 func runVerificationAssemble(args []string) error {
-	flags := newFlagSet("witness verification assemble")
+	flags := newFlagSet("witness verification assemble", "Assemble verification evidence into a manifest.")
 	planPath := flags.String("plan", "", "verification plan path")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
 	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface verification")
@@ -302,24 +514,26 @@ func runVerificationAssemble(args []string) error {
 	relayHome := flags.String("relay-home", "", "convo-relay home directory")
 	launchCWD := flags.String("launch-cwd", "", "relay launch working directory")
 	settingsPath := flags.String("settings", "", "convo-relay settings path")
-	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow dirty relay launch source")
+	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow a dirty relay launch source; distinct from pass begin/verification preflight -allow-dirty-source, which permits freezing a dirty reviewed working tree snapshot")
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness output directory for receipt verification")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	out := flags.String("out", "", "verification manifest output path")
 	var batchPaths repeatedStrings
 	var verdictPaths repeatedStrings
 	var portableExports repeatedStrings
+	var runRecordPaths repeatedStrings
 	var receiptPaths repeatedStrings
 	var selectedContractPaths repeatedStrings
 	var artifactPaths repeatedStrings
 	flags.Var(&batchPaths, "batch", "verification-batch JSON path; may be repeated")
 	flags.Var(&verdictPaths, "relay-verdict", "relay verdict JSON path or batch-id=path; may be repeated")
 	flags.Var(&portableExports, "portable-export", "batch-id=portable export directory; may be repeated")
+	flags.Var(&runRecordPaths, "run-record", "retained relay run record or runs index JSON path; may be repeated")
 	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
 	flags.Var(&selectedContractPaths, "selected-contract", "selected relay contract artifact path; may be repeated")
 	flags.Var(&artifactPaths, "artifact", "artifact input path for relay verification runs; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -327,6 +541,13 @@ func runVerificationAssemble(args []string) error {
 	if *planPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble requires -plan.")
 	}
+	missingStateDirDefaults := applyVerificationAssembleStateDirDefaults(
+		*stateDir,
+		compatibilityPath,
+		capabilitiesPath,
+		integrationBundlePath,
+		&selectedContractPaths,
+	)
 	protected := []protectedInput{
 		{role: "plan", path: *planPath},
 		{role: "base-manifest", path: *baseManifestPath},
@@ -340,13 +561,14 @@ func runVerificationAssemble(args []string) error {
 	}
 	protected = append(protected, protectedInputsForPaths("batch", batchPaths)...)
 	protected = append(protected, protectedInputsForSpecs("relay-verdict", verdictPaths)...)
+	protected = append(protected, protectedInputsForPaths("run-record", runRecordPaths)...)
 	protected = append(protected, protectedInputsForPaths("receipt", receiptPaths)...)
 	protected = append(protected, protectedInputsForPaths("selected-contract", selectedContractPaths)...)
 	protected = append(protected, protectedInputsForPaths("artifact", artifactPaths)...)
 	if err := rejectOutputPathAliases(*out, protected...); err != nil {
 		return err
 	}
-	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0) {
+	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0 || len(runRecordPaths) > 0) {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble -run-relay cannot be combined with pre-produced relay evidence flags.")
 	}
 	plan, err := readPlanFile(*planPath)
@@ -365,13 +587,21 @@ func runVerificationAssemble(args []string) error {
 	if err != nil {
 		return err
 	}
+	runRecordEvidence, err := readRunRecordEvidence(runRecordPaths)
+	if err != nil {
+		return err
+	}
+	relayEvidence, err = mergeRelayEvidence(relayEvidence, runRecordEvidence)
+	if err != nil {
+		return err
+	}
 	if *runRelay {
 		runBatches, err := relayRunBatchInputs(plan, batches, *stateDir)
 		if err != nil {
 			return err
 		}
 		runResult, err := relayrun.RunBatches(context.Background(), runBatches, relayrun.Options{
-			RelayPath:             *relayPath,
+			RelayPath:             resolveRelayExecutable(*relayPath),
 			IntegrationBundlePath: *integrationBundlePath,
 			CharterPath:           *charterPath,
 			ArtifactPaths:         append([]string(nil), artifactPaths...),
@@ -387,7 +617,10 @@ func runVerificationAssemble(args []string) error {
 		if err != nil {
 			return err
 		}
-		relayEvidence = relayEvidenceFromRunResult(runResult)
+		relayEvidence, err = relayEvidenceFromRunResult(runResult)
+		if err != nil {
+			return err
+		}
 		batches = batchEvidenceFromRunInputs(runBatches)
 	}
 	receipts, err := readReceipts(receiptPaths)
@@ -411,6 +644,7 @@ func runVerificationAssemble(args []string) error {
 		ReceiptHMACKeyFile: *receiptHMACKeyFile,
 	})
 	if err != nil {
+		addStateDirDefaultPathDetails(err, missingStateDirDefaults)
 		if result != nil {
 			if writeErr := writeCanonical(*out, result.Manifest); writeErr != nil {
 				return writeErr
@@ -421,6 +655,134 @@ func runVerificationAssemble(args []string) error {
 	return writeCanonical(*out, verificationAssembleOutput(result))
 }
 
+func applyVerificationAssembleStateDirDefaults(
+	stateDir string,
+	compatibilityPath *string,
+	capabilitiesPath *string,
+	integrationBundlePath *string,
+	selectedContractPaths *repeatedStrings,
+) map[string]string {
+	if stateDir == "" {
+		return nil
+	}
+	retainedArtifacts, hasRetainedArtifacts := stateDirPreflightRetainedArtifacts(stateDir)
+	missing := map[string]string{}
+	for _, item := range []struct {
+		ref      string
+		relative string
+		path     *string
+	}{
+		{ref: "compatibility_manifest", relative: assembleStateDirCompatibilityManifest, path: compatibilityPath},
+		{ref: "relay_capabilities", relative: assembleStateDirRelayCapabilities, path: capabilitiesPath},
+		{ref: "integration_bundle", relative: assembleStateDirIntegrationBundle, path: integrationBundlePath},
+	} {
+		if *item.path != "" {
+			continue
+		}
+		relativePath := item.relative
+		if hasRetainedArtifacts {
+			relativePath = retainedArtifacts[item.ref]
+		}
+		candidate, exists := stateDirRetainedArtifactPath(stateDir, relativePath)
+		if exists {
+			*item.path = candidate
+			continue
+		}
+		missing[item.ref] = candidate
+	}
+	if len(*selectedContractPaths) == 0 {
+		candidate, exists := stateDirRetainedArtifactPath(stateDir, assembleStateDirSelectedContract)
+		if exists {
+			*selectedContractPaths = append(*selectedContractPaths, candidate)
+		} else {
+			missing["selected_contracts"] = candidate
+		}
+	}
+	return missing
+}
+
+func stateDirPreflightRetainedArtifacts(stateDir string) (map[string]string, bool) {
+	data, err := os.ReadFile(filepath.Join(stateDir, assembleStateDirPreflightResult))
+	if err != nil {
+		return nil, false
+	}
+	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return nil, false
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, false
+	}
+	if _, present := document["retained_artifacts"]; !present {
+		return nil, false
+	}
+	return result.RetainedArtifacts, true
+}
+
+func stateDirRetainedArtifactPath(stateDir string, relativePath string) (string, bool) {
+	if !stateDirContainedRelativePath(relativePath) {
+		return relativePath, false
+	}
+	candidate := filepath.Join(stateDir, relativePath)
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return candidate, false
+	}
+	resolvedStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		return candidate, false
+	}
+	relative, err := filepath.Rel(resolvedStateDir, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return candidate, false
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return candidate, false
+	}
+	return candidate, true
+}
+
+// stateDirContainedRelativePath reports whether a retained-artifact path is a
+// clean relative path that stays inside the state directory. Absolute paths
+// and any path that escapes upward (a leading ".." component after cleaning)
+// are rejected, and stateDirRetainedArtifactPath additionally resolves
+// symlinks and requires the resolved target to be a regular file inside the
+// resolved state directory. This is accident prevention against stale or
+// malformed inventories, not a security boundary against a local attacker
+// racing filesystem state between validation and open.
+func stateDirContainedRelativePath(relativePath string) bool {
+	if relativePath == "" || filepath.IsAbs(relativePath) {
+		return false
+	}
+	cleaned := filepath.Clean(relativePath)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+func addStateDirDefaultPathDetails(err error, missing map[string]string) {
+	if len(missing) == 0 {
+		return
+	}
+	var validation *planning.ValidationError
+	if !errors.As(err, &validation) {
+		return
+	}
+	for index := range validation.Diagnostics {
+		diagnostic := &validation.Diagnostics[index]
+		if diagnostic.Code != planning.CodeMissingEvidenceRef || diagnostic.Details == nil {
+			continue
+		}
+		ref, _ := diagnostic.Details["ref"].(string)
+		if candidate, ok := missing[ref]; ok {
+			diagnostic.Details["state_dir_default_path"] = candidate
+		}
+	}
+}
+
 func verificationAssembleOutput(result *planning.AssembleResult) any {
 	if len(result.UnverifiedRelationships) > 0 {
 		return result
@@ -429,7 +791,7 @@ func verificationAssembleOutput(result *planning.AssembleResult) any {
 }
 
 func runAdjudicate(args []string) error {
-	flags := newFlagSet("witness adjudicate")
+	flags := newFlagSet("witness adjudicate", "Adjudicate verification findings.")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	manifestPath := flags.String("manifest", "", "verification manifest path")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
@@ -443,8 +805,8 @@ func runAdjudicate(args []string) error {
 	out := flags.String("out", "", "adjudication run-result output path")
 	var roleOutputPaths repeatedStrings
 	flags.Var(&roleOutputPaths, "role-output", "role-output JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -538,14 +900,14 @@ func runAdjudicate(args []string) error {
 }
 
 func runMetrics(args []string) error {
-	flags := newFlagSet("witness metrics")
+	flags := newFlagSet("witness metrics", "Generate Witness metrics.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	preflightPath := flags.String("preflight", "", "verification preflight result path")
 	out := flags.String("out", "", "metrics output path")
 	var runResultPaths repeatedStrings
 	flags.Var(&runResultPaths, "run-result", "adjudication run-result JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -676,13 +1038,13 @@ func runLedger(command string, args []string) error {
 }
 
 func runLedgerShow(args []string) error {
-	flags := newFlagSet("witness ledger show")
+	flags := newFlagSet("witness ledger show", "Show ledger records.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	out := flags.String("out", "", "ledger show output path")
 	var kinds repeatedStrings
 	flags.Var(&kinds, "kind", "event kind filter; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -701,15 +1063,15 @@ func runLedgerShow(args []string) error {
 }
 
 func runLedgerPromote(args []string) error {
-	flags := newFlagSet("witness ledger promote")
+	flags := newFlagSet("witness ledger promote", "Promote a missing-goal question.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	questionID := flags.String("question-id", "", "missing-goal question ID")
 	goalRef := flags.String("goal-ref", "", "owner-authorized Charter goal reference")
 	actor := flags.String("actor", "", "owner actor")
 	rationale := flags.String("rationale", "", "owner rationale")
 	out := flags.String("out", "", "ledger promotion output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -733,15 +1095,15 @@ func runLedgerPromote(args []string) error {
 }
 
 func runLedgerAcceptUnverified(args []string) error {
-	flags := newFlagSet("witness ledger accept-unverified")
+	flags := newFlagSet("witness ledger accept-unverified", "Accept an unverified finding.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	findingID := flags.String("finding-id", "", "pending-verification finding ID")
 	pendingVerificationID := flags.String("pending-verification-id", "", "pending verification result ID")
 	actor := flags.String("actor", "", "owner actor")
 	rationale := flags.String("rationale", "", "owner rationale")
 	out := flags.String("out", "", "ledger accept-unverified output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -778,15 +1140,15 @@ func runPolicy(command string, args []string) error {
 }
 
 func runPolicyShow(args []string) error {
-	flags := newFlagSet("witness policy show")
+	flags := newFlagSet("witness policy show", "Show the effective review policy.")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	out := flags.String("out", "", "policy show output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -807,7 +1169,7 @@ func runPolicyShow(args []string) error {
 }
 
 func runPolicyReleaseCaps(args []string) error {
-	flags := newFlagSet("witness policy release-caps")
+	flags := newFlagSet("witness policy release-caps", "Record a policy cap release.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path")
 	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
@@ -823,8 +1185,8 @@ func runPolicyReleaseCaps(args []string) error {
 	policyDigest := flags.String("policy-digest", "", "expected policy digest")
 	rulesDigest := flags.String("rules-digest", "", "expected rules digest")
 	out := flags.String("out", "", "cap-release output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -879,7 +1241,7 @@ func runPolicyReleaseCaps(args []string) error {
 }
 
 func runPolicyCheckApplication(args []string) error {
-	flags := newFlagSet("witness policy check-application")
+	flags := newFlagSet("witness policy check-application", "Check whether a policy application is allowed.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
@@ -902,8 +1264,8 @@ func runPolicyCheckApplication(args []string) error {
 	var measuredTest optionalIntFlag
 	flags.Var(&measuredProduction, "measured-production", "measured production line delta")
 	flags.Var(&measuredTest, "measured-test", "measured test line delta")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	setFlags := visitedFlagNames(flags)
 	if flags.NArg() != 0 {
@@ -1415,17 +1777,22 @@ func batchEvidenceFromRunInputs(inputs []relayrun.BatchInput) []planning.BatchEv
 	return batches
 }
 
-func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidence {
+func relayEvidenceFromRunResult(result *relayrun.Result) ([]planning.RelayEvidence, error) {
 	if result == nil {
-		return nil
+		return nil, nil
 	}
 	evidence := make([]planning.RelayEvidence, 0, len(result.Runs))
 	for _, run := range result.Runs {
+		runRecord, err := relayRunRecordMetadata(run)
+		if err != nil {
+			return nil, err
+		}
 		record := planning.RelayEvidence{
 			BatchID:           run.BatchID,
 			RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
 			Backend:           relayBackendFromRecipeID(run.RecipeID),
 			PortableExportDir: run.PortableExportDir,
+			RunRecords:        []map[string]any{runRecord},
 		}
 		if run.PortableExportDigest != "" {
 			record.PortableExportRef = &contracts.ArtifactRef{
@@ -1438,7 +1805,7 @@ func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidenc
 		}
 		evidence = append(evidence, record)
 	}
-	return evidence
+	return evidence, nil
 }
 
 func relayRecipeFamilyFromRecipeID(recipeID string) string {
@@ -1497,6 +1864,223 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 		result = append(result, byBatch[batchID])
 	}
 	return result, nil
+}
+
+func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
+	evidence := make([]planning.RelayEvidence, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fileReadError(err, path, "open retained relay run record")
+		}
+		runs, err := relayrun.ReadRunRecordsBytes(data)
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runs {
+			runRecord, err := relayRunRecordMetadata(run)
+			if err != nil {
+				return nil, err
+			}
+			record := planning.RelayEvidence{
+				BatchID:           run.BatchID,
+				RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
+				Backend:           relayBackendFromRecipeID(run.RecipeID),
+				PortableExportDir: run.PortableExportDir,
+				Verdicts:          run.RelayVerdicts,
+				RunRecords:        []map[string]any{runRecord},
+			}
+			if run.PortableExportDigest != "" {
+				record.PortableExportRef = &contracts.ArtifactRef{
+					Kind:          "relay-root-portable-export",
+					ID:            run.BatchID,
+					Digest:        run.PortableExportDigest,
+					DigestProfile: digest.Profile,
+					MediaType:     "application/json",
+				}
+			}
+			evidence = append(evidence, record)
+		}
+	}
+	return evidence, nil
+}
+
+func relayRunRecordMetadata(record relayrun.RunRecord) (map[string]any, error) {
+	data, err := contracts.CanonicalBytes(record)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := strictjson.DecodeBytes[map[string]any](data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, err
+	}
+	metadata["run_record_digest"] = digest.RawBytes(data)
+	return planning.SanitizeRelayRunRecordMetadata(metadata), nil
+}
+
+func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEvidence, error) {
+	byBatch := map[string]planning.RelayEvidence{}
+	for _, source := range sources {
+		for _, incoming := range source {
+			current, exists := byBatch[incoming.BatchID]
+			if exists {
+				if err := requireMatchingRelayEvidenceProvenance(incoming.BatchID, current, incoming); err != nil {
+					return nil, err
+				}
+			}
+			current.BatchID = incoming.BatchID
+			if incoming.RecipeFamily != "" {
+				current.RecipeFamily = incoming.RecipeFamily
+			}
+			if incoming.Backend != "" {
+				current.Backend = incoming.Backend
+			}
+			if incoming.PortableExportDir != "" {
+				current.PortableExportDir = incoming.PortableExportDir
+			}
+			if incoming.PortableExportRef != nil {
+				current.PortableExportRef = incoming.PortableExportRef
+			}
+			if incoming.Verdicts != nil {
+				current.Verdicts = incoming.Verdicts
+			}
+			runRecords, err := mergeRelayRunRecords(incoming.BatchID, current.RunRecords, incoming.RunRecords)
+			if err != nil {
+				return nil, err
+			}
+			current.RunRecords = runRecords
+			byBatch[incoming.BatchID] = current
+		}
+	}
+	result := make([]planning.RelayEvidence, 0, len(byBatch))
+	for _, batchID := range sortedRelayEvidenceBatchIDs(byBatch) {
+		result = append(result, byBatch[batchID])
+	}
+	return result, nil
+}
+
+func requireMatchingRelayEvidenceProvenance(batchID string, current, incoming planning.RelayEvidence) error {
+	for _, field := range []struct {
+		name     string
+		current  string
+		incoming string
+	}{
+		{name: "recipe_family", current: current.RecipeFamily, incoming: incoming.RecipeFamily},
+		{name: "backend", current: current.Backend, incoming: incoming.Backend},
+		{name: "portable_export_dir", current: current.PortableExportDir, incoming: incoming.PortableExportDir},
+		{name: "portable_export_digest", current: relayPortableExportDigest(current.PortableExportRef), incoming: relayPortableExportDigest(incoming.PortableExportRef)},
+	} {
+		if conflictingRelayProvenanceValue(field.current, field.incoming) {
+			return conflictingRelayProvenance(batchID, field.name)
+		}
+	}
+	if current.Verdicts == nil || incoming.Verdicts == nil {
+		return nil
+	}
+	currentIdentity, err := contracts.RelayWitnessVerdictsDigest(*current.Verdicts)
+	if err != nil {
+		return diag.Wrap(err, verificationAssembleConflictingRelayProvenance, "could not determine existing relay verdict identity for provenance validation.", diag.WithDetail("batch_id", batchID), diag.WithDetail("field", "relay_verdict_identity"))
+	}
+	incomingIdentity, err := contracts.RelayWitnessVerdictsDigest(*incoming.Verdicts)
+	if err != nil {
+		return diag.Wrap(err, verificationAssembleConflictingRelayProvenance, "could not determine incoming relay verdict identity for provenance validation.", diag.WithDetail("batch_id", batchID), diag.WithDetail("field", "relay_verdict_identity"))
+	}
+	if currentIdentity != incomingIdentity {
+		return conflictingRelayProvenance(batchID, "relay_verdict_identity")
+	}
+	return nil
+}
+
+func relayPortableExportDigest(ref *contracts.ArtifactRef) string {
+	if ref == nil {
+		return ""
+	}
+	return strings.TrimSpace(ref.Digest)
+}
+
+func conflictingRelayProvenanceValue(current, incoming string) bool {
+	current = strings.TrimSpace(current)
+	incoming = strings.TrimSpace(incoming)
+	return current != "" && incoming != "" && current != incoming
+}
+
+func conflictingRelayProvenance(batchID, field string) error {
+	return diag.New(
+		verificationAssembleConflictingRelayProvenance,
+		fmt.Sprintf("relay evidence for batch %q has conflicting %s provenance; refusing to merge sources.", batchID, field),
+		diag.WithDetail("batch_id", batchID),
+		diag.WithDetail("field", field),
+	)
+}
+
+func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[string]any, error) {
+	records := make([]map[string]any, 0)
+	seenDigests := map[string]bool{}
+	for _, source := range sources {
+		for _, record := range source {
+			if recordDigest := relayRunRecordDigest(record); recordDigest != "" {
+				if seenDigests[recordDigest] {
+					continue
+				}
+				seenDigests[recordDigest] = true
+			}
+			records = append(records, record)
+		}
+	}
+	consumingRecordIndexes := make([]int, 0, 1)
+	for index, record := range records {
+		value, present := record["consumes_batch"]
+		consumesBatch, ok := value.(bool)
+		if !present || !ok {
+			return nil, diag.New(
+				verificationAssembleInvalidRunRecordConsumption,
+				"relay run record consumption must be a boolean before evidence can be merged.",
+				diag.WithDetail("batch_id", batchID),
+				diag.WithDetail("record_index", index),
+			)
+		}
+		if consumesBatch {
+			consumingRecordIndexes = append(consumingRecordIndexes, index)
+			continue
+		}
+		if !isStartFailureRunRecord(record) {
+			return nil, diag.New(
+				verificationAssembleInvalidRunRecordConsumption,
+				"non-consuming relay run records must be launch_failed records with relay_launch.start_failed=true.",
+				diag.WithDetail("batch_id", batchID),
+				diag.WithDetail("record_index", index),
+			)
+		}
+	}
+	if len(consumingRecordIndexes) > 1 {
+		return nil, diag.New(
+			verificationAssembleMultipleConsumingRunRecords,
+			"relay run records contain multiple consuming attempts for one batch; refusing reviewer-shopping evidence.",
+			diag.WithDetail("batch_id", batchID),
+			diag.WithDetail("consuming_record_indexes", consumingRecordIndexes),
+		)
+	}
+	return records, nil
+}
+
+func relayRunRecordDigest(record map[string]any) string {
+	value, ok := record["run_record_digest"].(string)
+	if !ok {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	if !digest.WellFormed(value) {
+		return ""
+	}
+	return value
+}
+
+func isStartFailureRunRecord(record map[string]any) bool {
+	status, _ := record["status"].(string)
+	providerInvoked, _ := record["provider_invoked"].(string)
+	launch, _ := record["relay_launch"].(map[string]any)
+	startFailed, _ := launch["start_failed"].(bool)
+	return status == relayrun.RunStatusLaunchFailed && providerInvoked == relayrun.ProviderInvokedFalse && startFailed
 }
 
 func readReceipts(paths []string) ([]contracts.ExecutionReceipt, error) {
@@ -1804,13 +2388,15 @@ func runPass(command string, args []string) error {
 }
 
 func runPassBegin(args []string) error {
-	flags := newFlagSet("witness pass begin")
+	flags := newFlagSet("witness pass begin", "Start a Witness pass.")
 	stateDir := flags.String("state-dir", "", "pass state directory")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
 	sourceDir := flags.String("source-dir", "", "reviewed source directory")
 	snapshotDir := flags.String("snapshot-dir", "", "source snapshot directory; defaults under -state-dir")
 	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
+	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow freezing a dirty reviewed working tree snapshot; distinct from verification assemble -allow-dirty-source, which permits only a dirty relay launch source")
+	allowEmptyCharter := flags.Bool("allow-empty-charter", false, "allow a review to proceed with an empty Charter")
 	relayPath := flags.String("relay", "", "convo-relay executable path")
 	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
 	backend := flags.String("backend", "", "relay backend suffix for reported verification recipes")
@@ -1827,8 +2413,8 @@ func runPassBegin(args []string) error {
 	var receiptPaths repeatedStrings
 	flags.Var(&roleOutputSpecs, "role-output", "role=path for caller-produced role output; may be repeated")
 	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1844,7 +2430,9 @@ func runPassBegin(args []string) error {
 		SourceDir:             *sourceDir,
 		SnapshotDir:           *snapshotDir,
 		AllowNonGitSource:     *allowNonGitSource,
-		RelayPath:             *relayPath,
+		AllowDirtySource:      *allowDirtySource,
+		AllowEmptyCharter:     *allowEmptyCharter,
+		RelayPath:             resolveRelayExecutable(*relayPath),
 		IntegrationBundlePath: *integrationBundlePath,
 		Backend:               *backend,
 		PolicyPath:            *policyPath,
@@ -1866,10 +2454,10 @@ func runPassBegin(args []string) error {
 }
 
 func runPassResume(args []string) error {
-	flags := newFlagSet("witness pass resume")
+	flags := newFlagSet("witness pass resume", "Resume a Witness pass.")
 	stateDir := flags.String("state-dir", "", "pass state directory")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1916,14 +2504,14 @@ func runCharter(command string, args []string) error {
 }
 
 func runCharterInit(args []string) error {
-	flags := newFlagSet("witness charter init")
+	flags := newFlagSet("witness charter init", "Create a charter skeleton.")
 	out := flags.String("out", "", "charter skeleton path")
 	template := flags.String("template", charter.TemplateMinimal, "charter template name")
 	actor := flags.String("actor", "owner", "owner actor")
 	eventID := flags.String("event-id", "initial-charter", "initial owner event ID")
 	summary := flags.String("summary", "Initial owner-authorized charter skeleton.", "initial owner event summary")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1947,12 +2535,12 @@ func runCharterInit(args []string) error {
 }
 
 func runCharterFreeze(args []string) error {
-	flags := newFlagSet("witness charter freeze")
+	flags := newFlagSet("witness charter freeze", "Freeze a charter and its amendments.")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
 	out := flags.String("out", "", "frozen charter output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -1972,13 +2560,13 @@ func runCharterFreeze(args []string) error {
 }
 
 func runCharterAmend(args []string) error {
-	flags := newFlagSet("witness charter amend")
+	flags := newFlagSet("witness charter amend", "Apply an owner amendment to a charter.")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
 	eventPath := flags.String("event", "", "owner event JSON path")
 	out := flags.String("out", "", "frozen charter output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -2011,12 +2599,12 @@ func runCharterAmend(args []string) error {
 }
 
 func runCharterShow(args []string) error {
-	flags := newFlagSet("witness charter show")
+	flags := newFlagSet("witness charter show", "Show a normalized charter.")
 	charterPath := flags.String("charter", "", "charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "amendments JSONL path")
 	out := flags.String("out", "", "normalized charter output path")
-	if err := flags.Parse(args); err != nil {
-		return invalidFlagError(err)
+	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
+		return err
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
@@ -2357,10 +2945,34 @@ func finalSymlinkTarget(path string) (string, bool, error) {
 	return filepath.Clean(target), true, nil
 }
 
-func newFlagSet(name string) *flag.FlagSet {
+func newFlagSet(name string, description string) *flag.FlagSet {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	flags.Usage = func() {
+		fmt.Fprintf(os.Stdout, "usage: %s [flags]\n", name)
+		fmt.Fprintln(os.Stdout, description)
+		fmt.Fprintln(os.Stdout, "flags:")
+		output := flags.Output()
+		flags.SetOutput(os.Stdout)
+		flags.PrintDefaults()
+		flags.SetOutput(output)
+	}
 	return flags
+}
+
+func parseFlags(flags *flag.FlagSet, args []string) (bool, error) {
+	usage := flags.Usage
+	flags.Usage = func() {}
+	err := flags.Parse(args)
+	flags.Usage = usage
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			flags.Usage()
+			return true, nil
+		}
+		return false, invalidFlagError(err)
+	}
+	return false, nil
 }
 
 func invalidFlagError(err error) error {

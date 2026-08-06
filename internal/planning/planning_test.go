@@ -14,6 +14,7 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestPlanningBatchesDeterministicallyByRoleSeverityAndID(t *testing.T) {
@@ -98,6 +99,55 @@ func TestPlanningBatchDigestBindsPersistedBytes(t *testing.T) {
 	}
 	if digest.RawBytes(canonical) == result.Plan.Batches[0].BatchDigest {
 		t.Fatal("plan batch digest did not include the persisted trailing newline")
+	}
+}
+
+func TestPlanningEmptyFindingsEmitEmptyBatchArrays(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	refs := validManifestEvidenceRefs()
+	stateDir := t.TempDir()
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "defect.json", Document: planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})},
+			{Path: "economy.json", Document: planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})},
+		},
+		StateDir:  stateDir,
+		Preflight: planningTestPreflightBindingForRefs(t, refs),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Plan.Batches == nil {
+		t.Fatal("plan batches = nil, want non-nil empty slice")
+	}
+
+	for _, output := range []struct {
+		name string
+		path string
+	}{
+		{name: "plan", path: filepath.Join(stateDir, "verification-plan.json")},
+		{name: "manifest skeleton", path: filepath.Join(stateDir, "verification", "index.skeleton.json")},
+	} {
+		data, err := os.ReadFile(output.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", output.name, err)
+		}
+		if !strings.Contains(string(data), `"batches":[]`) {
+			t.Fatalf("%s bytes = %s, want empty batches array", output.name, data)
+		}
+	}
+
+	assembled, err := Assemble(AssembleOptions{Plan: result.Plan, EvidenceRefs: refs})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	manifest, err := contracts.VerificationManifestCanonicalBytes(assembled.Manifest)
+	if err != nil {
+		t.Fatalf("canonical manifest: %v", err)
+	}
+	if !strings.Contains(string(manifest), `"batches":[]`) {
+		t.Fatalf("manifest bytes = %s, want empty batches array", manifest)
 	}
 }
 
@@ -456,7 +506,7 @@ func planningManifestFile(path string, mode string, content string) freeze.FileE
 	return freeze.FileEntry{
 		Path:   path,
 		Mode:   mode,
-		Size:   int64(len(content)),
+		Size:   strictjson.Int64(len(content)),
 		Digest: sum,
 		Blob:   "blobs/sha256/" + strings.TrimPrefix(sum, digest.Prefix),
 	}

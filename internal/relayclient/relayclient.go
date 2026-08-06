@@ -28,10 +28,13 @@ type Runner interface {
 }
 
 type CommandResult struct {
-	Stdout   []byte
-	Stderr   []byte
-	ExitCode int
-	Err      error
+	Command     string
+	Args        []string
+	Stdout      []byte
+	Stderr      []byte
+	ExitCode    int
+	Err         error
+	StartFailed bool
 }
 
 type ExecRunner struct{}
@@ -41,7 +44,16 @@ func (ExecRunner) Run(ctx context.Context, executable string, args ...string) Co
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	err := command.Run()
+	if err := command.Start(); err != nil {
+		return CommandResult{
+			Stdout:      stdout.Bytes(),
+			Stderr:      stderr.Bytes(),
+			ExitCode:    -1,
+			Err:         err,
+			StartFailed: true,
+		}
+	}
+	err := command.Wait()
 	result := CommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: 0, Err: err}
 	if err == nil {
 		return result
@@ -122,6 +134,13 @@ func (client Client) CompileRecipe(ctx context.Context, recipeID string, integra
 }
 
 func (client Client) RunRecipe(ctx context.Context, options RunRecipeOptions) (map[string]any, error) {
+	value, _, err := client.RunRecipeWithCommandResult(ctx, options)
+	return value, err
+}
+
+// RunRecipeWithCommandResult retains the executed command result alongside the
+// decoded run response so callers can preserve launch evidence even on failure.
+func (client Client) RunRecipeWithCommandResult(ctx context.Context, options RunRecipeOptions) (map[string]any, CommandResult, error) {
 	args := []string{"run", "--task", options.Task, "--recipe", options.RecipeID}
 	if options.IntegrationBundlePath != "" {
 		args = append(args, "--integration-bundle", options.IntegrationBundlePath)
@@ -151,7 +170,7 @@ func (client Client) RunRecipe(ctx context.Context, options RunRecipeOptions) (m
 		args = append(args, "--input", binding)
 	}
 	args = append(args, "--json")
-	return runObject(ctx, client, args)
+	return runObjectWithCommandResult(ctx, client, args)
 }
 
 func (client Client) ExportPortable(ctx context.Context, options ExportOptions) (map[string]any, error) {
@@ -238,16 +257,21 @@ func runCompile(ctx context.Context, client Client, args []string) (CompileRepor
 }
 
 func runObject(ctx context.Context, client Client, args []string) (map[string]any, error) {
+	value, _, err := runObjectWithCommandResult(ctx, client, args)
+	return value, err
+}
+
+func runObjectWithCommandResult(ctx context.Context, client Client, args []string) (map[string]any, CommandResult, error) {
 	result := runCommand(ctx, client, args)
 	if err := commandFailure(client.command(), args, result); err != nil {
-		return nil, err
+		return nil, result, err
 	}
 	value, err := strictjson.DecodeBytes[map[string]any](result.Stdout, client.limit())
 	if err != nil {
-		return nil, decodeError(client.command(), args, result, err)
+		return nil, result, decodeError(client.command(), args, result, err)
 	}
 	if value == nil {
-		return nil, &CommandError{
+		return nil, result, &CommandError{
 			Kind:       ErrorSchemaInvalid,
 			Command:    client.command(),
 			Args:       append([]string(nil), args...),
@@ -256,7 +280,7 @@ func runObject(ctx context.Context, client Client, args []string) (map[string]an
 			Stderr:     string(result.Stderr),
 		}
 	}
-	return value, nil
+	return value, result, nil
 }
 
 func compileFailure(command string, args []string, result CommandResult) error {
@@ -348,7 +372,10 @@ func runCommand(ctx context.Context, client Client, args []string) CommandResult
 	if runner == nil {
 		runner = ExecRunner{}
 	}
-	return runner.Run(ctx, client.command(), args...)
+	result := runner.Run(ctx, client.command(), args...)
+	result.Command = client.command()
+	result.Args = append([]string(nil), args...)
+	return result
 }
 
 func commandFailure(command string, args []string, result CommandResult) error {
