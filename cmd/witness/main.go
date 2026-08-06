@@ -1857,6 +1857,7 @@ func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
 				RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
 				Backend:           relayBackendFromRecipeID(run.RecipeID),
 				PortableExportDir: run.PortableExportDir,
+				Verdicts:          run.RelayVerdicts,
 				RunRecords:        []map[string]any{runRecord},
 			}
 			if run.PortableExportDigest != "" {

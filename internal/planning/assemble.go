@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -657,10 +658,12 @@ func relayLaunchMetadataSummary(value any) map[string]any {
 	}
 	summary := make(map[string]any, 9)
 	if argv, ok := relayLaunchArgv(launch["argv"]); ok {
-		summary["argv"] = argv
-	}
-	if workingDirectory, ok := launch["working_directory"].(string); ok {
-		summary["working_directory"] = workingDirectory
+		if len(argv) > 0 {
+			summary["executable"] = filepath.Base(argv[0])
+		}
+		if argvDigest, err := digest.SemanticJSON(argv); err == nil {
+			summary["argv_digest"] = argvDigest
+		}
 	}
 	if exitCode, ok := relayLaunchInteger(launch["exit_code"], false); ok {
 		summary["exit_code"] = exitCode

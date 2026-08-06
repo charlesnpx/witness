@@ -260,7 +260,16 @@ func TestAssembleAllowListsRelayRunRecordMetadata(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	batch := planResult.Batches[0]
-	const sentinel = "relay-run-record-secret-sentinel"
+	const (
+		sentinel     = "relay-run-record-secret-sentinel"
+		pathSentinel = "relay-run-record-path-sentinel"
+	)
+	argv := []string{
+		"/private/" + pathSentinel + "/bin/fake-relay",
+		"run",
+		"--integration-bundle",
+		"/private/" + pathSentinel + "/integration-bundle.json",
+	}
 	runRecordDigest := digest.RawBytes([]byte("locally-retained-run-record"))
 	result, err := Assemble(AssembleOptions{
 		Plan: planResult.Plan,
@@ -289,8 +298,8 @@ func TestAssembleAllowListsRelayRunRecordMetadata(t *testing.T) {
 				}},
 				"run_record_digest": runRecordDigest,
 				"relay_launch": map[string]any{
-					"argv":              []string{"fake-relay", "run", "--json"},
-					"working_directory": "/tmp/workspace",
+					"argv":              argv,
+					"working_directory": "/private/" + pathSentinel + "/workspace",
 					"exit_code":         1,
 					"start_failed":      false,
 					"stdout":            sentinel,
@@ -312,6 +321,9 @@ func TestAssembleAllowListsRelayRunRecordMetadata(t *testing.T) {
 	if bytes.Contains(manifestBytes, []byte(sentinel)) {
 		t.Fatalf("encoded manifest retained local relay content: %s", manifestBytes)
 	}
+	if bytes.Contains(manifestBytes, []byte(pathSentinel)) {
+		t.Fatalf("encoded manifest retained local relay path: %s", manifestBytes)
+	}
 	rawBatches := result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
 	metadata := rawBatches[batch.Plan.BatchID].(map[string]any)
 	runRecords, ok := metadata["run_records"].([]map[string]any)
@@ -328,6 +340,23 @@ func TestAssembleAllowListsRelayRunRecordMetadata(t *testing.T) {
 	launch, ok := retained["relay_launch"].(map[string]any)
 	if !ok {
 		t.Fatalf("run record = %#v, missing launch summary", retained)
+	}
+	if _, exists := launch["argv"]; exists {
+		t.Fatalf("launch summary retained argv: %#v", launch)
+	}
+	if _, exists := launch["working_directory"]; exists {
+		t.Fatalf("launch summary retained working directory: %#v", launch)
+	}
+	if launch["executable"] != "fake-relay" {
+		t.Fatalf("launch executable = %#v, want fake-relay", launch["executable"])
+	}
+	canonicalArgv, err := contracts.CanonicalBytes(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argvDigest := digest.RawBytes(canonicalArgv)
+	if launch["argv_digest"] != argvDigest {
+		t.Fatalf("launch argv digest = %#v, want %q", launch["argv_digest"], argvDigest)
 	}
 	if launch["stdout_digest"] != digest.RawBytes([]byte(sentinel)) || launch["stdout_bytes"] != len([]byte(sentinel)) || launch["stdout_truncated"] != true {
 		t.Fatalf("stdout launch summary = %#v", launch)

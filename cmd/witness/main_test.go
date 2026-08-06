@@ -1988,6 +1988,98 @@ func TestMergeRelayEvidenceRejectsConflictingProvenance(t *testing.T) {
 	}
 }
 
+func TestReadRunRecordEvidenceMergesEmbeddedRelayVerdictsWithSuppliedVerdicts(t *testing.T) {
+	const batchID = "defect-batch-1"
+	dir := t.TempDir()
+	embeddedVerdicts := contracts.RelayWitnessVerdictsDocument{
+		SchemaVersion: contracts.RelayWitnessVerdictsV2,
+		BatchID:       batchID,
+		Verdicts: []contracts.WitnessVerdict{{
+			FindingID:      "finding-1",
+			WitnessDigest:  digest.RawBytes([]byte("witness-1")),
+			Verdict:        contracts.VerdictSurvived,
+			VerdictClass:   nil,
+			CounterWitness: nil,
+		}},
+	}
+	runRecordPath := filepath.Join(dir, "relay-run-record.json")
+	if err := writeCanonical(runRecordPath, relayrun.RunRecord{
+		SchemaVersion:   relayrun.RunRecordSchema,
+		BatchID:         batchID,
+		Status:          contracts.RecordStatusUnavailable,
+		RecipeID:        "witness-falsify-v2-codex",
+		ProviderInvoked: relayrun.ProviderInvokedTrue,
+		ConsumesBatch:   true,
+		RelayVerdicts:   &embeddedVerdicts,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runRecordEvidence, err := readRunRecordEvidence([]string{runRecordPath})
+	if err != nil {
+		t.Fatalf("readRunRecordEvidence: %v", err)
+	}
+	if len(runRecordEvidence) != 1 || runRecordEvidence[0].Verdicts == nil {
+		t.Fatalf("run-record evidence = %#v, want embedded relay verdicts", runRecordEvidence)
+	}
+
+	conflictingVerdicts := embeddedVerdicts
+	conflictingVerdicts.Verdicts = append([]contracts.WitnessVerdict(nil), embeddedVerdicts.Verdicts...)
+	conflictingVerdicts.Verdicts[0].Rationale = "different verdict identity"
+
+	for _, test := range []struct {
+		name         string
+		verdicts     contracts.RelayWitnessVerdictsDocument
+		wantConflict bool
+	}{
+		{name: "conflicting verdict identity", verdicts: conflictingVerdicts, wantConflict: true},
+		{name: "identical verdict identity", verdicts: embeddedVerdicts},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verdictPath := filepath.Join(dir, test.name+".json")
+			if err := writeCanonical(verdictPath, test.verdicts); err != nil {
+				t.Fatal(err)
+			}
+			suppliedEvidence, err := readRelayEvidence([]string{batchID + "=" + verdictPath}, nil)
+			if err != nil {
+				t.Fatalf("readRelayEvidence: %v", err)
+			}
+			// Verdict files carry no recipe metadata. Supply the independently
+			// established matching provenance so this regression reaches the
+			// verdict-identity comparison under test.
+			suppliedEvidence[0].RecipeFamily = "witness-falsify-v2"
+			suppliedEvidence[0].Backend = "codex"
+			merged, err := mergeRelayEvidence(suppliedEvidence, runRecordEvidence)
+			if test.wantConflict {
+				if err == nil {
+					t.Fatal("mergeRelayEvidence accepted conflicting embedded and supplied relay verdicts")
+				}
+				diagnostic := diag.FromError(err)
+				if diagnostic.Code != verificationAssembleConflictingRelayProvenance || diagnostic.Details["field"] != "relay_verdict_identity" {
+					t.Fatalf("diagnostic = %#v, want relay verdict provenance conflict", diagnostic)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mergeRelayEvidence: %v", err)
+			}
+			if len(merged) != 1 || merged[0].Verdicts == nil {
+				t.Fatalf("merged relay evidence = %#v, want one verdict-bearing batch", merged)
+			}
+			mergedIdentity, err := contracts.RelayWitnessVerdictsDigest(*merged[0].Verdicts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedIdentity, err := contracts.RelayWitnessVerdictsDigest(embeddedVerdicts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mergedIdentity != expectedIdentity {
+				t.Fatalf("merged verdict identity = %q, want %q", mergedIdentity, expectedIdentity)
+			}
+		})
+	}
+}
+
 func TestVerificationAssembleRunRelayRoundTripPasses(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
