@@ -1770,6 +1770,7 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	runRecordPath := filepath.Join(dir, "relay-run-record.json")
 	rawStdout := append(bytes.Repeat([]byte{0xff}, 64*1024/2+1), bytes.Repeat([]byte{0xc3}, 64*1024/2+1)...)
 	retainedStdout := append(append([]byte(nil), rawStdout[:64*1024/2]...), rawStdout[len(rawStdout)-64*1024/2:]...)
+	argv := []string{"fake-relay", "run", "--recipe", "witness-falsify-v2-codex", "--json"}
 	if err := writeCanonical(runRecordPath, relayrun.RunRecord{
 		SchemaVersion:   relayrun.RunRecordSchema,
 		BatchID:         "defect-batch-1",
@@ -1780,15 +1781,15 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 		ConsumesBatch:   false,
 		RelayRunResult:  map[string]any{"opaque_response": sentinel},
 		RelayLaunch: &relayrun.LaunchRecord{
-			Argv:             []string{"fake-relay", "run", "--recipe", "witness-falsify-v2-codex", "--json"},
+			Argv:             argv,
 			WorkingDirectory: dir,
 			ExitCode:         -1,
 			StartFailed:      true,
 			Stdout:           retainedStdout,
 			Stderr:           []byte("authentication failed"),
-			StdoutDigest:     digest.RawBytes(rawStdout),
+			StdoutDigest:     digest.RawBytes(retainedStdout),
 			StderrDigest:     digest.RawBytes([]byte("authentication failed")),
-			StdoutBytes:      strictjson.Int(len(rawStdout)),
+			StdoutBytes:      strictjson.Int(len(retainedStdout)),
 			StderrBytes:      strictjson.Int(len([]byte("authentication failed"))),
 			StdoutTruncated:  true,
 		},
@@ -1864,10 +1865,20 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	if _, exists := launch["stderr_b64"]; exists {
 		t.Fatalf("retained launch unexpectedly contains raw stderr bytes: %#v", launch)
 	}
+	if _, exists := launch["argv"]; exists {
+		t.Fatalf("retained launch unexpectedly contains raw argv: %#v", launch)
+	}
+	argvDigest, err := digest.SemanticJSON(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch["executable"] != "fake-relay" || launch["argv_digest"] != argvDigest {
+		t.Fatalf("launch summary = %#v, want executable and argv digest", launch)
+	}
 	if _, exists := retained["relay_run_result"]; exists {
 		t.Fatalf("retained run record unexpectedly contains relay run result: %#v", retained)
 	}
-	if launch["stdout_digest"] != digest.RawBytes(rawStdout) || !jsonNumberMatches(launch["stdout_bytes"], len(rawStdout)) || launch["stdout_truncated"] != true {
+	if launch["stdout_digest"] != digest.RawBytes(retainedStdout) || !jsonNumberMatches(launch["stdout_bytes"], len(retainedStdout)) || launch["stdout_truncated"] != true {
 		t.Fatalf("stdout metadata = %#v", launch)
 	}
 	if launch["stderr_digest"] != digest.RawBytes([]byte("authentication failed")) || !jsonNumberMatches(launch["stderr_bytes"], len([]byte("authentication failed"))) || launch["stderr_truncated"] != false {
@@ -1963,6 +1974,37 @@ func TestMergeRelayEvidenceRejectsMultipleConsumingRecords(t *testing.T) {
 	}
 }
 
+func TestMergeRelayEvidenceDeduplicatesRepeatedRunRecordDigest(t *testing.T) {
+	runRecordDigest := digest.RawBytes([]byte("byte-identical run record"))
+	newRecord := func() map[string]any {
+		return map[string]any{
+			"run_record_digest": runRecordDigest,
+			"consumes_batch":    true,
+			"status":            contracts.RecordStatusUnavailable,
+		}
+	}
+	merged, err := mergeRelayEvidence(
+		[]planning.RelayEvidence{{
+			BatchID:      "defect-batch-1",
+			RecipeFamily: "witness-falsify-v2",
+			Backend:      "codex",
+			RunRecords:   []map[string]any{newRecord()},
+		}},
+		[]planning.RelayEvidence{{
+			BatchID:      "defect-batch-1",
+			RecipeFamily: "witness-falsify-v2",
+			Backend:      "codex",
+			RunRecords:   []map[string]any{newRecord()},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("mergeRelayEvidence: %v", err)
+	}
+	if len(merged) != 1 || len(merged[0].RunRecords) != 1 || merged[0].RunRecords[0]["run_record_digest"] != runRecordDigest {
+		t.Fatalf("merged relay evidence = %#v, want one deduplicated run record", merged)
+	}
+}
+
 func TestMergeRelayEvidenceRejectsConflictingProvenance(t *testing.T) {
 	_, err := mergeRelayEvidence(
 		[]planning.RelayEvidence{{
@@ -2043,11 +2085,6 @@ func TestReadRunRecordEvidenceMergesEmbeddedRelayVerdictsWithSuppliedVerdicts(t 
 			if err != nil {
 				t.Fatalf("readRelayEvidence: %v", err)
 			}
-			// Verdict files carry no recipe metadata. Supply the independently
-			// established matching provenance so this regression reaches the
-			// verdict-identity comparison under test.
-			suppliedEvidence[0].RecipeFamily = "witness-falsify-v2"
-			suppliedEvidence[0].Backend = "codex"
 			merged, err := mergeRelayEvidence(suppliedEvidence, runRecordEvidence)
 			if test.wantConflict {
 				if err == nil {
@@ -2077,6 +2114,116 @@ func TestReadRunRecordEvidenceMergesEmbeddedRelayVerdictsWithSuppliedVerdicts(t 
 				t.Fatalf("merged verdict identity = %q, want %q", mergedIdentity, expectedIdentity)
 			}
 		})
+	}
+}
+
+func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadata(t *testing.T) {
+	const batchID = "defect-batch-1"
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	stateDir := filepath.Join(dir, "state")
+	compatibility := writeCLIArtifact(t, dir, "compatibility-verdict-merge.json")
+	capabilities := writeCLIArtifact(t, dir, "capabilities-verdict-merge.json")
+	bundle := writeCLIArtifact(t, dir, "bundle-verdict-merge.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-verdict-merge.json", stateDir, compatibility, capabilities, bundle)
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan-verdict-merge.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+
+	verdicts := contracts.RelayWitnessVerdictsDocument{
+		SchemaVersion: contracts.RelayWitnessVerdictsV2,
+		BatchID:       batchID,
+		Verdicts: []contracts.WitnessVerdict{{
+			FindingID:     "finding-1",
+			WitnessDigest: digest.RawBytes([]byte("witness-1")),
+			Verdict:       contracts.VerdictSurvived,
+		}},
+	}
+	runRecordPath := filepath.Join(dir, "relay-run-record-verdict-merge.json")
+	if err := writeCanonical(runRecordPath, relayrun.RunRecord{
+		SchemaVersion:   relayrun.RunRecordSchema,
+		BatchID:         batchID,
+		Status:          contracts.RecordStatusUnavailable,
+		RecipeID:        "witness-falsify-v2-codex",
+		ProviderInvoked: relayrun.ProviderInvokedTrue,
+		ConsumesBatch:   true,
+		RelayVerdicts:   &verdicts,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	verdictPath := filepath.Join(dir, "relay-verdict-identical.json")
+	if err := writeCanonical(verdictPath, verdicts); err != nil {
+		t.Fatal(err)
+	}
+	selectedContract := writeCLISelectedContractArtifact(t, dir, "contract-verdict-merge.json")
+	batchPath := filepath.Join(stateDir, "verification", "batches", batchID+".json")
+	manifestOut := filepath.Join(dir, "manifest-verdict-merge.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", batchPath,
+		"-relay-verdict", batchID + "=" + verdictPath,
+		"-run-record", runRecordPath,
+		"-compatibility-manifest", compatibility,
+		"-relay-capabilities", capabilities,
+		"-integration-bundle", bundle,
+		"-selected-contract", selectedContract,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble with matching relay-verdict and run-record: %v", err)
+	}
+	data, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Batches) != 1 || manifest.Batches[0].BatchID != batchID || manifest.Batches[0].FailureReason != "relay_run_recorded_unavailable" {
+		t.Fatalf("manifest batches = %#v, want merged unavailable run-record evidence", manifest.Batches)
+	}
+
+	conflictingVerdicts := verdicts
+	conflictingVerdicts.Verdicts = append([]contracts.WitnessVerdict(nil), verdicts.Verdicts...)
+	conflictingVerdicts.Verdicts[0].Rationale = "conflicting verdict identity"
+	conflictingVerdictPath := filepath.Join(dir, "relay-verdict-conflicting.json")
+	if err := writeCanonical(conflictingVerdictPath, conflictingVerdicts); err != nil {
+		t.Fatal(err)
+	}
+	err = route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", batchPath,
+		"-relay-verdict", batchID + "=" + conflictingVerdictPath,
+		"-run-record", runRecordPath,
+		"-compatibility-manifest", compatibility,
+		"-relay-capabilities", capabilities,
+		"-integration-bundle", bundle,
+		"-selected-contract", selectedContract,
+		"-out", filepath.Join(dir, "manifest-verdict-conflict.json"),
+	})
+	if err == nil {
+		t.Fatal("verification assemble accepted conflicting relay verdict identities")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != verificationAssembleConflictingRelayProvenance || diagnostic.Details["field"] != "relay_verdict_identity" {
+		t.Fatalf("diagnostic = %#v, want relay verdict provenance conflict", diagnostic)
 	}
 }
 

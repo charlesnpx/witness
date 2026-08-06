@@ -664,6 +664,13 @@ func relayLaunchMetadataSummary(value any) map[string]any {
 		if argvDigest, err := digest.SemanticJSON(argv); err == nil {
 			summary["argv_digest"] = argvDigest
 		}
+	} else {
+		if executable, ok := launch["executable"].(string); ok && strings.TrimSpace(executable) != "" {
+			summary["executable"] = executable
+		}
+		if argvDigest, ok := launch["argv_digest"].(string); ok && digest.WellFormed(argvDigest) {
+			summary["argv_digest"] = argvDigest
+		}
 	}
 	if exitCode, ok := relayLaunchInteger(launch["exit_code"], false); ok {
 		summary["exit_code"] = exitCode
@@ -699,48 +706,10 @@ func appendRelayLaunchStreamSummary(summary, launch map[string]any, stream strin
 	digestKey := stream + "_digest"
 	bytesKey := stream + "_bytes"
 	truncatedKey := stream + "_truncated"
-	if captureDigest, digestOK := launch[digestKey].(string); digestOK && digest.WellFormed(captureDigest) {
-		if captureBytes, bytesOK := relayLaunchInteger(launch[bytesKey], true); bytesOK {
-			summary[digestKey] = captureDigest
-			summary[bytesKey] = captureBytes
-			truncated, truncatedOK := launch[truncatedKey].(bool)
-			if !truncatedOK {
-				truncated = false
-			}
-			summary[truncatedKey] = truncated
-			return
-		}
-	}
-	if encodedCapture, ok := launch[stream+"_b64"].(string); ok {
-		if capture, err := base64.StdEncoding.DecodeString(encodedCapture); err == nil {
-			summary[digestKey] = digest.RawBytes(capture)
-			summary[bytesKey] = len(capture)
-			truncated, ok := launch[truncatedKey].(bool)
-			if !ok {
-				truncated = false
-			}
-			summary[truncatedKey] = truncated
-			return
-		}
-	}
-	if capture, ok := launch[stream].([]byte); ok {
+	if capture, ok := relayLaunchRetainedStream(launch, stream); ok {
 		summary[digestKey] = digest.RawBytes(capture)
 		summary[bytesKey] = len(capture)
-		truncated, ok := launch[truncatedKey].(bool)
-		if !ok {
-			truncated = false
-		}
-		summary[truncatedKey] = truncated
-		return
-	}
-	if capture, ok := launch[stream].(string); ok {
-		summary[digestKey] = digest.RawBytes([]byte(capture))
-		summary[bytesKey] = len([]byte(capture))
-		truncated, ok := launch[truncatedKey].(bool)
-		if !ok {
-			truncated = false
-		}
-		summary[truncatedKey] = truncated
+		summary[truncatedKey] = relayLaunchTruncated(launch, truncatedKey)
 		return
 	}
 	if captureDigest, ok := launch[digestKey].(string); ok && digest.WellFormed(captureDigest) {
@@ -752,6 +721,26 @@ func appendRelayLaunchStreamSummary(summary, launch map[string]any, stream strin
 	if truncated, ok := launch[truncatedKey].(bool); ok {
 		summary[truncatedKey] = truncated
 	}
+}
+
+func relayLaunchRetainedStream(launch map[string]any, stream string) ([]byte, bool) {
+	if encodedCapture, ok := launch[stream+"_b64"].(string); ok {
+		if capture, err := base64.StdEncoding.DecodeString(encodedCapture); err == nil {
+			return capture, true
+		}
+	}
+	if capture, ok := launch[stream].([]byte); ok {
+		return capture, true
+	}
+	if capture, ok := launch[stream].(string); ok {
+		return []byte(capture), true
+	}
+	return nil, false
+}
+
+func relayLaunchTruncated(launch map[string]any, key string) bool {
+	truncated, _ := launch[key].(bool)
+	return truncated
 }
 
 func relayLaunchInteger(value any, nonNegative bool) (int, bool) {

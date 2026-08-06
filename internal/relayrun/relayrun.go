@@ -31,6 +31,9 @@ const (
 	CodeOutputFailed      = "relayrun_output_failed"
 	CodeInvalidBatchInput = "relayrun_invalid_batch_input"
 	CodeInvalidRunRecord  = "relayrun_invalid_run_record"
+	// CodeInvalidRunRecordStreamSummary identifies claimed launch stream
+	// summaries that do not match retained launch bytes.
+	CodeInvalidRunRecordStreamSummary = "relayrun_invalid_run_record_stream_summary"
 
 	// RunStatusLaunchFailed marks a relay command that failed before its
 	// process could start. It is the only status that does not consume the
@@ -74,7 +77,9 @@ type Result struct {
 // LaunchRecord is the bounded witness-side evidence for one relay run command.
 // Stdout and Stderr each retain at most launchCaptureLimitBytes of source
 // output, split evenly between the head and tail when truncated. They are raw
-// bytes (base64-encoded in JSON) so retained output stays byte-exact.
+// bytes (base64-encoded in JSON) so retained output stays byte-exact. Their
+// digest and byte-count summaries cover those retained bytes; the truncated
+// flags preserve that the original stream exceeded the retained capture.
 type LaunchRecord struct {
 	Argv             []string       `json:"argv"`
 	WorkingDirectory string         `json:"working_directory"`
@@ -233,7 +238,7 @@ func ReadRunRecordsBytes(data []byte) ([]RunRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := requireValidRunRecord(record); err != nil {
+		if err := requireValidRunRecord(record, document); err != nil {
 			return nil, err
 		}
 		return []RunRecord{record}, nil
@@ -242,8 +247,13 @@ func ReadRunRecordsBytes(data []byte) ([]RunRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, record := range index.Runs {
-			if err := requireValidRunRecord(record); err != nil {
+		rawRuns, _ := document["runs"].([]any)
+		for index, record := range index.Runs {
+			var rawRecord map[string]any
+			if index < len(rawRuns) {
+				rawRecord, _ = rawRuns[index].(map[string]any)
+			}
+			if err := requireValidRunRecord(record, rawRecord); err != nil {
 				return nil, err
 			}
 		}
@@ -259,7 +269,11 @@ func ReadRunRecordsBytes(data []byte) ([]RunRecord, error) {
 	}
 }
 
-func requireValidRunRecord(record RunRecord) error {
+func requireValidRunRecord(record RunRecord, source ...map[string]any) error {
+	var rawRecord map[string]any
+	if len(source) > 0 {
+		rawRecord = source[0]
+	}
 	if record.SchemaVersion != RunRecordSchema {
 		return diag.New(CodeInvalidRunRecord, "relay run record schema_version is unsupported.", diag.WithDetail("actual", record.SchemaVersion), diag.WithDetail("expected", RunRecordSchema))
 	}
@@ -274,6 +288,9 @@ func requireValidRunRecord(record RunRecord) error {
 	}
 	if record.Status != contracts.RecordStatusValid && record.Status != contracts.RecordStatusFailed && record.Status != contracts.RecordStatusUnavailable && record.Status != RunStatusLaunchFailed {
 		return diag.New(CodeInvalidRunRecord, "relay run record status is unsupported.", diag.WithDetail("value", record.Status))
+	}
+	if err := requireValidRelayLaunchStreamSummaries(record.RelayLaunch, rawRelayLaunch(rawRecord)); err != nil {
+		return err
 	}
 	providerEvidence := runRecordProviderEvidence(record)
 	if record.RelayLaunch != nil && record.RelayLaunch.StartFailed {
@@ -322,6 +339,71 @@ func requireValidRunRecord(record RunRecord) error {
 	return nil
 }
 
+func rawRelayLaunch(record map[string]any) map[string]any {
+	launch, _ := record["relay_launch"].(map[string]any)
+	return launch
+}
+
+func requireValidRelayLaunchStreamSummaries(launch *LaunchRecord, rawLaunch map[string]any) error {
+	if launch == nil {
+		return nil
+	}
+	for _, stream := range []struct {
+		name      string
+		retained  []byte
+		digest    string
+		bytes     strictjson.Int
+		truncated bool
+	}{
+		{name: "stdout", retained: launch.Stdout, digest: launch.StdoutDigest, bytes: launch.StdoutBytes, truncated: launch.StdoutTruncated},
+		{name: "stderr", retained: launch.Stderr, digest: launch.StderrDigest, bytes: launch.StderrBytes, truncated: launch.StderrTruncated},
+	} {
+		if err := requireValidRelayLaunchStreamSummary(stream.name, stream.retained, stream.digest, stream.bytes, stream.truncated, rawLaunch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireValidRelayLaunchStreamSummary(stream string, retained []byte, claimedDigest string, claimedBytes strictjson.Int, truncated bool, rawLaunch map[string]any) error {
+	digestKey := stream + "_digest"
+	bytesKey := stream + "_bytes"
+	_, digestClaimed := rawLaunch[digestKey]
+	_, bytesClaimed := rawLaunch[bytesKey]
+	if rawLaunch == nil {
+		digestClaimed = strings.TrimSpace(claimedDigest) != ""
+		bytesClaimed = claimedBytes != 0
+	}
+	if digestClaimed && strings.TrimSpace(claimedDigest) != "" && !digest.WellFormed(strings.TrimSpace(claimedDigest)) {
+		return invalidRelayLaunchStreamSummary(stream, digestKey, "relay launch stream digest must be a well-formed sha256 digest.", diag.WithDetail("claimed_digest", claimedDigest))
+	}
+	if bytesClaimed && claimedBytes < 0 {
+		return invalidRelayLaunchStreamSummary(stream, bytesKey, "relay launch stream byte count must not be negative.", diag.WithDetail("claimed_bytes", claimedBytes))
+	}
+	if retained == nil {
+		hasDigestClaim := digestClaimed && strings.TrimSpace(claimedDigest) != ""
+		hasBytesClaim := bytesClaimed && claimedBytes != 0
+		if (hasDigestClaim || hasBytesClaim) && !truncated {
+			return invalidRelayLaunchStreamSummary(stream, "retained_content", "relay launch stream summaries without retained content require a truncated capture.", diag.WithDetail("claimed_digest", claimedDigest), diag.WithDetail("claimed_bytes", claimedBytes))
+		}
+		return nil
+	}
+	actualDigest := digest.RawBytes(retained)
+	actualBytes := strictjson.Int(len(retained))
+	if digestClaimed && strings.TrimSpace(claimedDigest) != actualDigest {
+		return invalidRelayLaunchStreamSummary(stream, digestKey, "relay launch stream digest does not match retained content.", diag.WithDetail("claimed_digest", claimedDigest), diag.WithDetail("retained_digest", actualDigest))
+	}
+	if bytesClaimed && claimedBytes != actualBytes {
+		return invalidRelayLaunchStreamSummary(stream, bytesKey, "relay launch stream byte count does not match retained content.", diag.WithDetail("claimed_bytes", claimedBytes), diag.WithDetail("retained_bytes", actualBytes))
+	}
+	return nil
+}
+
+func invalidRelayLaunchStreamSummary(stream, field, message string, options ...diag.Option) error {
+	options = append(options, diag.WithDetail("stream", stream), diag.WithDetail("field", field))
+	return diag.New(CodeInvalidRunRecordStreamSummary, message, options...)
+}
+
 func effectiveLaunchCWD(value string) string {
 	if strings.TrimSpace(value) == "" {
 		cwd, err := os.Getwd()
@@ -353,10 +435,10 @@ func launchRecord(result relayclient.CommandResult, workingDirectory string) *La
 		StartFailed:      result.StartFailed,
 		Stdout:           stdout,
 		Stderr:           stderr,
-		StdoutDigest:     digest.RawBytes(result.Stdout),
-		StderrDigest:     digest.RawBytes(result.Stderr),
-		StdoutBytes:      strictjson.Int(len(result.Stdout)),
-		StderrBytes:      strictjson.Int(len(result.Stderr)),
+		StdoutDigest:     digest.RawBytes(stdout),
+		StderrDigest:     digest.RawBytes(stderr),
+		StdoutBytes:      strictjson.Int(len(stdout)),
+		StderrBytes:      strictjson.Int(len(stderr)),
 		StdoutTruncated:  stdoutTruncated,
 		StderrTruncated:  stderrTruncated,
 	}
@@ -364,7 +446,9 @@ func launchRecord(result relayclient.CommandResult, workingDirectory string) *La
 
 func boundedLaunchOutput(value []byte) ([]byte, bool) {
 	if len(value) <= launchCaptureLimitBytes {
-		return append([]byte(nil), value...), false
+		retained := make([]byte, len(value))
+		copy(retained, value)
+		return retained, false
 	}
 	head := launchCaptureLimitBytes / 2
 	tail := launchCaptureLimitBytes - head

@@ -10,9 +10,11 @@ import (
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/relayclient"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 type fakeRelayRunner struct {
@@ -133,8 +135,8 @@ func TestRunBatchesBoundsLaunchOutput(t *testing.T) {
 	if !bytes.HasPrefix(launch.Stdout, []byte("hhhh")) || !bytes.HasSuffix(launch.Stdout, []byte("tttt")) || !bytes.HasPrefix(launch.Stderr, []byte("xxxx")) || !bytes.HasSuffix(launch.Stderr, []byte("zzzz")) {
 		t.Fatalf("launch captures did not retain head and tail")
 	}
-	if launch.StdoutDigest != digest.RawBytes(stdout) || int(launch.StdoutBytes) != len(stdout) || launch.StderrDigest != digest.RawBytes(stderr) || int(launch.StderrBytes) != len(stderr) {
-		t.Fatalf("launch raw summaries = %#v", launch)
+	if launch.StdoutDigest != digest.RawBytes(launch.Stdout) || int(launch.StdoutBytes) != len(launch.Stdout) || launch.StderrDigest != digest.RawBytes(launch.Stderr) || int(launch.StderrBytes) != len(launch.Stderr) {
+		t.Fatalf("launch retained-stream summaries = %#v", launch)
 	}
 }
 
@@ -167,6 +169,96 @@ func TestRunRecordRoundTripsInvalidUTF8LaunchCaptureBytes(t *testing.T) {
 	}
 	if launch.StdoutDigest != digest.RawBytes(stdout) || int(launch.StdoutBytes) != len(stdout) || launch.StderrDigest != digest.RawBytes(stderr) || int(launch.StderrBytes) != len(stderr) {
 		t.Fatalf("round-tripped raw summaries = %#v", launch)
+	}
+}
+
+func TestReadRunRecordsBytesValidatesRetainedLaunchStreamSummaries(t *testing.T) {
+	newRecord := func() RunRecord {
+		return RunRecord{
+			SchemaVersion:   RunRecordSchema,
+			BatchID:         "defect-batch-1",
+			Status:          contracts.RecordStatusUnavailable,
+			RecipeID:        "witness-falsify-v2-codex",
+			ProviderInvoked: ProviderInvokedUnknown,
+			ConsumesBatch:   true,
+			RelayLaunch: launchRecord(relayclient.CommandResult{
+				Command: "fake-relay",
+				Stdout:  []byte("a"),
+			}, "/tmp/workspace"),
+		}
+	}
+
+	t.Run("consistent retained content", func(t *testing.T) {
+		record := newRecord()
+		data, err := contracts.CanonicalBytes(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs, err := ReadRunRecordsBytes(data)
+		if err != nil {
+			t.Fatalf("ReadRunRecordsBytes: %v", err)
+		}
+		if len(runs) != 1 || runs[0].RelayLaunch == nil || runs[0].RelayLaunch.StdoutDigest != digest.RawBytes([]byte("a")) || runs[0].RelayLaunch.StdoutBytes != 1 {
+			t.Fatalf("runs = %#v, want unchanged retained stdout summary", runs)
+		}
+	})
+
+	t.Run("truncated digest-only capture", func(t *testing.T) {
+		record := newRecord()
+		record.RelayLaunch.Stdout = nil
+		record.RelayLaunch.StdoutDigest = digest.RawBytes([]byte("unretained stream"))
+		record.RelayLaunch.StdoutBytes = strictjson.Int(42)
+		record.RelayLaunch.StdoutTruncated = true
+		data, err := contracts.CanonicalBytes(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs, err := ReadRunRecordsBytes(data)
+		if err != nil {
+			t.Fatalf("ReadRunRecordsBytes: %v", err)
+		}
+		launch := runs[0].RelayLaunch
+		if launch == nil || launch.StdoutDigest != record.RelayLaunch.StdoutDigest || launch.StdoutBytes != record.RelayLaunch.StdoutBytes || !launch.StdoutTruncated {
+			t.Fatalf("launch = %#v, want accepted truncated digest-only stdout summary", launch)
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		mutate    func(*LaunchRecord)
+		wantField string
+	}{
+		{
+			name: "contradictory claimed digest",
+			mutate: func(launch *LaunchRecord) {
+				launch.StdoutDigest = digest.RawBytes([]byte("different"))
+			},
+			wantField: "stdout_digest",
+		},
+		{
+			name: "contradictory claimed byte count",
+			mutate: func(launch *LaunchRecord) {
+				launch.StdoutBytes = strictjson.Int(99)
+			},
+			wantField: "stdout_bytes",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record := newRecord()
+			test.mutate(record.RelayLaunch)
+			data, err := contracts.CanonicalBytes(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ReadRunRecordsBytes(data)
+			if err == nil {
+				t.Fatal("ReadRunRecordsBytes accepted a launch stream summary that contradicts retained stdout")
+			}
+			diagnostic := diag.FromError(err)
+			if diagnostic.Code != CodeInvalidRunRecordStreamSummary || diagnostic.Details["stream"] != "stdout" || diagnostic.Details["field"] != test.wantField {
+				t.Fatalf("diagnostic = %#v, want specific stdout stream-summary rejection", diagnostic)
+			}
+		})
 	}
 }
 

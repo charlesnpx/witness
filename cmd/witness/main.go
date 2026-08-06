@@ -1931,17 +1931,16 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEv
 
 func requireMatchingRelayEvidenceProvenance(batchID string, current, incoming planning.RelayEvidence) error {
 	for _, field := range []struct {
-		name              string
-		current           string
-		incoming          string
-		requireNonemptyID bool
+		name     string
+		current  string
+		incoming string
 	}{
-		{name: "recipe_family", current: current.RecipeFamily, incoming: incoming.RecipeFamily, requireNonemptyID: true},
-		{name: "backend", current: current.Backend, incoming: incoming.Backend, requireNonemptyID: true},
+		{name: "recipe_family", current: current.RecipeFamily, incoming: incoming.RecipeFamily},
+		{name: "backend", current: current.Backend, incoming: incoming.Backend},
 		{name: "portable_export_dir", current: current.PortableExportDir, incoming: incoming.PortableExportDir},
 		{name: "portable_export_digest", current: relayPortableExportDigest(current.PortableExportRef), incoming: relayPortableExportDigest(incoming.PortableExportRef)},
 	} {
-		if conflictingRelayProvenanceValue(field.current, field.incoming, field.requireNonemptyID) {
+		if conflictingRelayProvenanceValue(field.current, field.incoming) {
 			return conflictingRelayProvenance(batchID, field.name)
 		}
 	}
@@ -1969,12 +1968,9 @@ func relayPortableExportDigest(ref *contracts.ArtifactRef) string {
 	return strings.TrimSpace(ref.Digest)
 }
 
-func conflictingRelayProvenanceValue(current, incoming string, requireNonemptyID bool) bool {
+func conflictingRelayProvenanceValue(current, incoming string) bool {
 	current = strings.TrimSpace(current)
 	incoming = strings.TrimSpace(incoming)
-	if requireNonemptyID {
-		return current != incoming
-	}
 	return current != "" && incoming != "" && current != incoming
 }
 
@@ -1989,8 +1985,17 @@ func conflictingRelayProvenance(batchID, field string) error {
 
 func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[string]any, error) {
 	records := make([]map[string]any, 0)
+	seenDigests := map[string]bool{}
 	for _, source := range sources {
-		records = append(records, source...)
+		for _, record := range source {
+			if recordDigest := relayRunRecordDigest(record); recordDigest != "" {
+				if seenDigests[recordDigest] {
+					continue
+				}
+				seenDigests[recordDigest] = true
+			}
+			records = append(records, record)
+		}
 	}
 	consumingRecordIndexes := make([]int, 0, 1)
 	for index, record := range records {
@@ -2026,6 +2031,18 @@ func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[st
 		)
 	}
 	return records, nil
+}
+
+func relayRunRecordDigest(record map[string]any) string {
+	value, ok := record["run_record_digest"].(string)
+	if !ok {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	if !digest.WellFormed(value) {
+		return ""
+	}
+	return value
 }
 
 func isStartFailureRunRecord(record map[string]any) bool {
