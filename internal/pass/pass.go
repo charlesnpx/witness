@@ -47,6 +47,7 @@ const (
 	CodeInvalidPreflight             = "pass_invalid_preflight"
 	CodeInvalidRetainedArtifact      = "pass_invalid_retained_artifact"
 	CodeReservedRetainedArtifactRole = "pass_reserved_retained_artifact_role"
+	CodeRetainedArtifactRoleConflict = "retained_artifact_role_conflict"
 	CodeInvalidState                 = "pass_invalid_state"
 	CodePassStateConfigMismatch      = "pass_state_config_mismatch"
 	CodeHeadManifestMismatch         = "pass_head_manifest_snapshot_mismatch"

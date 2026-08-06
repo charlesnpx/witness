@@ -93,6 +93,7 @@ type sourceFile struct {
 
 type dirtyGitInventory struct {
 	files       []sourceFile
+	dirtyFiles  []sourceFile
 	trackedOnly bool
 	status      string
 }
@@ -144,7 +145,7 @@ func DeriveManifest(ctx context.Context, options Options) (Result, error) {
 			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
 		})
 	}
-	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyInventory, options.afterDirtySourceCapture); err != nil {
+	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyInventory, entries, options.afterDirtySourceCapture); err != nil {
 		return zero, err
 	}
 
@@ -224,7 +225,7 @@ func Create(ctx context.Context, options Options) (Result, error) {
 			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
 		})
 	}
-	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyInventory, options.afterDirtySourceCapture); err != nil {
+	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyInventory, entries, options.afterDirtySourceCapture); err != nil {
 		return zero, err
 	}
 
@@ -386,18 +387,55 @@ func collectDirtyGitInventory(ctx context.Context, sourceAbs string) (*dirtyGitI
 	if err != nil {
 		return nil, err
 	}
+	dirtyFiles, err := collectDirtyCapturedFiles(ctx, sourceAbs, files)
+	if err != nil {
+		return nil, err
+	}
 	summary, err := gitOutput(ctx, sourceAbs, "status", "--porcelain=v1", "--untracked-files=normal")
 	if err != nil {
 		return nil, err
 	}
 	return &dirtyGitInventory{
 		files:       files,
+		dirtyFiles:  dirtyFiles,
 		trackedOnly: trackedOnly,
 		status:      strings.TrimSpace(summary),
 	}, nil
 }
 
-func verifyDirtyGitCapture(ctx context.Context, sourceAbs string, before *dirtyGitInventory, afterCapture func()) error {
+// collectDirtyCapturedFiles identifies only dirty files which were captured
+// from the working tree. Clean tracked files are covered by inventory drift
+// when they change, so the content recheck intentionally avoids re-reading
+// them after every dirty capture.
+func collectDirtyCapturedFiles(ctx context.Context, sourceAbs string, capturedFiles []sourceFile) ([]sourceFile, error) {
+	status, err := gitOutput(ctx, sourceAbs, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
+	if err != nil {
+		return nil, err
+	}
+	dirtyPaths, err := parseDirtyGitPaths(status)
+	if err != nil {
+		return nil, err
+	}
+	byPath := make(map[string]sourceFile, len(capturedFiles))
+	for _, item := range capturedFiles {
+		byPath[item.path] = item
+	}
+	seen := make(map[string]struct{}, len(dirtyPaths))
+	dirtyFiles := make([]sourceFile, 0, len(dirtyPaths))
+	for _, path := range dirtyPaths {
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		seen[path] = struct{}{}
+		if item, captured := byPath[path]; captured {
+			dirtyFiles = append(dirtyFiles, item)
+		}
+	}
+	sort.Slice(dirtyFiles, func(i, j int) bool { return dirtyFiles[i].path < dirtyFiles[j].path })
+	return dirtyFiles, nil
+}
+
+func verifyDirtyGitCapture(ctx context.Context, sourceAbs string, before *dirtyGitInventory, entries []FileEntry, afterCapture func()) error {
 	if before == nil {
 		return nil
 	}
@@ -408,7 +446,8 @@ func verifyDirtyGitCapture(ctx context.Context, sourceAbs string, before *dirtyG
 	if err != nil {
 		return err
 	}
-	if dirtyGitInventoriesEqual(*before, *after) {
+	contentUnchanged := dirtyCapturedFileDigestsMatch(sourceAbs, before.dirtyFiles, entries)
+	if dirtyGitInventoriesEqual(*before, *after) && contentUnchanged {
 		return nil
 	}
 	return diag.New(
@@ -417,6 +456,27 @@ func verifyDirtyGitCapture(ctx context.Context, sourceAbs string, before *dirtyG
 		diag.WithDetail("before_status", before.status),
 		diag.WithDetail("after_status", after.status),
 	)
+}
+
+// dirtyCapturedFileDigestsMatch re-reads only paths Git identified as dirty
+// before capture. A false result includes a path which disappeared or ceased
+// to match its captured file type while the snapshot was being made.
+func dirtyCapturedFileDigestsMatch(sourceAbs string, dirtyFiles []sourceFile, entries []FileEntry) bool {
+	capturedDigests := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		capturedDigests[entry.Path] = entry.Digest
+	}
+	for _, item := range dirtyFiles {
+		capturedDigest, found := capturedDigests[item.path]
+		if !found {
+			return false
+		}
+		data, _, err := readSnapshotBytes(sourceAbs, item)
+		if err != nil || digest.RawBytes(data) != capturedDigest {
+			return false
+		}
+	}
+	return true
 }
 
 func dirtyGitInventoriesEqual(left dirtyGitInventory, right dirtyGitInventory) bool {
@@ -493,6 +553,39 @@ func parseGitPaths(output string) ([]string, error) {
 			return nil, err
 		}
 		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func parseDirtyGitPaths(output string) ([]string, error) {
+	if output == "" {
+		return nil, nil
+	}
+	records := strings.Split(output, "\x00")
+	paths := make([]string, 0, len(records))
+	for index := 0; index < len(records); index++ {
+		record := records[index]
+		if record == "" {
+			continue
+		}
+		if len(record) < 4 || record[2] != ' ' {
+			return nil, diag.New(CodeInvalidGitOutput, "git status output did not contain a valid porcelain record.")
+		}
+		status := record[:2]
+		path := record[3:]
+		if err := validateRelativePath(path); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+		if strings.ContainsAny(status, "RC") {
+			index++
+			if index >= len(records) || records[index] == "" {
+				return nil, diag.New(CodeInvalidGitOutput, "git status rename or copy record was missing its source path.")
+			}
+			if err := validateRelativePath(records[index]); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return paths, nil
 }

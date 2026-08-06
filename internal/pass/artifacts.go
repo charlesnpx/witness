@@ -78,6 +78,7 @@ var reservedPassRetainedArtifactRoles = map[string]struct{}{
 // inventory format while a pass advances.
 func passRetainedArtifacts(config Config, preflightResult preflight.Result) (map[string]string, error) {
 	artifacts := map[string]string{}
+	localManifestPaths := map[string]string{}
 	for _, item := range []struct {
 		role string
 		path string
@@ -90,6 +91,9 @@ func passRetainedArtifacts(config Config, preflightResult preflight.Result) (map
 	} {
 		if relativePath, ok := stateDirRelativeExistingFile(config.StateDir, item.path); ok {
 			artifacts[item.role] = relativePath
+			if item.role == "source_manifest" || item.role == "workspace_manifest" {
+				localManifestPaths[item.role] = relativePath
+			}
 		}
 	}
 	for _, role := range sortedStringMapKeys(preflightResult.RetainedArtifacts) {
@@ -110,6 +114,18 @@ func passRetainedArtifacts(config Config, preflightResult preflight.Result) (map
 				"/retained_artifacts/"+jsonPointerEscape(role),
 				map[string]any{"role": role, "path": relativePath},
 			)
+		}
+		if role == "source_manifest" || role == "workspace_manifest" {
+			localPath, found := localManifestPaths[role]
+			if !found || validatedPath != localPath {
+				return nil, validationError(
+					CodeRetainedArtifactRoleConflict,
+					"preflight manifest retained artifact path must match the locally computed snapshot manifest path.",
+					"/retained_artifacts/"+jsonPointerEscape(role),
+					map[string]any{"role": role, "path": validatedPath, "expected_path": localPath},
+				)
+			}
+			continue
 		}
 		artifacts[role] = validatedPath
 	}
@@ -136,11 +152,55 @@ func stateDirRelativeExistingFile(stateDir string, path string) (string, bool) {
 	if err != nil || relativePath == "." || relativePath == ".." || filepath.IsAbs(relativePath) || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
 		return "", false
 	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
+	if _, ok := stateDirRetainedArtifactPath(stateDir, relativePath); !ok {
 		return "", false
 	}
 	return filepath.ToSlash(relativePath), true
+}
+
+// stateDirRetainedArtifactPath mirrors cmd/witness's U4 retained-artifact
+// validation so pass output retains the same accident-prevention semantics.
+func stateDirRetainedArtifactPath(stateDir string, relativePath string) (string, bool) {
+	if !stateDirContainedRelativePath(relativePath) {
+		return relativePath, false
+	}
+	candidate := filepath.Join(stateDir, relativePath)
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return candidate, false
+	}
+	resolvedStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		return candidate, false
+	}
+	relative, err := filepath.Rel(resolvedStateDir, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return candidate, false
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return candidate, false
+	}
+	return candidate, true
+}
+
+// stateDirContainedRelativePath reports whether a retained-artifact path is a
+// clean relative path that stays inside the state directory. Absolute paths
+// and any path that escapes upward (a leading ".." component after cleaning)
+// are rejected, and stateDirRetainedArtifactPath additionally resolves
+// symlinks and requires the resolved target to be a regular file inside the
+// resolved state directory. This is accident prevention against stale or
+// malformed inventories, not a security boundary against a local attacker
+// racing filesystem state between validation and open.
+func stateDirContainedRelativePath(relativePath string) bool {
+	if relativePath == "" || filepath.IsAbs(relativePath) {
+		return false
+	}
+	cleaned := filepath.Clean(relativePath)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 func roleOutputDir(config Config) string {

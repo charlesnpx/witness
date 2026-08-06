@@ -191,7 +191,7 @@ func TestCreateDirtyGitWorktreeRequiresOverrideAndCapturesWorkingBytes(t *testin
 	}
 }
 
-func TestCreateRejectsDirtyGitWorktreeMutationDuringCapture(t *testing.T) {
+func TestCreateRejectsDirtyGitWorktreeContentMutationDuringCapture(t *testing.T) {
 	repo := t.TempDir()
 	runGit(t, repo, "init")
 	runGit(t, repo, "config", "user.email", "witness-test@example.com")
@@ -206,7 +206,7 @@ func TestCreateRejectsDirtyGitWorktreeMutationDuringCapture(t *testing.T) {
 		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
 		AllowDirtySource: true,
 		afterDirtySourceCapture: func() {
-			mustWriteFile(t, filepath.Join(repo, "created-during-capture.txt"), []byte("created\n"), 0o644)
+			mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("rewritten-working-copy\n"), 0o644)
 		},
 	})
 	if got := errorCode(err); got != CodeSourceChangedDuringCapture {

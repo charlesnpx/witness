@@ -183,7 +183,6 @@ func TestPassRetainedArtifactsRejectsAdversarialPreflightEntries(t *testing.T) {
 	if err := os.WriteFile(outsidePath, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	for _, test := range []struct {
 		name      string
 		artifacts map[string]string
@@ -207,6 +206,60 @@ func TestPassRetainedArtifactsRejectsAdversarialPreflightEntries(t *testing.T) {
 			}
 			assertValidationCode(t, err, test.code)
 		})
+	}
+}
+
+func TestPassRetainedArtifactsRejectsInStateSymlinkToExternalFile(t *testing.T) {
+	stateDir := t.TempDir()
+	outsidePath := filepath.Join(filepath.Dir(stateDir), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	externalSymlink := filepath.Join(stateDir, "external-link.json")
+	if err := os.Symlink(outsidePath, externalSymlink); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := passRetainedArtifacts(Config{StateDir: stateDir}, preflight.Result{RetainedArtifacts: map[string]string{
+		"external": filepath.Base(externalSymlink),
+	}})
+	if err == nil {
+		t.Fatal("pass retained-artifact inventory accepted an in-state symlink to an external file")
+	}
+	assertValidationCode(t, err, CodeInvalidRetainedArtifact)
+}
+
+func TestPassRetainedArtifactsRequiresMatchingManifestRolePath(t *testing.T) {
+	stateDir := t.TempDir()
+	localManifestPath := filepath.Join(stateDir, "source-snapshot", "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(localManifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localManifestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherManifestPath := filepath.Join(stateDir, "other-manifest.json")
+	if err := os.WriteFile(otherManifestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{StateDir: stateDir, SnapshotManifestPath: localManifestPath}
+
+	_, err := passRetainedArtifacts(config, preflight.Result{RetainedArtifacts: map[string]string{
+		"source_manifest": filepath.Base(otherManifestPath),
+	}})
+	if err == nil {
+		t.Fatal("pass retained-artifact inventory accepted a conflicting source manifest path")
+	}
+	assertValidationCode(t, err, CodeRetainedArtifactRoleConflict)
+
+	artifacts, err := passRetainedArtifacts(config, preflight.Result{RetainedArtifacts: map[string]string{
+		"source_manifest": filepath.ToSlash(filepath.Join("source-snapshot", "manifest.json")),
+	}})
+	if err != nil {
+		t.Fatalf("pass retained-artifact inventory rejected matching source manifest path: %v", err)
+	}
+	if got, want := artifacts["source_manifest"], filepath.ToSlash(filepath.Join("source-snapshot", "manifest.json")); got != want {
+		t.Fatalf("source manifest path = %q, want %q", got, want)
 	}
 }
 
