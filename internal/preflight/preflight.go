@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
@@ -53,6 +54,7 @@ const (
 	CodeMissingFreezeInput          = "preflight_missing_freeze_input"
 	CodeSnapshotDigestMismatch      = "preflight_snapshot_digest_mismatch"
 	CodeInvalidSnapshotManifest     = "preflight_invalid_snapshot_manifest"
+	CodeCharterZeroGoals            = "charter_zero_goals"
 )
 
 type Options struct {
@@ -64,6 +66,9 @@ type Options struct {
 	SnapshotManifestPath   string
 	ExpectedSnapshotDigest string
 	AllowNonGitSource      bool
+	AllowDirtySource       bool
+	FrozenCharter          *charter.FrozenCharter
+	AllowEmptyCharter      bool
 	ConsumerIdentity       map[string]any
 	Runner                 relayclient.Runner
 }
@@ -81,6 +86,8 @@ type Result struct {
 	RelayReportedDigests map[string]string `json:"relay_reported_contract_digests,omitempty"`
 	BackendStrata        map[string]string `json:"backend_strata"`
 	SnapshotDigest       string            `json:"snapshot_digest,omitempty"`
+	SourceDirty          bool              `json:"source_dirty,omitempty"`
+	SourceDirtyStatus    string            `json:"source_dirty_status,omitempty"`
 	ConsumerIdentity     map[string]any    `json:"consumer_identity"`
 	Diagnostics          []diag.Diagnostic `json:"diagnostics,omitempty"`
 }
@@ -180,6 +187,9 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	if options.StateDir == "" {
 		return result, &Error{Diagnostics: []diag.Diagnostic{diag.FromError(diag.New(CodeMissingStateDir, "preflight state directory is required."))}}
 	}
+	if diagnostic := reviewCharterDiagnostic(options.FrozenCharter, options.AllowEmptyCharter); diagnostic != nil {
+		return finish(result, options, []diag.Diagnostic{*diagnostic})
+	}
 	if options.SourceDir != "" {
 		if diagnostic, err := stateDirInsideSourceDiagnostic(options.SourceDir, options.StateDir); err != nil {
 			return result, err
@@ -192,27 +202,32 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	}
 
 	if options.SnapshotManifestPath != "" {
-		snapshotDigest, err := existingSnapshotDigest(options.SnapshotManifestPath, options.ExpectedSnapshotDigest)
+		manifest, snapshotDigest, err := existingSnapshotDigest(options.SnapshotManifestPath, options.ExpectedSnapshotDigest)
 		if err != nil {
 			diagnostics = append(diagnostics, diag.FromError(err))
 		} else {
 			result.SnapshotDigest = snapshotDigest
 			result.ArtifactDigests["source-snapshot-manifest"] = snapshotDigest
+			result.SourceDirty = manifest.Source.GitDirty
+			result.SourceDirtyStatus = manifest.Source.GitDirtyStatus
 		}
 	} else if options.SourceDir != "" || options.SnapshotDir != "" {
 		if options.SourceDir == "" || options.SnapshotDir == "" {
 			diagnostics = append(diagnostics, diag.FromError(diag.New(CodeMissingFreezeInput, "source_dir and snapshot_dir must be provided together.")))
 		} else {
 			snapshot, err := freeze.Create(ctx, freeze.Options{
-				SourceDir:   options.SourceDir,
-				OutputDir:   options.SnapshotDir,
-				AllowNonGit: options.AllowNonGitSource,
+				SourceDir:        options.SourceDir,
+				OutputDir:        options.SnapshotDir,
+				AllowNonGit:      options.AllowNonGitSource,
+				AllowDirtySource: options.AllowDirtySource,
 			})
 			if err != nil {
 				diagnostics = append(diagnostics, diag.FromError(err))
 			} else {
 				result.SnapshotDigest = snapshot.ManifestDigest
 				result.ArtifactDigests["source-snapshot-manifest"] = snapshot.ManifestDigest
+				result.SourceDirty = snapshot.Manifest.Source.GitDirty
+				result.SourceDirtyStatus = snapshot.Manifest.Source.GitDirtyStatus
 			}
 		}
 	}
@@ -335,10 +350,10 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	return finish(result, options, diagnostics)
 }
 
-func existingSnapshotDigest(path string, expectedDigest string) (string, error) {
+func existingSnapshotDigest(path string, expectedDigest string) (freeze.Manifest, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", diag.Wrap(
+		return freeze.Manifest{}, "", diag.Wrap(
 			err,
 			CodeInvalidSnapshotManifest,
 			"existing snapshot manifest could not be read.",
@@ -348,7 +363,7 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 	}
 	manifest, err := strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*4)
 	if err != nil {
-		return "", diag.Wrap(
+		return freeze.Manifest{}, "", diag.Wrap(
 			err,
 			CodeInvalidSnapshotManifest,
 			"existing snapshot manifest could not be decoded.",
@@ -357,7 +372,7 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 		)
 	}
 	if manifest.SchemaVersion != freeze.SchemaVersion {
-		return "", diag.New(
+		return freeze.Manifest{}, "", diag.New(
 			CodeInvalidSnapshotManifest,
 			"existing snapshot manifest schema_version is unsupported.",
 			diag.WithDetail("path", path),
@@ -366,7 +381,7 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 		)
 	}
 	if manifest.DigestProfile != digest.Profile {
-		return "", diag.New(
+		return freeze.Manifest{}, "", diag.New(
 			CodeInvalidSnapshotManifest,
 			"existing snapshot manifest digest_profile is unsupported.",
 			diag.WithDetail("path", path),
@@ -376,7 +391,7 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 	}
 	actualDigest, err := freeze.ManifestDigest(manifest)
 	if err != nil {
-		return "", diag.Wrap(
+		return freeze.Manifest{}, "", diag.Wrap(
 			err,
 			CodeInvalidSnapshotManifest,
 			"existing snapshot manifest digest could not be recomputed.",
@@ -388,7 +403,7 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 		"workspace": manifest.Workspace.ManifestDigest,
 	} {
 		if strings.TrimSpace(embedded) == "" {
-			return "", diag.New(
+			return freeze.Manifest{}, "", diag.New(
 				CodeSnapshotDigestMismatch,
 				"existing snapshot manifest is missing an embedded digest.",
 				diag.WithDetail("path", path),
@@ -397,7 +412,7 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 			)
 		}
 		if embedded != actualDigest {
-			return "", diag.New(
+			return freeze.Manifest{}, "", diag.New(
 				CodeSnapshotDigestMismatch,
 				"existing snapshot manifest embedded digest does not match its content.",
 				diag.WithDetail("path", path),
@@ -408,7 +423,7 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 		}
 	}
 	if expectedDigest != "" && actualDigest != expectedDigest {
-		return "", diag.New(
+		return freeze.Manifest{}, "", diag.New(
 			CodeSnapshotDigestMismatch,
 			"existing snapshot manifest digest does not match the expected frozen snapshot.",
 			diag.WithDetail("path", path),
@@ -416,7 +431,19 @@ func existingSnapshotDigest(path string, expectedDigest string) (string, error) 
 			diag.WithDetail("expected_digest", expectedDigest),
 		)
 	}
-	return actualDigest, nil
+	return manifest, actualDigest, nil
+}
+
+func reviewCharterDiagnostic(frozen *charter.FrozenCharter, allowEmptyCharter bool) *diag.Diagnostic {
+	if frozen == nil || len(frozen.Charter.Goals) != 0 || allowEmptyCharter {
+		return nil
+	}
+	diagnostic := diag.Diagnostic{
+		Code:    CodeCharterZeroGoals,
+		Message: "review requires at least one Charter goal because an empty Charter makes review vacuous; pass -allow-empty-charter to override.",
+		Path:    "/charter/goals",
+	}
+	return &diagnostic
 }
 
 func runRelayAbsentPreflight(result *Result, options Options, launchErr error, diagnostics []diag.Diagnostic) (*Result, error) {

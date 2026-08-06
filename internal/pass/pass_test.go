@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -95,6 +96,233 @@ func TestBeginWithSameOptionsResumesExistingPass(t *testing.T) {
 	assertInvocation(t, invocation, stagePreflight, actionCallerRoleOutputs, false)
 	if invocation.PassState.Path != filepath.Join(options.StateDir, StateFileName) {
 		t.Fatalf("pass state path = %s, want %s", invocation.PassState.Path, filepath.Join(options.StateDir, StateFileName))
+	}
+}
+
+func TestBeginAllowsDirtyGitSnapshotAndReportsRetainedArtifacts(t *testing.T) {
+	options := newBeginOptions(t)
+	options.AllowNonGitSource = false
+	runPassGit(t, options.SourceDir, "init")
+	runPassGit(t, options.SourceDir, "config", "user.email", "witness-test@example.com")
+	runPassGit(t, options.SourceDir, "config", "user.name", "Witness Test")
+	runPassGit(t, options.SourceDir, "add", "app.txt")
+	runPassGit(t, options.SourceDir, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(options.SourceDir, "app.txt"), []byte("working-copy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(options.SourceDir, "untracked.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Begin(context.Background(), options); diag.FromError(err).Code != freeze.CodeSourceDirty {
+		t.Fatalf("dirty begin error = %v, want %s", err, freeze.CodeSourceDirty)
+	}
+
+	options.AllowDirtySource = true
+	invocation, err := Begin(context.Background(), options)
+	if err != nil {
+		t.Fatalf("begin dirty pass with override: %v", err)
+	}
+	if !invocation.SourceDirty || !strings.Contains(invocation.SourceDirtyStatus, "M app.txt") {
+		t.Fatalf("invocation dirty source context = %#v", invocation)
+	}
+	for _, role := range []string{"pass_state", "charter_freeze", "source_manifest", "workspace_manifest"} {
+		relativePath := invocation.RetainedArtifacts[role]
+		if relativePath == "" || filepath.IsAbs(relativePath) {
+			t.Fatalf("begin retained artifact %s = %q", role, relativePath)
+		}
+		if _, err := os.Stat(filepath.Join(options.StateDir, filepath.FromSlash(relativePath))); err != nil {
+			t.Fatalf("begin retained artifact %s at %s: %v", role, relativePath, err)
+		}
+	}
+
+	state := readPassStateForTest(t, options.StateDir)
+	if !state.Config.AllowDirtySource {
+		t.Fatalf("pass config = %#v, want allow_dirty_source", state.Config)
+	}
+	if !state.SourceDirty || !strings.Contains(state.SourceDirtyStatus, "M app.txt") {
+		t.Fatalf("pass source context = dirty:%t status:%q", state.SourceDirty, state.SourceDirtyStatus)
+	}
+	freezeStage := state.Stages[0]
+	if got, _ := freezeStage.Details["source_dirty"].(bool); !got {
+		t.Fatalf("freeze stage details = %#v, want source_dirty", freezeStage.Details)
+	}
+	manifest := readJSONForTest[freeze.Manifest](t, state.Config.SnapshotManifestPath)
+	if !manifest.Source.GitDirty || !strings.Contains(manifest.Source.GitDirtyStatus, "?? untracked.txt") {
+		t.Fatalf("snapshot source identity = %#v", manifest.Source)
+	}
+
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume dirty pass preflight: %v", err)
+	}
+	if !invocation.SourceDirty {
+		t.Fatalf("preflight invocation lost dirty source context: %#v", invocation)
+	}
+	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
+	if !preflightResult.SourceDirty || preflightResult.SourceDirtyStatus != manifest.Source.GitDirtyStatus {
+		t.Fatalf("preflight dirty source context = %#v, want %#v", preflightResult, manifest.Source)
+	}
+	for role, relativePath := range invocation.RetainedArtifacts {
+		if filepath.IsAbs(relativePath) {
+			t.Fatalf("retained artifact %s has absolute path %q", role, relativePath)
+		}
+		if _, err := os.Stat(filepath.Join(options.StateDir, filepath.FromSlash(relativePath))); err != nil {
+			t.Fatalf("retained artifact %s at %s: %v", role, relativePath, err)
+		}
+	}
+}
+
+func TestPassRetainedArtifactsRejectsAdversarialPreflightEntries(t *testing.T) {
+	stateDir := t.TempDir()
+	retainedPath := filepath.Join(stateDir, "retained.json")
+	if err := os.WriteFile(retainedPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(filepath.Dir(stateDir), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		artifacts map[string]string
+		code      string
+	}{
+		{
+			name:      "absolute path",
+			artifacts: map[string]string{"external": outsidePath},
+			code:      CodeInvalidRetainedArtifact,
+		},
+		{
+			name:      "reserved core role",
+			artifacts: map[string]string{"pass_state": filepath.Base(retainedPath)},
+			code:      CodeReservedRetainedArtifactRole,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := passRetainedArtifacts(Config{StateDir: stateDir}, preflight.Result{RetainedArtifacts: test.artifacts})
+			if err == nil {
+				t.Fatal("pass retained-artifact inventory accepted adversarial preflight entry")
+			}
+			assertValidationCode(t, err, test.code)
+		})
+	}
+}
+
+func TestPassRetainedArtifactsRejectsInStateSymlinkToExternalFile(t *testing.T) {
+	stateDir := t.TempDir()
+	outsidePath := filepath.Join(filepath.Dir(stateDir), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	externalSymlink := filepath.Join(stateDir, "external-link.json")
+	if err := os.Symlink(outsidePath, externalSymlink); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := passRetainedArtifacts(Config{StateDir: stateDir}, preflight.Result{RetainedArtifacts: map[string]string{
+		"external": filepath.Base(externalSymlink),
+	}})
+	if err == nil {
+		t.Fatal("pass retained-artifact inventory accepted an in-state symlink to an external file")
+	}
+	assertValidationCode(t, err, CodeInvalidRetainedArtifact)
+}
+
+func TestPassRetainedArtifactsRequiresMatchingManifestRolePath(t *testing.T) {
+	stateDir := t.TempDir()
+	localManifestPath := filepath.Join(stateDir, "source-snapshot", "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(localManifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localManifestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherManifestPath := filepath.Join(stateDir, "other-manifest.json")
+	if err := os.WriteFile(otherManifestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{StateDir: stateDir, SnapshotManifestPath: localManifestPath}
+
+	_, err := passRetainedArtifacts(config, preflight.Result{RetainedArtifacts: map[string]string{
+		"source_manifest": filepath.Base(otherManifestPath),
+	}})
+	if err == nil {
+		t.Fatal("pass retained-artifact inventory accepted a conflicting source manifest path")
+	}
+	assertValidationCode(t, err, CodeRetainedArtifactRoleConflict)
+
+	artifacts, err := passRetainedArtifacts(config, preflight.Result{RetainedArtifacts: map[string]string{
+		"source_manifest": filepath.ToSlash(filepath.Join("source-snapshot", "manifest.json")),
+	}})
+	if err != nil {
+		t.Fatalf("pass retained-artifact inventory rejected matching source manifest path: %v", err)
+	}
+	if got, want := artifacts["source_manifest"], filepath.ToSlash(filepath.Join("source-snapshot", "manifest.json")); got != want {
+		t.Fatalf("source manifest path = %q, want %q", got, want)
+	}
+}
+
+func TestSaveAndReportRetainedArtifactFailureDoesNotPersistState(t *testing.T) {
+	stateDir := t.TempDir()
+	config := Config{StateDir: stateDir}
+	applyOutputDefaults(&config)
+	writeCanonicalForTest(t, config.Outputs.PreflightPath, preflight.Result{
+		RetainedArtifacts: map[string]string{"missing": "missing.json"},
+	})
+	state := &State{
+		Config:     config,
+		NextAction: NextAction{Type: actionComplete},
+	}
+
+	_, err := saveAndReport(state, "")
+	if err == nil {
+		t.Fatal("saveAndReport accepted a missing retained artifact")
+	}
+	assertValidationCode(t, err, CodeInvalidRetainedArtifact)
+	if _, statErr := os.Stat(config.Outputs.StatePath); !os.IsNotExist(statErr) {
+		t.Fatalf("pass state exists after retained-artifact refusal: %v", statErr)
+	}
+}
+
+func TestBeginRejectsZeroGoalCharterUnlessExplicitlyAllowed(t *testing.T) {
+	options := newBeginOptions(t)
+	writeCanonicalForTest(t, options.CharterPath, charter.Charter{
+		SchemaVersion: charter.SchemaVersion,
+		Goals:         []charter.Statement{},
+		NonGoals:      []charter.Statement{},
+		OwnerEvents: []charter.OwnerEvent{{
+			ID:      "initial-charter",
+			Type:    "charter_initialized",
+			Actor:   "owner",
+			Summary: "Initial owner-authorized charter.",
+		}},
+	})
+
+	if _, err := Begin(context.Background(), options); diag.FromError(err).Code != CodeCharterZeroGoals {
+		t.Fatalf("zero-goal begin error = %v, want %s", err, CodeCharterZeroGoals)
+	} else if !strings.Contains(err.Error(), "vacuous") || !strings.Contains(err.Error(), "-allow-empty-charter") {
+		t.Fatalf("zero-goal diagnostic = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(options.StateDir, StateFileName)); !os.IsNotExist(err) {
+		t.Fatalf("pass state exists after zero-goal refusal: %v", err)
+	}
+
+	options.AllowEmptyCharter = true
+	invocation, err := Begin(context.Background(), options)
+	if err != nil {
+		t.Fatalf("zero-goal begin with override: %v", err)
+	}
+	if invocation.StageRun != stageFreeze {
+		t.Fatalf("override invocation stage = %q, want %q", invocation.StageRun, stageFreeze)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	if !state.Config.AllowEmptyCharter {
+		t.Fatalf("pass config = %#v, want allow_empty_charter", state.Config)
+	}
+	frozen := readJSONForTest[charter.FrozenCharter](t, state.Config.Outputs.CharterFreezePath)
+	if len(frozen.Charter.Goals) != 0 {
+		t.Fatalf("frozen Charter goals = %#v, want empty override Charter", frozen.Charter.Goals)
 	}
 }
 
@@ -1603,6 +1831,14 @@ func TestDriverImportsNoRelayExecutionOrProviderInvocation(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func runPassGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
 }
 

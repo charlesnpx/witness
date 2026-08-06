@@ -334,6 +334,7 @@ func runVerificationPreflight(args []string) error {
 	sourceDir := flags.String("source-dir", "", "reviewed source directory")
 	snapshotDir := flags.String("snapshot-dir", "", "frozen source snapshot directory")
 	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
+	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow freezing a dirty reviewed working tree snapshot; distinct from verification assemble -allow-dirty-source, which permits only a dirty relay launch source")
 	out := flags.String("out", "", "preflight result output path")
 	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
 		return err
@@ -357,6 +358,7 @@ func runVerificationPreflight(args []string) error {
 		SourceDir:             *sourceDir,
 		SnapshotDir:           *snapshotDir,
 		AllowNonGitSource:     *allowNonGitSource,
+		AllowDirtySource:      *allowDirtySource,
 	})
 	if err != nil {
 		return err
@@ -479,7 +481,7 @@ func runVerificationAssemble(args []string) error {
 	relayHome := flags.String("relay-home", "", "convo-relay home directory")
 	launchCWD := flags.String("launch-cwd", "", "relay launch working directory")
 	settingsPath := flags.String("settings", "", "convo-relay settings path")
-	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow dirty relay launch source")
+	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow a dirty relay launch source; distinct from pass begin/verification preflight -allow-dirty-source, which permits freezing a dirty reviewed working tree snapshot")
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness output directory for receipt verification")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	out := flags.String("out", "", "verification manifest output path")
@@ -2124,6 +2126,8 @@ func runPassBegin(args []string) error {
 	sourceDir := flags.String("source-dir", "", "reviewed source directory")
 	snapshotDir := flags.String("snapshot-dir", "", "source snapshot directory; defaults under -state-dir")
 	allowNonGitSource := flags.Bool("allow-non-git-source", false, "allow freezing a non-git source directory")
+	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow freezing a dirty reviewed working tree snapshot; distinct from verification assemble -allow-dirty-source, which permits only a dirty relay launch source")
+	allowEmptyCharter := flags.Bool("allow-empty-charter", false, "allow a review to proceed with an empty Charter")
 	relayPath := flags.String("relay", "", "convo-relay executable path")
 	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
 	backend := flags.String("backend", "", "relay backend suffix for reported verification recipes")
@@ -2157,6 +2161,8 @@ func runPassBegin(args []string) error {
 		SourceDir:             *sourceDir,
 		SnapshotDir:           *snapshotDir,
 		AllowNonGitSource:     *allowNonGitSource,
+		AllowDirtySource:      *allowDirtySource,
+		AllowEmptyCharter:     *allowEmptyCharter,
 		RelayPath:             *relayPath,
 		IntegrationBundlePath: *integrationBundlePath,
 		Backend:               *backend,

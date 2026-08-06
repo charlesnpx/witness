@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/diag"
@@ -114,6 +115,206 @@ func TestCreateRejectsOutputInsideGitRepositoryRoot(t *testing.T) {
 	})
 	if errorCode(err) != CodeOutputInsideSource {
 		t.Fatalf("err = %v, want %s", err, CodeOutputInsideSource)
+	}
+}
+
+func TestCreateDirtyGitWorktreeRequiresOverrideAndCapturesWorkingBytes(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, ".gitignore"), []byte("ignored.txt\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	runGit(t, repo, "add", ".gitignore", "app.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "untracked.txt"), []byte("untracked\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "ignored.txt"), []byte("ignored\n"), 0o644)
+
+	_, err := Create(context.Background(), Options{
+		SourceDir: repo,
+		OutputDir: filepath.Join(t.TempDir(), "rejected"),
+	})
+	if got := errorCode(err); got != CodeSourceDirty {
+		t.Fatalf("dirty freeze error code = %q, want %q; err=%v", got, CodeSourceDirty, err)
+	}
+
+	snapshot, err := Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+	})
+	if err != nil {
+		t.Fatalf("dirty freeze with override: %v", err)
+	}
+	if !snapshot.Manifest.Source.GitDirty {
+		t.Fatalf("source identity = %#v, want dirty working tree metadata", snapshot.Manifest.Source)
+	}
+	if snapshot.Manifest.Source.GitTrackedOnly {
+		t.Fatalf("source identity = %#v, want untracked files recorded", snapshot.Manifest.Source)
+	}
+	for _, status := range []string{"M app.txt", "?? untracked.txt"} {
+		if !strings.Contains(snapshot.Manifest.Source.GitDirtyStatus, status) {
+			t.Fatalf("dirty status %q does not contain %q", snapshot.Manifest.Source.GitDirtyStatus, status)
+		}
+	}
+
+	entries := map[string]FileEntry{}
+	for _, entry := range snapshot.Manifest.Files {
+		entries[entry.Path] = entry
+	}
+	for path, want := range map[string][]byte{
+		"app.txt":       []byte("working-copy\n"),
+		"untracked.txt": []byte("untracked\n"),
+	} {
+		entry, found := entries[path]
+		if !found {
+			t.Fatalf("snapshot files = %#v, missing %s", snapshot.Manifest.Files, path)
+		}
+		if got := entry.Digest; got != digest.RawBytes(want) {
+			t.Fatalf("snapshot digest for %s = %s, want %s", path, got, digest.RawBytes(want))
+		}
+		blob, err := os.ReadFile(filepath.Join(filepath.Dir(snapshot.ManifestPath), filepath.FromSlash(entry.Blob)))
+		if err != nil {
+			t.Fatalf("read snapshot blob for %s: %v", path, err)
+		}
+		if !bytes.Equal(blob, want) {
+			t.Fatalf("snapshot blob for %s = %q, want %q", path, blob, want)
+		}
+	}
+	if _, found := entries["ignored.txt"]; found {
+		t.Fatalf("snapshot unexpectedly included ignored file: %#v", entries["ignored.txt"])
+	}
+	if digest, err := ManifestDigest(snapshot.Manifest); err != nil || digest != snapshot.ManifestDigest {
+		t.Fatalf("snapshot manifest digest = %q, %v; want %q", digest, err, snapshot.ManifestDigest)
+	}
+}
+
+func TestCreateRejectsDirtySparseCheckout(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "omitted.txt"), []byte("omitted\n"), 0o644)
+	runGit(t, repo, "add", "app.txt", "omitted.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	runGit(t, repo, "sparse-checkout", "set", "--no-cone", "app.txt")
+
+	taggedPaths, err := gitOutput(context.Background(), repo, "ls-files", "-t", "-z")
+	if err != nil {
+		t.Fatalf("inspect sparse index: %v", err)
+	}
+	if !strings.Contains(taggedPaths, "S omitted.txt\x00") {
+		t.Fatalf("sparse index tags = %q, want skip-worktree omitted.txt", taggedPaths)
+	}
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	_, err = Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+	})
+	if got := errorCode(err); got != CodeSourceSparseCheckout {
+		t.Fatalf("dirty sparse checkout error code = %q, want %q; err=%v", got, CodeSourceSparseCheckout, err)
+	}
+	if !strings.Contains(err.Error(), "full checkout") {
+		t.Fatalf("dirty sparse checkout diagnostic = %v, want full-checkout guidance", err)
+	}
+}
+
+func TestCreateRejectsDirtyGitWorktreeContentMutationDuringCapture(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	runGit(t, repo, "add", "app.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	_, err := Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+		afterDirtySourceCapture: func() {
+			mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("rewritten-working-copy\n"), 0o644)
+		},
+	})
+	if got := errorCode(err); got != CodeSourceChangedDuringCapture {
+		t.Fatalf("freeze error code = %q, want %q; err=%v", got, CodeSourceChangedDuringCapture, err)
+	}
+	if !strings.Contains(err.Error(), "quiesce") || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("freeze diagnostic = %v, want quiesce-and-retry guidance", err)
+	}
+}
+
+func TestCreateRejectsDirtyGitWorktreeHeadMutationDuringCapture(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	runGit(t, repo, "add", "app.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	_, err := Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+		afterDirtySourceCapture: func() {
+			runGit(t, repo, "commit", "--allow-empty", "-m", "advance HEAD")
+		},
+	})
+	if got := errorCode(err); got != CodeSourceChangedDuringCapture {
+		t.Fatalf("freeze error code = %q, want %q; err=%v", got, CodeSourceChangedDuringCapture, err)
+	}
+}
+
+func TestVerifyDirtyGitCaptureRejectsCleanTrackedFileMutationRestoredBeforeInventory(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	cleanPath := filepath.Join(repo, "clean.txt")
+	cleanBytes := []byte("clean\n")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	mustWriteFile(t, cleanPath, cleanBytes, 0o644)
+	runGit(t, repo, "add", "app.txt", "clean.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	before, err := collectDirtyGitDerivation(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("collect before capture derivation: %v", err)
+	}
+
+	// The clean file changes while bytes are captured, then the existing
+	// post-capture seam restores its Git-visible state before the re-inventory.
+	mustWriteFile(t, cleanPath, []byte("transient-captured-bytes\n"), 0o644)
+	entries := make([]FileEntry, 0, len(before.files))
+	for _, item := range before.sourceFiles() {
+		data, size, err := readSnapshotBytes(repo, item)
+		if err != nil {
+			t.Fatalf("capture %s: %v", item.path, err)
+		}
+		sum := digest.RawBytes(data)
+		entries = append(entries, FileEntry{
+			Path:   item.path,
+			Mode:   item.mode,
+			Size:   strictjson.Int64(size),
+			Digest: sum,
+			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", strings.TrimPrefix(sum, digest.Prefix))),
+		})
+	}
+
+	err = verifyDirtyGitCapture(context.Background(), repo, before, entries, func() {
+		mustWriteFile(t, cleanPath, cleanBytes, 0o644)
+	})
+	if got := errorCode(err); got != CodeSourceChangedDuringCapture {
+		t.Fatalf("freeze error code = %q, want %q; err=%v", got, CodeSourceChangedDuringCapture, err)
 	}
 }
 
