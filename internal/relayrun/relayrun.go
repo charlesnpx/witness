@@ -72,17 +72,22 @@ type Result struct {
 }
 
 // LaunchRecord is the bounded witness-side evidence for one relay run command.
-// The stdout and stderr fields each retain at most launchCaptureLimitBytes of
-// source output, split evenly between the head and tail when truncated.
+// Stdout and Stderr each retain at most launchCaptureLimitBytes of source
+// output, split evenly between the head and tail when truncated. They are raw
+// bytes (base64-encoded in JSON) so retained output stays byte-exact.
 type LaunchRecord struct {
-	Argv             []string `json:"argv"`
-	WorkingDirectory string   `json:"working_directory"`
-	ExitCode         int      `json:"exit_code"`
-	StartFailed      bool     `json:"start_failed"`
-	Stdout           string   `json:"stdout"`
-	Stderr           string   `json:"stderr"`
-	StdoutTruncated  bool     `json:"stdout_truncated"`
-	StderrTruncated  bool     `json:"stderr_truncated"`
+	Argv             []string       `json:"argv"`
+	WorkingDirectory string         `json:"working_directory"`
+	ExitCode         int            `json:"exit_code"`
+	StartFailed      bool           `json:"start_failed"`
+	Stdout           []byte         `json:"stdout_b64"`
+	Stderr           []byte         `json:"stderr_b64"`
+	StdoutDigest     string         `json:"stdout_digest"`
+	StderrDigest     string         `json:"stderr_digest"`
+	StdoutBytes      strictjson.Int `json:"stdout_bytes"`
+	StderrBytes      strictjson.Int `json:"stderr_bytes"`
+	StdoutTruncated  bool           `json:"stdout_truncated"`
+	StderrTruncated  bool           `json:"stderr_truncated"`
 }
 
 type RunRecord struct {
@@ -261,6 +266,9 @@ func requireValidRunRecord(record RunRecord) error {
 	if strings.TrimSpace(record.BatchID) == "" {
 		return diag.New(CodeInvalidRunRecord, "relay run record batch_id is required.")
 	}
+	if strings.TrimSpace(record.RecipeID) == "" {
+		return diag.New(CodeInvalidRunRecord, "relay run record recipe_id is required.")
+	}
 	if record.ProviderInvoked != ProviderInvokedTrue && record.ProviderInvoked != ProviderInvokedFalse && record.ProviderInvoked != ProviderInvokedUnknown {
 		return diag.New(CodeInvalidRunRecord, "relay run record provider_invoked is unsupported.", diag.WithDetail("value", record.ProviderInvoked))
 	}
@@ -345,18 +353,22 @@ func launchRecord(result relayclient.CommandResult, workingDirectory string) *La
 		StartFailed:      result.StartFailed,
 		Stdout:           stdout,
 		Stderr:           stderr,
+		StdoutDigest:     digest.RawBytes(result.Stdout),
+		StderrDigest:     digest.RawBytes(result.Stderr),
+		StdoutBytes:      strictjson.Int(len(result.Stdout)),
+		StderrBytes:      strictjson.Int(len(result.Stderr)),
 		StdoutTruncated:  stdoutTruncated,
 		StderrTruncated:  stderrTruncated,
 	}
 }
 
-func boundedLaunchOutput(value []byte) (string, bool) {
+func boundedLaunchOutput(value []byte) ([]byte, bool) {
 	if len(value) <= launchCaptureLimitBytes {
-		return string(value), false
+		return append([]byte(nil), value...), false
 	}
 	head := launchCaptureLimitBytes / 2
 	tail := launchCaptureLimitBytes - head
-	return string(append(append([]byte(nil), value[:head]...), value[len(value)-tail:]...)), true
+	return append(append([]byte(nil), value[:head]...), value[len(value)-tail:]...), true
 }
 
 func runResultFromFailedCommand(result relayclient.CommandResult) map[string]any {

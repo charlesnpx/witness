@@ -1,10 +1,10 @@
 package planning
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/charlesnpx/witness/internal/changesurface"
@@ -14,17 +14,19 @@ import (
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/portable"
+	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (
-	CodeMissingEvidenceRef   = "assemble_missing_evidence_ref"
-	CodeMissingBatch         = "assemble_missing_batch"
-	CodeInvalidAssembleBatch = "assemble_invalid_batch"
-	CodeInvalidRelay         = "assemble_invalid_relay_verification"
-	CodeInvalidReceipt       = "assemble_invalid_execution_receipt"
-	CodeInvalidManifest      = "assemble_invalid_manifest"
-	CodeInvalidCompatibility = "assemble_invalid_relay_compatibility"
-	CodeInvalidPlanDigest    = "assemble_invalid_plan_digest"
+	CodeMissingEvidenceRef    = "assemble_missing_evidence_ref"
+	CodeMissingBatch          = "assemble_missing_batch"
+	CodeInvalidAssembleBatch  = "assemble_invalid_batch"
+	CodeInvalidRelay          = "assemble_invalid_relay_verification"
+	CodeInvalidReceipt        = "assemble_invalid_execution_receipt"
+	CodeInvalidManifest       = "assemble_invalid_manifest"
+	CodeInvalidCompatibility  = "assemble_invalid_relay_compatibility"
+	CodeInvalidPlanDigest     = "assemble_invalid_plan_digest"
+	CodeInvalidRelayRunRecord = "assemble_invalid_relay_run_record"
 )
 
 type AssembleOptions struct {
@@ -161,6 +163,17 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			BatchDigest: planned.BatchDigest,
 		}
 		relay, hasRelay := relayByID[planned.BatchID]
+		if hasRelay {
+			if relayDiagnostics := validateRelayRunRecordEvidence(planned, relay); len(relayDiagnostics) > 0 {
+				record.Status = contracts.RecordStatusFailed
+				record.FailureReason = "relay_run_record_provenance_mismatch"
+				diagnostics = append(diagnostics, relayDiagnostics...)
+				result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
+				attachRelayBatchMetadata(&manifest, planned, RelayEvidence{}, relayLaunchStatus)
+				manifest.Batches = append(manifest.Batches, record)
+				continue
+			}
+		}
 		attachRelayBatchMetadata(&manifest, planned, relay, relayLaunchStatus)
 		batchEvidence, hasBatch := batchesByID[planned.BatchID]
 		if !hasBatch {
@@ -441,11 +454,8 @@ func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned 
 }
 
 func relayUnavailableFailureReason(relay RelayEvidence) string {
-	for _, record := range relay.RunRecords {
-		consumesBatch, _ := record["consumes_batch"].(bool)
-		if consumesBatch {
-			return "relay_run_recorded_unavailable"
-		}
+	if consumingRelayRunRecord(relay.RunRecords) != nil {
+		return "relay_run_recorded_unavailable"
 	}
 	for _, record := range relay.RunRecords {
 		status, _ := record["status"].(string)
@@ -458,6 +468,117 @@ func relayUnavailableFailureReason(relay RelayEvidence) string {
 		return "relay_run_recorded_unavailable"
 	}
 	return "relay_verification_unavailable"
+}
+
+func consumingRelayRunRecord(records []map[string]any) map[string]any {
+	for _, record := range records {
+		consumesBatch, _ := record["consumes_batch"].(bool)
+		if consumesBatch {
+			return record
+		}
+	}
+	return nil
+}
+
+func validateRelayRunRecordEvidence(planned BatchPlan, relay RelayEvidence) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	expectedFamily := strings.TrimSpace(planned.RecipeFamily)
+	expectedBackend := strings.TrimSpace(relay.Backend)
+	consumingRecordIndexes := make([]int, 0, 1)
+	for index, record := range relay.RunRecords {
+		recordBatchID, batchIDOK := record["batch_id"].(string)
+		if !batchIDOK || strings.TrimSpace(recordBatchID) != planned.BatchID {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record batch_id does not bind to the planned batch.",
+				diag.WithDetail("actual_batch_id", recordBatchID),
+			))
+		}
+		recipeID, recipeIDOK := record["recipe_id"].(string)
+		if !recipeIDOK || strings.TrimSpace(recipeID) == "" {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record recipe_id is required for planned-batch provenance.",
+			))
+			continue
+		}
+		recipeFamily, backend := relayRunRecordRecipeIdentity(recipeID)
+		if expectedFamily != "" && recipeFamily != expectedFamily {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record recipe_id does not match the planned recipe family.",
+				diag.WithDetail("actual_recipe_id", recipeID),
+				diag.WithDetail("actual_recipe_family", recipeFamily),
+				diag.WithDetail("expected_recipe_family", expectedFamily),
+			))
+		}
+		if expectedBackend != "" && backend != expectedBackend {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record recipe_id does not match the expected relay backend.",
+				diag.WithDetail("actual_recipe_id", recipeID),
+				diag.WithDetail("actual_backend", backend),
+				diag.WithDetail("expected_backend", expectedBackend),
+			))
+		}
+		consumesBatch, consumesBatchOK := record["consumes_batch"].(bool)
+		if !consumesBatchOK {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"relay run record consumes_batch must be a boolean.",
+			))
+			continue
+		}
+		if consumesBatch {
+			consumingRecordIndexes = append(consumingRecordIndexes, index)
+			continue
+		}
+		if !relayRunRecordIsStartFailure(record) {
+			diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+				planned.BatchID,
+				index,
+				"non-consuming relay run records must be launch_failed records with relay_launch.start_failed=true.",
+			))
+		}
+	}
+	if len(consumingRecordIndexes) > 1 {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidRelayRunRecord,
+			"relay run records contain multiple consuming attempts for one batch; refusing reviewer-shopping evidence.",
+			diag.WithDetail("batch_id", planned.BatchID),
+			diag.WithDetail("consuming_record_indexes", consumingRecordIndexes),
+		)))
+	}
+	return diagnostics
+}
+
+func invalidRelayRunRecordDiagnostic(batchID string, recordIndex int, message string, options ...diag.Option) diag.Diagnostic {
+	options = append(options, diag.WithDetail("batch_id", batchID), diag.WithDetail("record_index", recordIndex))
+	return diag.FromError(diag.New(CodeInvalidRelayRunRecord, message, options...))
+}
+
+func relayRunRecordRecipeIdentity(recipeID string) (string, string) {
+	recipeID = strings.TrimSpace(recipeID)
+	for _, backend := range []string{"codex", "claude"} {
+		suffix := "-" + backend
+		if strings.HasSuffix(recipeID, suffix) {
+			return strings.TrimSuffix(recipeID, suffix), backend
+		}
+	}
+	return recipeID, ""
+}
+
+func relayRunRecordIsStartFailure(record map[string]any) bool {
+	status, _ := record["status"].(string)
+	providerInvoked, _ := record["provider_invoked"].(string)
+	launch, _ := record["relay_launch"].(map[string]any)
+	startFailed, _ := launch["start_failed"].(bool)
+	return status == "launch_failed" && providerInvoked == "false" && startFailed
 }
 
 func cloneRelayRunRecords(records []map[string]any) []map[string]any {
@@ -575,6 +696,40 @@ func appendRelayLaunchStreamSummary(summary, launch map[string]any, stream strin
 	digestKey := stream + "_digest"
 	bytesKey := stream + "_bytes"
 	truncatedKey := stream + "_truncated"
+	if captureDigest, digestOK := launch[digestKey].(string); digestOK && digest.WellFormed(captureDigest) {
+		if captureBytes, bytesOK := relayLaunchInteger(launch[bytesKey], true); bytesOK {
+			summary[digestKey] = captureDigest
+			summary[bytesKey] = captureBytes
+			truncated, truncatedOK := launch[truncatedKey].(bool)
+			if !truncatedOK {
+				truncated = false
+			}
+			summary[truncatedKey] = truncated
+			return
+		}
+	}
+	if encodedCapture, ok := launch[stream+"_b64"].(string); ok {
+		if capture, err := base64.StdEncoding.DecodeString(encodedCapture); err == nil {
+			summary[digestKey] = digest.RawBytes(capture)
+			summary[bytesKey] = len(capture)
+			truncated, ok := launch[truncatedKey].(bool)
+			if !ok {
+				truncated = false
+			}
+			summary[truncatedKey] = truncated
+			return
+		}
+	}
+	if capture, ok := launch[stream].([]byte); ok {
+		summary[digestKey] = digest.RawBytes(capture)
+		summary[bytesKey] = len(capture)
+		truncated, ok := launch[truncatedKey].(bool)
+		if !ok {
+			truncated = false
+		}
+		summary[truncatedKey] = truncated
+		return
+	}
 	if capture, ok := launch[stream].(string); ok {
 		summary[digestKey] = digest.RawBytes([]byte(capture))
 		summary[bytesKey] = len([]byte(capture))
@@ -604,11 +759,13 @@ func relayLaunchInteger(value any, nonNegative bool) (int, bool) {
 	case int64:
 		result = value
 	case json.Number:
-		parsed, err := strconv.ParseInt(value.String(), 10, 64)
+		parsed, err := strictjson.ParseInt64JSON([]byte(value.String()))
 		if err != nil {
 			return 0, false
 		}
 		result = parsed
+	case strictjson.Int:
+		result = int64(value)
 	default:
 		return 0, false
 	}

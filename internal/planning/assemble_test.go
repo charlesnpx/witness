@@ -2,6 +2,7 @@ package planning
 
 import (
 	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,7 +101,7 @@ func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
 	}
 }
 
-func TestAssembleSummarizesRelayCapturesAndPrefersConsumedRunRecord(t *testing.T) {
+func TestAssembleRetainsLaunchFailureAndPrefersConsumingRetry(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
 	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
@@ -122,20 +123,33 @@ func TestAssembleSummarizesRelayCapturesAndPrefersConsumedRunRecord(t *testing.T
 			Document: batch.Document,
 		}},
 		RelayResults: []RelayEvidence{{
-			BatchID: batch.Plan.BatchID,
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
 			RunRecords: []map[string]any{
 				{
+					"schema_version":   "witness-relay-verification-run-v2",
+					"batch_id":         batch.Plan.BatchID,
+					"recipe_id":        batch.Plan.RecipeFamily + "-codex",
 					"consumes_batch":   false,
 					"status":           "launch_failed",
 					"provider_invoked": "false",
 					"relay_launch": map[string]any{
-						"stdout":           stdout,
-						"stderr":           stderr,
+						"stdout_b64":       base64.StdEncoding.EncodeToString([]byte(stdout)),
+						"stderr_b64":       base64.StdEncoding.EncodeToString([]byte(stderr)),
+						"stdout_digest":    digest.RawBytes([]byte(stdout)),
+						"stderr_digest":    digest.RawBytes([]byte(stderr)),
+						"stdout_bytes":     len([]byte(stdout)),
+						"stderr_bytes":     len([]byte(stderr)),
+						"start_failed":     true,
 						"stdout_truncated": true,
 						"stderr_truncated": false,
 					},
 				},
 				{
+					"schema_version":   "witness-relay-verification-run-v2",
+					"batch_id":         batch.Plan.BatchID,
+					"recipe_id":        batch.Plan.RecipeFamily + "-codex",
 					"consumes_batch":   true,
 					"status":           contracts.RecordStatusUnavailable,
 					"provider_invoked": "unknown",
@@ -177,6 +191,59 @@ func TestAssembleSummarizesRelayCapturesAndPrefersConsumedRunRecord(t *testing.T
 	}
 	if launch["stderr_digest"] != digest.RawBytes([]byte(stderr)) || launch["stderr_bytes"] != len([]byte(stderr)) || launch["stderr_truncated"] != false {
 		t.Fatalf("stderr metadata = %#v", launch)
+	}
+}
+
+func TestAssembleRejectsRunRecordRecipeMismatchToPlannedBatch(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
+			RunRecords: []map[string]any{{
+				"schema_version":   "witness-relay-verification-run-v2",
+				"batch_id":         batch.Plan.BatchID,
+				"recipe_id":        "economy-equivalence-v2-codex",
+				"status":           contracts.RecordStatusUnavailable,
+				"provider_invoked": "unknown",
+				"consumes_batch":   true,
+			}},
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a run record whose recipe does not match the planned batch")
+	}
+	if result == nil || len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].FailureReason != "relay_run_record_provenance_mismatch" {
+		t.Fatalf("result = %#v, want failed run-record provenance", result)
+	}
+	diagnostics := err.(*ValidationError).Diagnostics
+	found := false
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == CodeInvalidRelayRunRecord && diagnostic.Details["expected_recipe_family"] == batch.Plan.RecipeFamily {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want planned recipe-family mismatch", diagnostics)
 	}
 }
 

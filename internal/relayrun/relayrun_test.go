@@ -70,7 +70,7 @@ func TestRunBatchesNonzeroWithoutArtifactsConsumesBatch(t *testing.T) {
 	if len(launch.Argv) < 2 || launch.Argv[0] != "fake-relay" || launch.Argv[1] != "run" || !containsArgPair(launch.Argv, "--launch-cwd", dir) {
 		t.Fatalf("argv = %#v, want fake relay run with launch cwd", launch.Argv)
 	}
-	if launch.Stdout != `{"message":"auth failed"}` || launch.Stderr != "relay authentication failed" {
+	if !bytes.Equal(launch.Stdout, []byte(`{"message":"auth failed"}`)) || !bytes.Equal(launch.Stderr, []byte("relay authentication failed")) {
 		t.Fatalf("launch captures = %#v", launch)
 	}
 	if len(record.Diagnostics) != 1 || record.Diagnostics[0].Code != CodeRelayRunFailed {
@@ -130,8 +130,43 @@ func TestRunBatchesBoundsLaunchOutput(t *testing.T) {
 	if !launch.StdoutTruncated || !launch.StderrTruncated || len(launch.Stdout) != launchCaptureLimitBytes || len(launch.Stderr) != launchCaptureLimitBytes {
 		t.Fatalf("bounded launch captures = %#v", launch)
 	}
-	if !strings.HasPrefix(launch.Stdout, "hhhh") || !strings.HasSuffix(launch.Stdout, "tttt") || !strings.HasPrefix(launch.Stderr, "xxxx") || !strings.HasSuffix(launch.Stderr, "zzzz") {
+	if !bytes.HasPrefix(launch.Stdout, []byte("hhhh")) || !bytes.HasSuffix(launch.Stdout, []byte("tttt")) || !bytes.HasPrefix(launch.Stderr, []byte("xxxx")) || !bytes.HasSuffix(launch.Stderr, []byte("zzzz")) {
 		t.Fatalf("launch captures did not retain head and tail")
+	}
+	if launch.StdoutDigest != digest.RawBytes(stdout) || int(launch.StdoutBytes) != len(stdout) || launch.StderrDigest != digest.RawBytes(stderr) || int(launch.StderrBytes) != len(stderr) {
+		t.Fatalf("launch raw summaries = %#v", launch)
+	}
+}
+
+func TestRunRecordRoundTripsInvalidUTF8LaunchCaptureBytes(t *testing.T) {
+	stdout := []byte{0xff, 0xfe, 'o', 'k', 0xc3, 0x28}
+	stderr := []byte{'e', 0x80, 'r'}
+	record := RunRecord{
+		SchemaVersion:   RunRecordSchema,
+		BatchID:         "defect-batch-1",
+		Status:          RunStatusLaunchFailed,
+		RecipeID:        "witness-falsify-v2-codex",
+		ProviderInvoked: ProviderInvokedFalse,
+		ConsumesBatch:   false,
+		RelayLaunch:     launchRecord(relayclient.CommandResult{Command: "fake-relay", ExitCode: -1, StartFailed: true, Stdout: stdout, Stderr: stderr}, "/tmp/workspace"),
+	}
+	data, err := contracts.CanonicalBytes(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := ReadRunRecordsBytes(data)
+	if err != nil {
+		t.Fatalf("ReadRunRecordsBytes: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RelayLaunch == nil {
+		t.Fatalf("runs = %#v, want one launch record", runs)
+	}
+	launch := runs[0].RelayLaunch
+	if !bytes.Equal(launch.Stdout, stdout) || !bytes.Equal(launch.Stderr, stderr) {
+		t.Fatalf("round-tripped captures = %#v, want exact raw bytes", launch)
+	}
+	if launch.StdoutDigest != digest.RawBytes(stdout) || int(launch.StdoutBytes) != len(stdout) || launch.StderrDigest != digest.RawBytes(stderr) || int(launch.StderrBytes) != len(stderr) {
+		t.Fatalf("round-tripped raw summaries = %#v", launch)
 	}
 }
 
@@ -162,6 +197,28 @@ func TestReadRunRecordsBytesAcceptsV2Index(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].BatchID != "defect-batch-1" || runs[0].Status != RunStatusLaunchFailed {
 		t.Fatalf("runs = %#v", runs)
+	}
+}
+
+func TestReadRunRecordsBytesRejectsEmptyRecipeID(t *testing.T) {
+	data, err := contracts.CanonicalBytes(RunRecord{
+		SchemaVersion:   RunRecordSchema,
+		BatchID:         "defect-batch-1",
+		Status:          RunStatusLaunchFailed,
+		ProviderInvoked: ProviderInvokedFalse,
+		ConsumesBatch:   false,
+		RelayLaunch: &LaunchRecord{
+			Argv:             []string{"fake-relay", "run", "--json"},
+			WorkingDirectory: "/tmp/workspace",
+			ExitCode:         -1,
+			StartFailed:      true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRunRecordsBytes(data); err == nil || !strings.Contains(err.Error(), "recipe_id is required") {
+		t.Fatalf("ReadRunRecordsBytes error = %v, want missing recipe_id rejection", err)
 	}
 }
 

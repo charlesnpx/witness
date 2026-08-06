@@ -35,7 +35,7 @@ const (
 	verificationPlanMissingPreflight                = "verification_plan_missing_preflight"
 	verificationPlanInvalidPreflight                = "verification_plan_invalid_preflight"
 	verificationAssembleInvalidRunRecordConsumption = "verification_assemble_invalid_run_record_consumption"
-	verificationAssembleMixedRunRecordConsumption   = "verification_assemble_mixed_run_record_consumption"
+	verificationAssembleMultipleConsumingRunRecords = "verification_assemble_multiple_consuming_run_records"
 	verificationAssembleConflictingRelayProvenance  = "verification_assemble_conflicting_relay_provenance"
 
 	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
@@ -1930,16 +1930,17 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEv
 
 func requireMatchingRelayEvidenceProvenance(batchID string, current, incoming planning.RelayEvidence) error {
 	for _, field := range []struct {
-		name     string
-		current  string
-		incoming string
+		name              string
+		current           string
+		incoming          string
+		requireNonemptyID bool
 	}{
-		{name: "recipe_family", current: current.RecipeFamily, incoming: incoming.RecipeFamily},
-		{name: "backend", current: current.Backend, incoming: incoming.Backend},
+		{name: "recipe_family", current: current.RecipeFamily, incoming: incoming.RecipeFamily, requireNonemptyID: true},
+		{name: "backend", current: current.Backend, incoming: incoming.Backend, requireNonemptyID: true},
 		{name: "portable_export_dir", current: current.PortableExportDir, incoming: incoming.PortableExportDir},
 		{name: "portable_export_digest", current: relayPortableExportDigest(current.PortableExportRef), incoming: relayPortableExportDigest(incoming.PortableExportRef)},
 	} {
-		if conflictingRelayProvenanceValue(field.current, field.incoming) {
+		if conflictingRelayProvenanceValue(field.current, field.incoming, field.requireNonemptyID) {
 			return conflictingRelayProvenance(batchID, field.name)
 		}
 	}
@@ -1967,9 +1968,12 @@ func relayPortableExportDigest(ref *contracts.ArtifactRef) string {
 	return strings.TrimSpace(ref.Digest)
 }
 
-func conflictingRelayProvenanceValue(current, incoming string) bool {
+func conflictingRelayProvenanceValue(current, incoming string, requireNonemptyID bool) bool {
 	current = strings.TrimSpace(current)
 	incoming = strings.TrimSpace(incoming)
+	if requireNonemptyID {
+		return current != incoming
+	}
 	return current != "" && incoming != "" && current != incoming
 }
 
@@ -1987,7 +1991,7 @@ func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[st
 	for _, source := range sources {
 		records = append(records, source...)
 	}
-	var consuming, nonConsuming bool
+	consumingRecordIndexes := make([]int, 0, 1)
 	for index, record := range records {
 		value, present := record["consumes_batch"]
 		consumesBatch, ok := value.(bool)
@@ -2000,19 +2004,35 @@ func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[st
 			)
 		}
 		if consumesBatch {
-			consuming = true
-		} else {
-			nonConsuming = true
+			consumingRecordIndexes = append(consumingRecordIndexes, index)
+			continue
+		}
+		if !isStartFailureRunRecord(record) {
+			return nil, diag.New(
+				verificationAssembleInvalidRunRecordConsumption,
+				"non-consuming relay run records must be launch_failed records with relay_launch.start_failed=true.",
+				diag.WithDetail("batch_id", batchID),
+				diag.WithDetail("record_index", index),
+			)
 		}
 	}
-	if consuming && nonConsuming {
+	if len(consumingRecordIndexes) > 1 {
 		return nil, diag.New(
-			verificationAssembleMixedRunRecordConsumption,
-			"relay run records for one batch mix consuming and non-consuming evidence; refusing to merge conflicting coverage.",
+			verificationAssembleMultipleConsumingRunRecords,
+			"relay run records contain multiple consuming attempts for one batch; refusing reviewer-shopping evidence.",
 			diag.WithDetail("batch_id", batchID),
+			diag.WithDetail("consuming_record_indexes", consumingRecordIndexes),
 		)
 	}
 	return records, nil
+}
+
+func isStartFailureRunRecord(record map[string]any) bool {
+	status, _ := record["status"].(string)
+	providerInvoked, _ := record["provider_invoked"].(string)
+	launch, _ := record["relay_launch"].(map[string]any)
+	startFailed, _ := launch["start_failed"].(bool)
+	return status == relayrun.RunStatusLaunchFailed && providerInvoked == relayrun.ProviderInvokedFalse && startFailed
 }
 
 func readReceipts(paths []string) ([]contracts.ExecutionReceipt, error) {
