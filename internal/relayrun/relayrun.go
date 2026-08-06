@@ -52,14 +52,23 @@ type Options struct {
 	IntegrationBundlePath string
 	CharterPath           string
 	ArtifactPaths         []string
-	OutputDir             string
-	Backend               string
-	WorkspaceIsolation    string
-	RelayHome             string
-	LaunchCWD             string
-	SettingsPath          string
-	AllowDirtySource      bool
-	Runner                relayclient.Runner
+	// ArtifactDigests aligns with ArtifactPaths and retains one digest for
+	// every artifact supplied to relay. ArtifactDigest remains the legacy
+	// single-artifact planned snapshot digest.
+	ArtifactDigests []string
+	// The planned digests are retained with the run record, rather than passed
+	// to relay. Relay's --input contract takes plain paths.
+	CharterDigest           string
+	ArtifactDigest          string
+	IntegrationBundleDigest string
+	OutputDir               string
+	Backend                 string
+	WorkspaceIsolation      string
+	RelayHome               string
+	LaunchCWD               string
+	SettingsPath            string
+	AllowDirtySource        bool
+	Runner                  relayclient.Runner
 }
 
 type BatchInput struct {
@@ -131,6 +140,7 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			ProviderInvoked: ProviderInvokedUnknown,
 			ConsumesBatch:   true,
 		}
+		record.InputBindings = recordedInputBindings(options, batch)
 		if strings.TrimSpace(batch.Path) == "" {
 			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeMissingBatchPath, "relay verification requires a persisted verification-batch path.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
 			result.Runs = append(result.Runs, record)
@@ -141,12 +151,12 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		record.InputBindings = inputBindings(options.CharterPath, batch.Path, options.ArtifactPaths)
+		launchInputBindings := inputBindings(options.CharterPath, batch.Path, options.ArtifactPaths)
 		runResult, commandResult, err := client.RunRecipeWithCommandResult(ctx, relayclient.RunRecipeOptions{
 			Task:                  relayTask(batch),
 			RecipeID:              record.RecipeID,
 			IntegrationBundlePath: options.IntegrationBundlePath,
-			InputBindings:         record.InputBindings,
+			InputBindings:         launchInputBindings,
 			WorkspaceIsolation:    defaultWorkspaceIsolation(options.WorkspaceIsolation),
 			RelayHome:             options.RelayHome,
 			LaunchCWD:             options.LaunchCWD,
@@ -267,6 +277,23 @@ func ReadRunRecordsBytes(data []byte) ([]RunRecord, error) {
 			diag.WithDetail("index_schema", SchemaVersion),
 		)
 	}
+}
+
+// ManifestRunRecordMetadata produces the local-safe evidence projection used
+// by assembly consumers. ReadRunRecordsBytes must validate the record first;
+// this helper retains only provenance metadata and a digest of the full local
+// record, never raw launch output or provider payloads.
+func ManifestRunRecordMetadata(record RunRecord) (map[string]any, error) {
+	data, err := contracts.CanonicalBytes(record)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := strictjson.DecodeBytes[map[string]any](data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, err
+	}
+	metadata["run_record_digest"] = digest.RawBytes(data)
+	return planning.SanitizeRelayRunRecordMetadata(metadata), nil
 }
 
 func requireValidRunRecord(record RunRecord, source ...map[string]any) error {
@@ -864,6 +891,60 @@ func inputBindings(charterPath string, batchPath string, artifactPaths []string)
 		}
 	}
 	return bindings
+}
+
+// recordedInputBindings retains the frozen input provenance that pass resume
+// validates. The relay launch intentionally receives inputBindings instead:
+// relay's documented --input form is name=path, not name=path@digest.
+func recordedInputBindings(options Options, batch BatchInput) []string {
+	bindings := make([]string, 0, 3+len(options.ArtifactPaths))
+	bindings = appendRecordedInputBinding(bindings, "charter", options.CharterPath, firstPlannedDigest(options.CharterDigest, batch.Plan.CharterDigest))
+	bindings = appendRecordedInputBinding(bindings, "findings", batch.Path, batch.Plan.BatchDigest)
+	firstArtifact := true
+	for index, path := range options.ArtifactPaths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		bindings = appendRecordedInputBinding(bindings, "artifact", path, recordedArtifactDigest(options, batch, index, path, firstArtifact))
+		firstArtifact = false
+	}
+	bindings = appendRecordedInputBinding(bindings, "integration_bundle", options.IntegrationBundlePath, firstPlannedDigest(options.IntegrationBundleDigest, batch.Plan.IntegrationBundleDigest))
+	return bindings
+}
+
+func recordedArtifactDigest(options Options, batch BatchInput, index int, path string, firstArtifact bool) string {
+	if index < len(options.ArtifactDigests) {
+		if valueDigest := strings.TrimSpace(options.ArtifactDigests[index]); valueDigest != "" {
+			return valueDigest
+		}
+	}
+	if firstArtifact {
+		return firstPlannedDigest(options.ArtifactDigest, batch.Plan.PreflightSnapshotDigest, batch.Plan.ArtifactDigest)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return digest.RawBytes(data)
+}
+
+func appendRecordedInputBinding(bindings []string, name string, path string, valueDigest string) []string {
+	path = strings.TrimSpace(path)
+	valueDigest = strings.TrimSpace(valueDigest)
+	if path == "" || valueDigest == "" {
+		return bindings
+	}
+	return append(bindings, name+"="+path+"@"+valueDigest)
+}
+
+func firstPlannedDigest(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func relayTask(batch BatchInput) string {

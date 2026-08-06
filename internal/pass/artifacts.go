@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/planning"
@@ -60,8 +61,31 @@ func assembleResultPath(config Config) string {
 	return filepath.Join(config.StateDir, "verification", "assemble-result.json")
 }
 
-func retainedIntegrationBundlePath(config Config) string {
-	return filepath.Join(config.StateDir, "integration-bundle.json")
+func retainedIntegrationBundlePath(config Config) (string, error) {
+	if retainedIntegrationBundleBodyExists(config) {
+		return retainedIntegrationBundleBodyPath(config), nil
+	}
+	return "", diag.New(
+		CodeInvalidState,
+		"pass state predates directly consumable retained integration bundle bodies or is missing its retained body; refusing to bind the retention envelope to relay.",
+		diag.WithDetail("expected_body_path", retainedIntegrationBundleBodyPath(config)),
+		diag.WithDetail("retained_envelope_path", retainedIntegrationBundleEnvelopePath(config)),
+		diag.WithDetail("original_bundle_path", config.IntegrationBundlePath),
+		diag.WithDetail("rebind_instruction", "re-run preflight with -integration-bundle set to the original authored bundle path so integration-bundle.body.json is retained"),
+	)
+}
+
+func retainedIntegrationBundleBodyPath(config Config) string {
+	return filepath.Join(config.StateDir, preflight.RetainedIntegrationBundleBodyFile)
+}
+
+func retainedIntegrationBundleBodyExists(config Config) bool {
+	info, err := os.Stat(retainedIntegrationBundleBodyPath(config))
+	return err == nil && !info.IsDir()
+}
+
+func retainedIntegrationBundleEnvelopePath(config Config) string {
+	return filepath.Join(config.StateDir, preflight.RetainedIntegrationBundleEnvelopeFile)
 }
 
 // source_manifest and workspace_manifest are intentionally shared with
@@ -258,11 +282,14 @@ func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInp
 		return append(specs,
 			artifactInput{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
 			artifactInput{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
-			artifactInput{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config), digestClass: digest.ClassRawBytes},
+			artifactInput{role: "integration-bundle-retained", path: retainedIntegrationBundleEnvelopePath(config), digestClass: digest.ClassRawBytes},
 		)
 	}
 	for _, relativePath := range sortedStringMapKeys(result.ArtifactDigests) {
 		if relativePath == "source-snapshot-manifest" {
+			continue
+		}
+		if relativePath == preflight.RetainedIntegrationBundleBodyFile && strings.TrimSpace(result.ArtifactDigests[relativePath]) == "" {
 			continue
 		}
 		specs = append(specs, artifactInput{
@@ -282,6 +309,8 @@ func preflightRetainedArtifactRole(relativePath string) string {
 		return "relay-capabilities"
 	case "integration-bundle.json":
 		return "integration-bundle-retained"
+	case preflight.RetainedIntegrationBundleBodyFile:
+		return "integration-bundle-body"
 	case "backend-status.json":
 		return "backend-status"
 	case "recipes-list.json":

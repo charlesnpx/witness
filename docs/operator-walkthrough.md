@@ -403,6 +403,52 @@ witness pass resume -state-dir "$STATE"
 
 This runs the `plan` stage and writes `verification-plan.json`.
 
+### Verifying a finding-bearing batch with relay
+
+If planning returns `next_action.type: "caller_relay_batch"`, the pass has
+planned a verification batch for a relay run to execute. The pass never
+launches relay itself. Set `BATCH_PATH` to
+`next_action.relay_batch.batch_path` and `BACKEND` to
+`next_action.relay_batch.backend`, then launch the retained batch:
+
+```sh
+BATCH_PATH="<next_action.relay_batch.batch_path>"
+BACKEND="<next_action.relay_batch.backend>"
+
+witness verification assemble \
+  -run-relay \
+  -state-dir "$STATE" \
+  -relay "$RELAY" \
+  -backend "$BACKEND" \
+  -charter-freeze "$STATE/charter.freeze.json" \
+  -plan "$STATE/verification-plan.json" \
+  -batch "$BATCH_PATH" \
+  -artifact "$STATE/source-snapshot/manifest.json" \
+  -integration-bundle "$STATE/integration-bundle.body.json" \
+  -out "$STATE/verification/index.json"
+```
+
+The explicit inputs are the frozen Charter, plan, requested batch, and frozen
+source manifest. A normal batch path is
+`$STATE/verification/batches/<batch-id>.json`. The retained authored bundle at
+`$STATE/integration-bundle.body.json` is the directly bindable
+`-integration-bundle` input; `$STATE/integration-bundle.json` remains the
+authenticated retention envelope. `-state-dir` also supplies the retained
+compatibility, capability, and selected-contract evidence for assembly.
+
+Every attempted launch retains a v2 run record at
+`$STATE/verification/runs/<batch-id>.json`. Its launch evidence includes the
+argv, exit code, bounded `stdout_b64` and `stderr_b64` bytes with their digests,
+and the record also states `provider_invoked` and `consumes_batch`.
+`status: "launch_failed"` means the relay process did not start:
+`provider_invoked` is `false`, the record is non-consuming, and the pass keeps
+returning `caller_relay_batch`; fix the launch and rerun it. A consuming
+unavailable record is terminal for that batch instead. Return to the pass using
+only `witness pass resume -state-dir "$STATE"` for each remaining stage: it
+consumes that recorded run in its own assembly, adjudication, and metrics.
+Findings assigned to the unavailable batch end as `pending_verification`, and
+the metrics-stage response reports `complete: true`.
+
 ```sh
 witness pass resume -state-dir "$STATE"
 ```
@@ -497,7 +543,7 @@ smoke run, for example, reports:
 {
   "charter_freeze": "charter.freeze.json",
   "compatibility_manifest": "compatibility-manifest.json",
-  "integration_bundle": "integration-bundle.json",
+  "integration_bundle": "integration-bundle.body.json",
   "pass_state": "pass-state.json",
   "preflight": "preflight.json",
   "relay_capabilities": "relay-capabilities.json",
@@ -511,7 +557,7 @@ The complete run layout is:
 | Writer | State-directory-relative artifact |
 | --- | --- |
 | Pass freeze | `pass-state.json`, `charter.freeze.json`, `source-snapshot/manifest.json`, `source-snapshot/blobs/sha256/<content-digest>` |
-| Preflight | `preflight.json`, `relay-capabilities.json`, `backend-status.json`, `recipes-list.json`, `integration-bundle.json`, `contract-digests.json`, `compatibility-manifest.json` |
+| Preflight | `preflight.json`, `relay-capabilities.json`, `backend-status.json`, `recipes-list.json`, `integration-bundle.json` (authenticated envelope), `integration-bundle.body.json` (directly bindable authored bundle), `contract-digests.json`, `compatibility-manifest.json` |
 | Preflight compilation | `compile-reports/witness-falsify-v2.json`, `compile-reports/witness-falsify-v2-codex.json`, `compile-reports/witness-falsify-v2-claude.json`, `compile-reports/economy-equivalence-v2.json`, `compile-reports/economy-equivalence-v2-codex.json`, `compile-reports/economy-equivalence-v2-claude.json`; a relay that emits plans also retains `recipe-plans/<recipe-id>.json` |
 | Finders | `role-outputs/defect-output.json`, `role-outputs/economy-output.json` |
 | Plan and assembly | `verification-plan.json`, `verification/index.skeleton.json`, `verification/index.json`, and, when applicable, `verification/assemble-result.json` |

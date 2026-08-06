@@ -600,19 +600,27 @@ func runVerificationAssemble(args []string) error {
 		if err != nil {
 			return err
 		}
+		artifactDigests, err := relayArtifactInputDigests(artifactPaths, plan.PreflightSnapshotDigest)
+		if err != nil {
+			return err
+		}
 		runResult, err := relayrun.RunBatches(context.Background(), runBatches, relayrun.Options{
-			RelayPath:             resolveRelayExecutable(*relayPath),
-			IntegrationBundlePath: *integrationBundlePath,
-			CharterPath:           *charterPath,
-			ArtifactPaths:         append([]string(nil), artifactPaths...),
-			OutputDir:             *stateDir,
-			Backend:               *backend,
-			WorkspaceIsolation:    *workspaceIsolation,
-			RelayHome:             *relayHome,
-			LaunchCWD:             *launchCWD,
-			SettingsPath:          *settingsPath,
-			AllowDirtySource:      *allowDirtySource,
-			Runner:                verificationAssembleRelayRunner,
+			RelayPath:               resolveRelayExecutable(*relayPath),
+			IntegrationBundlePath:   *integrationBundlePath,
+			CharterPath:             *charterPath,
+			ArtifactPaths:           append([]string(nil), artifactPaths...),
+			ArtifactDigests:         artifactDigests,
+			CharterDigest:           plan.CharterDigest,
+			ArtifactDigest:          plan.PreflightSnapshotDigest,
+			IntegrationBundleDigest: plan.IntegrationBundleDigest,
+			OutputDir:               *stateDir,
+			Backend:                 *backend,
+			WorkspaceIsolation:      *workspaceIsolation,
+			RelayHome:               *relayHome,
+			LaunchCWD:               *launchCWD,
+			SettingsPath:            *settingsPath,
+			AllowDirtySource:        *allowDirtySource,
+			Runner:                  verificationAssembleRelayRunner,
 		})
 		if err != nil {
 			return err
@@ -692,6 +700,9 @@ func applyVerificationAssembleStateDirDefaults(
 	}
 	if len(*selectedContractPaths) == 0 {
 		candidate, exists := stateDirRetainedArtifactPath(stateDir, assembleStateDirSelectedContract)
+		if !exists && hasRetainedArtifacts && retainedArtifacts["integration_bundle"] != "" {
+			candidate, exists = stateDirRetainedArtifactPath(stateDir, retainedArtifacts["integration_bundle"])
+		}
 		if exists {
 			*selectedContractPaths = append(*selectedContractPaths, candidate)
 		} else {
@@ -1762,6 +1773,36 @@ func relayRunBatchInputs(plan planning.PlanDocument, batches []planning.BatchEvi
 		})
 	}
 	return inputs, nil
+}
+
+// relayArtifactInputDigests retains the planned snapshot digest for a matching
+// frozen manifest and raw-byte digests for other relay artifact inputs. The
+// latter are not represented in the verification plan but still need explicit
+// provenance in the retained run record.
+func relayArtifactInputDigests(paths []string, plannedSnapshotDigest string) ([]string, error) {
+	digests := make([]string, len(paths))
+	for index, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fileReadError(err, path, "open relay artifact input")
+		}
+		valueDigest := digest.RawBytes(data)
+		manifest, err := strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*32)
+		if err == nil && manifest.SchemaVersion == freeze.SchemaVersion {
+			if manifestDigest, digestErr := freeze.ManifestDigest(manifest); digestErr == nil &&
+				manifest.Source.ManifestDigest == manifestDigest &&
+				manifest.Workspace.ManifestDigest == manifestDigest &&
+				manifestDigest == plannedSnapshotDigest {
+				valueDigest = manifestDigest
+			}
+		}
+		digests[index] = valueDigest
+	}
+	return digests, nil
 }
 
 func batchEvidenceFromRunInputs(inputs []relayrun.BatchInput) []planning.BatchEvidence {
