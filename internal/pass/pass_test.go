@@ -560,7 +560,16 @@ func TestResumeRejectsFabricatedCompleteState(t *testing.T) {
 	if err == nil {
 		t.Fatal("resume accepted fabricated complete state")
 	}
-	assertValidationCode(t, err, CodeStateInvalid)
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("error = %T, want ValidationError: %v", err, err)
+	}
+	for _, diagnostic := range validation.Diagnostics {
+		if diagnostic.Code == CodeStateInvalid {
+			return
+		}
+	}
+	t.Fatalf("diagnostics = %#v, want %s", validation.Diagnostics, CodeStateInvalid)
 }
 
 func TestResumeRejectsPreflightWaitStateBackendStrataTampering(t *testing.T) {
@@ -1890,6 +1899,198 @@ func TestPassResumeConsumesRecordedUnavailableRelayRun(t *testing.T) {
 		t.Fatalf("resume metrics: %v", err)
 	}
 	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
+}
+
+func TestReadRecordedRelayRunsRequiresCompleteBindingsForConsumingRecord(t *testing.T) {
+	_, state, batch := readyPassAtRelayBatchActionForTest(t, true)
+	validBindings := plannedRelayInputBindingsForTest(t, state.Config, batch)
+
+	for _, test := range []struct {
+		name         string
+		bindings     []string
+		wantMissing  []string
+		wantNoDigest string
+	}{
+		{
+			name:        "no bindings",
+			wantMissing: []string{"charter", "findings", "artifact", "integration_bundle"},
+		},
+		{
+			name: "missing findings binding",
+			bindings: func() []string {
+				bindings := append([]string(nil), validBindings...)
+				return append(bindings[:1], bindings[2:]...)
+			}(),
+			wantMissing: []string{"findings"},
+		},
+		{
+			name: "artifact binding missing digest suffix",
+			bindings: func() []string {
+				bindings := append([]string(nil), validBindings...)
+				bindings[2] = boundInput("artifact", state.Config.SnapshotManifestPath, "")
+				return bindings
+			}(),
+			wantNoDigest: "artifact",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writeRecordedRelayRunForTest(t, state.Config, batch, relayrun.RunRecord{
+				SchemaVersion:   relayrun.RunRecordSchema,
+				BatchID:         batch.BatchID,
+				Status:          contracts.RecordStatusUnavailable,
+				RecipeID:        batch.RecipeID,
+				InputBindings:   test.bindings,
+				ProviderInvoked: relayrun.ProviderInvokedUnknown,
+				ConsumesBatch:   true,
+			})
+
+			_, err := readRecordedRelayRuns(state, []RelayBatchRecord{batch})
+			if err == nil {
+				t.Fatal("readRecordedRelayRuns accepted a consuming record without complete bound inputs")
+			}
+			diagnostic := diag.FromError(err)
+			if diagnostic.Code != CodeInvalidState {
+				t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeInvalidState)
+			}
+			if test.wantMissing != nil {
+				if !reflect.DeepEqual(diagnostic.Details["missing_bindings"], test.wantMissing) {
+					t.Fatalf("missing_bindings = %#v, want %#v", diagnostic.Details["missing_bindings"], test.wantMissing)
+				}
+			} else if _, found := diagnostic.Details["missing_bindings"]; found {
+				t.Fatalf("missing_bindings = %#v, want absent", diagnostic.Details["missing_bindings"])
+			}
+			if test.wantNoDigest != "" {
+				if diagnostic.Details["binding"] != test.wantNoDigest {
+					t.Fatalf("binding = %#v, want %#v", diagnostic.Details["binding"], test.wantNoDigest)
+				}
+			} else if _, found := diagnostic.Details["binding"]; found {
+				t.Fatalf("binding = %#v, want absent", diagnostic.Details["binding"])
+			}
+		})
+	}
+}
+
+func TestReadRecordedRelayRunsAllowsNoBindingsForNonConsumingLaunchFailure(t *testing.T) {
+	_, state, batch := readyPassAtRelayBatchActionForTest(t, true)
+	writeRecordedRelayRunForTest(t, state.Config, batch, relayrun.RunRecord{
+		SchemaVersion:   relayrun.RunRecordSchema,
+		BatchID:         batch.BatchID,
+		Status:          relayrun.RunStatusLaunchFailed,
+		RecipeID:        batch.RecipeID,
+		ProviderInvoked: relayrun.ProviderInvokedFalse,
+		ConsumesBatch:   false,
+		RelayLaunch: &relayrun.LaunchRecord{
+			ExitCode:    -1,
+			StartFailed: true,
+		},
+	})
+
+	runs, err := readRecordedRelayRuns(state, []RelayBatchRecord{batch})
+	if err != nil {
+		t.Fatalf("readRecordedRelayRuns rejected a non-consuming launch failure without bindings: %v", err)
+	}
+	if recorded, found := runs[batch.BatchID]; !found || recorded.Record.ConsumesBatch {
+		t.Fatalf("recorded runs = %#v, want one non-consuming record", runs)
+	}
+}
+
+func TestValidateMandatoryStageArtifactsPropagatesInvalidRecordedRelayRun(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, state *State, batch RelayBatchRecord)
+	}{
+		{
+			name: "malformed JSON",
+			mutate: func(t *testing.T, state *State, batch RelayBatchRecord) {
+				t.Helper()
+				if err := os.WriteFile(relayRunRecordPath(state.Config, batch.BatchID), []byte(`{"schema_version":`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "rebound input",
+			mutate: func(t *testing.T, state *State, batch RelayBatchRecord) {
+				t.Helper()
+				bindings := plannedRelayInputBindingsForTest(t, state.Config, batch)
+				bindings[1] = boundInput("findings", filepath.Join(state.Config.StateDir, "other-batch.json"), batch.BatchDigest)
+				writeRecordedRelayRunForTest(t, state.Config, batch, relayrun.RunRecord{
+					SchemaVersion:   relayrun.RunRecordSchema,
+					BatchID:         batch.BatchID,
+					Status:          contracts.RecordStatusUnavailable,
+					RecipeID:        batch.RecipeID,
+					InputBindings:   bindings,
+					ProviderInvoked: relayrun.ProviderInvokedUnknown,
+					ConsumesBatch:   true,
+				})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, state, batch := readyPassAtRelayBatchActionForTest(t, true)
+			writeRecordedRelayRunForTest(t, state.Config, batch, relayrun.RunRecord{
+				SchemaVersion:   relayrun.RunRecordSchema,
+				BatchID:         batch.BatchID,
+				Status:          contracts.RecordStatusUnavailable,
+				RecipeID:        batch.RecipeID,
+				InputBindings:   plannedRelayInputBindingsForTest(t, state.Config, batch),
+				ProviderInvoked: relayrun.ProviderInvokedUnknown,
+				ConsumesBatch:   true,
+			})
+
+			inputs, outputs, err := mandatoryArtifactsForStage(state, StageRecord{Name: stageAssemble, Status: statusComplete})
+			if err != nil {
+				t.Fatalf("mandatoryArtifactsForStage with valid run record: %v", err)
+			}
+			inputsWithoutRunRecord := make([]artifactInput, 0, len(inputs)-1)
+			for _, input := range inputs {
+				if input.role != "relay-run-record:"+batch.BatchID {
+					inputsWithoutRunRecord = append(inputsWithoutRunRecord, input)
+				}
+			}
+			inputRecords, err := artifactRecordsForExistingFiles(inputsWithoutRunRecord)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, output := range outputs {
+				if _, err := os.Stat(output.path); err == nil {
+					continue
+				} else if !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(output.path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(output.path, []byte("{}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			outputRecords, err := artifactRecordsForExistingFiles(outputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.Stages = append(state.Stages, StageRecord{
+				Name:    stageAssemble,
+				Status:  statusComplete,
+				Inputs:  inputRecords,
+				Outputs: outputRecords,
+			})
+
+			test.mutate(t, state, batch)
+			_, err = readRecordedRelayRuns(state, []RelayBatchRecord{batch})
+			if err == nil {
+				t.Fatal("invalid relay run record was accepted before mandatory-artifact validation")
+			}
+			want := diag.FromError(err)
+			diagnostics := validateMandatoryStageArtifacts(state)
+			for _, diagnostic := range diagnostics {
+				if diagnostic.Code == want.Code && diagnostic.Message == want.Message && reflect.DeepEqual(diagnostic.Details, want.Details) {
+					return
+				}
+			}
+			t.Fatalf("state validation diagnostics = %#v, want propagated relay-run diagnostic %#v", diagnostics, want)
+		})
+	}
 }
 
 func TestReadRecordedRelayRunsRejectsReboundIntegrationBundle(t *testing.T) {

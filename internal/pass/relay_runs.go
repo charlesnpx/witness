@@ -105,11 +105,10 @@ func readRecordedRelayRuns(state *State, batches []RelayBatchRecord) (map[string
 	return runs, nil
 }
 
-// validateRecordedRelayRunBindings rejects explicit rebinding to another
-// planned input or digest. Records from older launch paths may omit
-// input_bindings and digest suffixes, so absence remains governed by
-// relayrun's existing record validation; any binding that is present must
-// still identify the pass's planned input.
+// validateRecordedRelayRunBindings rejects rebinding to another planned input
+// or digest. A record that consumes a batch must prove all of the frozen
+// inputs it consumed. A non-consuming launch_failed record may omit bindings,
+// but any binding it does provide must still identify the pass's planned input.
 func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, record relayrun.RunRecord, integrationBundleDigest string) error {
 	if state == nil {
 		return diag.New(CodeInvalidState, "cannot validate a retained relay run record without pass state.")
@@ -140,40 +139,87 @@ func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, reco
 			digest: integrationBundleDigest,
 		},
 	}
+	requiredNames := []string{"charter", "findings", "artifact", "integration_bundle"}
+	suppliedValues := make(map[string][]string, len(requiredNames))
 	for _, binding := range record.InputBindings {
 		name, value, found := strings.Cut(binding, "=")
 		if !found {
 			continue
 		}
-		want, relevant := expected[name]
+		_, relevant := expected[name]
 		if !relevant {
 			continue
 		}
-		path := strings.TrimSpace(value)
-		suppliedDigest := ""
-		if suffixStart := strings.LastIndex(path, "@"+digest.Prefix); suffixStart >= 0 {
-			suppliedDigest = path[suffixStart+1:]
-			path = path[:suffixStart]
+		suppliedValues[name] = append(suppliedValues[name], strings.TrimSpace(value))
+	}
+	if record.ConsumesBatch {
+		missing := make([]string, 0, len(requiredNames))
+		for _, name := range requiredNames {
+			if len(suppliedValues[name]) == 0 {
+				missing = append(missing, name)
+			}
 		}
-		if !recordedPathsEqual(path, want.path) {
+		if len(missing) > 0 {
 			return diag.New(
 				CodeInvalidState,
-				"retained relay run record input binding does not match the planned batch input.",
+				"a retained relay run record that consumes a batch is missing required input bindings.",
 				diag.WithDetail("batch_id", batch.BatchID),
-				diag.WithDetail("binding", name),
-				diag.WithDetail("actual_path", path),
-				diag.WithDetail("expected_path", want.path),
+				diag.WithDetail("missing_bindings", missing),
 			)
 		}
-		if suppliedDigest != "" && want.digest != "" && suppliedDigest != want.digest {
-			return diag.New(
-				CodeInvalidState,
-				"retained relay run record input binding digest does not match the planned batch input.",
-				diag.WithDetail("batch_id", batch.BatchID),
-				diag.WithDetail("binding", name),
-				diag.WithDetail("actual_digest", suppliedDigest),
-				diag.WithDetail("expected_digest", want.digest),
-			)
+	}
+	for _, name := range requiredNames {
+		want := expected[name]
+		for _, value := range suppliedValues[name] {
+			path := value
+			suppliedDigest := ""
+			if suffixStart := strings.LastIndex(path, "@"+digest.Prefix); suffixStart >= 0 {
+				suppliedDigest = path[suffixStart+1:]
+				path = path[:suffixStart]
+			}
+			if record.ConsumesBatch && suppliedDigest == "" {
+				return diag.New(
+					CodeInvalidState,
+					"a retained relay run record that consumes a batch must bind each planned input with its digest.",
+					diag.WithDetail("batch_id", batch.BatchID),
+					diag.WithDetail("binding", name),
+					diag.WithDetail("actual_path", path),
+					diag.WithDetail("expected_digest", want.digest),
+				)
+			}
+			if !recordedPathsEqual(path, want.path) {
+				return diag.New(
+					CodeInvalidState,
+					"retained relay run record input binding does not match the planned batch input.",
+					diag.WithDetail("batch_id", batch.BatchID),
+					diag.WithDetail("binding", name),
+					diag.WithDetail("actual_path", path),
+					diag.WithDetail("expected_path", want.path),
+				)
+			}
+			if record.ConsumesBatch {
+				if suppliedDigest != want.digest {
+					return diag.New(
+						CodeInvalidState,
+						"retained relay run record input binding digest does not match the planned batch input.",
+						diag.WithDetail("batch_id", batch.BatchID),
+						diag.WithDetail("binding", name),
+						diag.WithDetail("actual_digest", suppliedDigest),
+						diag.WithDetail("expected_digest", want.digest),
+					)
+				}
+				continue
+			}
+			if suppliedDigest != "" && want.digest != "" && suppliedDigest != want.digest {
+				return diag.New(
+					CodeInvalidState,
+					"retained relay run record input binding digest does not match the planned batch input.",
+					diag.WithDetail("batch_id", batch.BatchID),
+					diag.WithDetail("binding", name),
+					diag.WithDetail("actual_digest", suppliedDigest),
+					diag.WithDetail("expected_digest", want.digest),
+				)
+			}
 		}
 	}
 	return nil

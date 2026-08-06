@@ -134,14 +134,18 @@ func validateMandatoryStageArtifacts(state *State) []diag.Diagnostic {
 		if stage.Status != statusComplete {
 			continue
 		}
-		inputs, outputs := mandatoryArtifactsForStage(state, stage)
+		inputs, outputs, err := mandatoryArtifactsForStage(state, stage)
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(err))
+			continue
+		}
 		diagnostics = append(diagnostics, requireArtifactRecords(stage, "inputs", stage.Inputs, inputs)...)
 		diagnostics = append(diagnostics, requireArtifactRecords(stage, "outputs", stage.Outputs, outputs)...)
 	}
 	return diagnostics
 }
 
-func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInput, []artifactInput) {
+func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInput, []artifactInput, error) {
 	config := state.Config
 	switch stage.Name {
 	case stageFreeze:
@@ -152,13 +156,13 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		return inputs, []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
 			{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
-		}
+		}, nil
 	case stagePreflight:
 		var result *preflight.Result
 		if decoded, err := readPreflightResult(config.Outputs.PreflightPath); err == nil {
 			result = &decoded
 		}
-		return preflightInputSpecs(config), preflightOutputSpecs(config, result)
+		return preflightInputSpecs(config), preflightOutputSpecs(config, result), nil
 	case stagePlan:
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
@@ -179,7 +183,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 				outputs = append(outputs, artifactInput{role: "change-surface", path: filepath.Join(config.StateDir, "verification", "change-surface.json"), digestClass: digestClassRaw()})
 			}
 		}
-		return inputs, outputs
+		return inputs, outputs, nil
 	case stageAssemble:
 		relayBatches := state.RelayBatches
 		if derived, err := relayBatchRecordsFromValidatedPlan(state); err == nil {
@@ -196,17 +200,18 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		if retainedIntegrationBundleBodyExists(config) {
 			inputs = append(inputs, artifactInput{role: "integration-bundle-body", path: retainedIntegrationBundleBodyPath(config), digestClass: digestClassRaw()})
 		}
-		recordedRuns, recordedRunsErr := readRecordedRelayRuns(state, relayBatches)
+		recordedRuns, err := readRecordedRelayRuns(state, relayBatches)
+		if err != nil {
+			return nil, nil, err
+		}
 		for _, batch := range relayBatches {
 			inputs = append(inputs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digestClassRaw()})
-			if recordedRunsErr == nil {
-				if recorded, found := recordedRuns[batch.BatchID]; found {
-					inputs = append(inputs, artifactInput{role: "relay-run-record:" + batch.BatchID, path: recorded.Path, digestClass: digestClassRaw()})
-					if portableExportReady(recorded.Record.PortableExportDir) {
-						inputs = append(inputs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(recorded.Record.PortableExportDir, "manifest.json"), digestClass: digestClassRaw()})
-					}
-					continue
+			if recorded, found := recordedRuns[batch.BatchID]; found {
+				inputs = append(inputs, artifactInput{role: "relay-run-record:" + batch.BatchID, path: recorded.Path, digestClass: digestClassRaw()})
+				if portableExportReady(recorded.Record.PortableExportDir) {
+					inputs = append(inputs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(recorded.Record.PortableExportDir, "manifest.json"), digestClass: digestClassRaw()})
 				}
+				continue
 			}
 			if portableExportReady(batch.PortableExportDir) {
 				inputs = append(inputs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(batch.PortableExportDir, "manifest.json"), digestClass: digestClassRaw()})
@@ -224,7 +229,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		if expected, err := expectedAssembleResult(state); err == nil && hasSupplementaryAssembleContent(expected) {
 			outputs = append(outputs, artifactInput{role: "assemble-result", path: assembleResultPath(config), digestClass: digestClassRaw()})
 		}
-		return inputs, outputs
+		return inputs, outputs, nil
 	case stageAdjudicate:
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
@@ -239,15 +244,15 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		for _, item := range config.RoleOutputs {
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
 		}
-		return inputs, []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}
+		return inputs, []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}, nil
 	case stageMetrics:
 		return []artifactInput{
 			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
 			{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()},
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
-		}, []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}
+		}, []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}, nil
 	default:
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 
