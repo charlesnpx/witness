@@ -42,6 +42,9 @@ func TestMarshalUsesPlainSafeIntegerNotation(t *testing.T) {
 		{raw: "2578", want: "2578"},
 		{raw: "-7", want: "-7"},
 		{raw: "1.25", want: "1.25"},
+		{raw: "9007199254740991", want: "9007199254740991"},
+		{raw: "-9007199254740991", want: "-9007199254740991"},
+		{raw: "9007199254740992", want: "9.007199254740992e15"},
 		{raw: "9007199254740993", want: "9.007199254740993e15"},
 	} {
 		t.Run(test.raw, func(t *testing.T) {
