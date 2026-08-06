@@ -428,13 +428,19 @@ func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 			return nil, err
 		}
 	}
-	if err := writeState(state); err != nil {
-		return nil, err
-	}
+	applyOutputDefaults(&state.Config)
 	preflightResult, _ := readPreflightResult(state.Config.Outputs.PreflightPath)
 	retainedArtifacts, err := passRetainedArtifacts(state.Config, preflightResult)
 	if err != nil {
 		return nil, err
+	}
+	if err := writeState(state); err != nil {
+		return nil, err
+	}
+	// The pre-write validation cannot observe a new state file. Add it after
+	// persistence so successful invocation output remains unchanged.
+	if relativePath, ok := stateDirRelativeExistingFile(state.Config.StateDir, state.Config.Outputs.StatePath); ok {
+		retainedArtifacts["pass_state"] = relativePath
 	}
 	backendStrata := cloneStringMap(preflightResult.BackendStrata)
 	degraded := preflight.RelayAbsent(preflightResult)

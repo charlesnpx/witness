@@ -217,6 +217,29 @@ func TestCreateRejectsDirtyGitWorktreeContentMutationDuringCapture(t *testing.T)
 	}
 }
 
+func TestCreateRejectsDirtyGitWorktreeHeadMutationDuringCapture(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	runGit(t, repo, "add", "app.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	_, err := Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+		afterDirtySourceCapture: func() {
+			runGit(t, repo, "commit", "--allow-empty", "-m", "advance HEAD")
+		},
+	})
+	if got := errorCode(err); got != CodeSourceChangedDuringCapture {
+		t.Fatalf("freeze error code = %q, want %q; err=%v", got, CodeSourceChangedDuringCapture, err)
+	}
+}
+
 func TestVerifyDirtyGitCaptureRejectsCleanTrackedFileMutationRestoredBeforeInventory(t *testing.T) {
 	repo := t.TempDir()
 	runGit(t, repo, "init")
@@ -230,21 +253,28 @@ func TestVerifyDirtyGitCaptureRejectsCleanTrackedFileMutationRestoredBeforeInven
 	runGit(t, repo, "commit", "-m", "initial")
 	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
 
-	before, err := collectDirtyGitInventory(context.Background(), repo)
+	before, err := collectDirtyGitDerivation(context.Background(), repo)
 	if err != nil {
-		t.Fatalf("collect before capture inventory: %v", err)
+		t.Fatalf("collect before capture derivation: %v", err)
 	}
 
 	// The clean file changes while bytes are captured, then the existing
 	// post-capture seam restores its Git-visible state before the re-inventory.
 	mustWriteFile(t, cleanPath, []byte("transient-captured-bytes\n"), 0o644)
 	entries := make([]FileEntry, 0, len(before.files))
-	for _, item := range before.files {
-		data, _, err := readSnapshotBytes(repo, item)
+	for _, item := range before.sourceFiles() {
+		data, size, err := readSnapshotBytes(repo, item)
 		if err != nil {
 			t.Fatalf("capture %s: %v", item.path, err)
 		}
-		entries = append(entries, FileEntry{Path: item.path, Digest: digest.RawBytes(data)})
+		sum := digest.RawBytes(data)
+		entries = append(entries, FileEntry{
+			Path:   item.path,
+			Mode:   item.mode,
+			Size:   strictjson.Int64(size),
+			Digest: sum,
+			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", strings.TrimPrefix(sum, digest.Prefix))),
+		})
 	}
 
 	err = verifyDirtyGitCapture(context.Background(), repo, before, entries, func() {

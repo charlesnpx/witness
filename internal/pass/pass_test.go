@@ -263,6 +263,28 @@ func TestPassRetainedArtifactsRequiresMatchingManifestRolePath(t *testing.T) {
 	}
 }
 
+func TestSaveAndReportRetainedArtifactFailureDoesNotPersistState(t *testing.T) {
+	stateDir := t.TempDir()
+	config := Config{StateDir: stateDir}
+	applyOutputDefaults(&config)
+	writeCanonicalForTest(t, config.Outputs.PreflightPath, preflight.Result{
+		RetainedArtifacts: map[string]string{"missing": "missing.json"},
+	})
+	state := &State{
+		Config:     config,
+		NextAction: NextAction{Type: actionComplete},
+	}
+
+	_, err := saveAndReport(state, "")
+	if err == nil {
+		t.Fatal("saveAndReport accepted a missing retained artifact")
+	}
+	assertValidationCode(t, err, CodeInvalidRetainedArtifact)
+	if _, statErr := os.Stat(config.Outputs.StatePath); !os.IsNotExist(statErr) {
+		t.Fatalf("pass state exists after retained-artifact refusal: %v", statErr)
+	}
+}
+
 func TestBeginRejectsZeroGoalCharterUnlessExplicitlyAllowed(t *testing.T) {
 	options := newBeginOptions(t)
 	writeCanonicalForTest(t, options.CharterPath, charter.Charter{

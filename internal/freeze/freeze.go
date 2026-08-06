@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -91,10 +92,27 @@ type sourceFile struct {
 	mode string
 }
 
-type dirtyGitInventory struct {
-	files       []sourceFile
-	trackedOnly bool
-	status      string
+type dirtyGitFile struct {
+	sourceFile
+	size   strictjson.Int64
+	digest string
+}
+
+type gitSourceState struct {
+	root             string
+	head             string
+	statusPorcelainZ string
+}
+
+// dirtyGitDerivation contains every value read by dirty-mode collection that
+// can affect the snapshot. Rechecking this complete derivation avoids a
+// separate, incomplete list of mutable Git and filesystem facets.
+type dirtyGitDerivation struct {
+	source           SourceIdentity
+	statusPorcelainZ string
+	trackedStage     string
+	untrackedPaths   string
+	files            []dirtyGitFile
 }
 
 // DeriveManifest re-inventories the source and derives the manifest Create would
@@ -123,7 +141,7 @@ func DeriveManifest(ctx context.Context, options Options) (Result, error) {
 		return zero, err
 	}
 
-	files, source, dirtyInventory, err := collectSourceFiles(ctx, sourceAbs, options)
+	files, source, dirtyDerivation, err := collectSourceFiles(ctx, sourceAbs, options)
 	if err != nil {
 		return zero, err
 	}
@@ -144,7 +162,7 @@ func DeriveManifest(ctx context.Context, options Options) (Result, error) {
 			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
 		})
 	}
-	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyInventory, entries, options.afterDirtySourceCapture); err != nil {
+	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyDerivation, entries, options.afterDirtySourceCapture); err != nil {
 		return zero, err
 	}
 
@@ -194,7 +212,7 @@ func Create(ctx context.Context, options Options) (Result, error) {
 		return zero, err
 	}
 
-	files, source, dirtyInventory, err := collectSourceFiles(ctx, sourceAbs, options)
+	files, source, dirtyDerivation, err := collectSourceFiles(ctx, sourceAbs, options)
 	if err != nil {
 		return zero, err
 	}
@@ -224,7 +242,7 @@ func Create(ctx context.Context, options Options) (Result, error) {
 			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
 		})
 	}
-	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyInventory, entries, options.afterDirtySourceCapture); err != nil {
+	if err := verifyDirtyGitCapture(ctx, sourceAbs, dirtyDerivation, entries, options.afterDirtySourceCapture); err != nil {
 		return zero, err
 	}
 
@@ -310,9 +328,9 @@ func gitRepositoryRoot(ctx context.Context, sourceAbs string) (string, error) {
 	return canonicalPath(strings.TrimSpace(root))
 }
 
-func collectSourceFiles(ctx context.Context, sourceAbs string, options Options) ([]sourceFile, SourceIdentity, *dirtyGitInventory, error) {
+func collectSourceFiles(ctx context.Context, sourceAbs string, options Options) ([]sourceFile, SourceIdentity, *dirtyGitDerivation, error) {
 	source := SourceIdentity{Path: sourceAbs}
-	files, gitSource, dirtyInventory, err := collectGitFiles(ctx, sourceAbs, options.AllowDirtySource)
+	files, gitSource, dirtyDerivation, err := collectGitFiles(ctx, sourceAbs, options.AllowDirtySource)
 	if err != nil {
 		if !options.AllowNonGit || !isNonGitError(err) {
 			return nil, SourceIdentity{}, nil, err
@@ -324,45 +342,26 @@ func collectSourceFiles(ctx context.Context, sourceAbs string, options Options) 
 		source.GitTrackedOnly = false
 		return files, source, nil, nil
 	}
-	return files, gitSource, dirtyInventory, nil
+	return files, gitSource, dirtyDerivation, nil
 }
 
-func collectGitFiles(ctx context.Context, sourceAbs string, allowDirtySource bool) ([]sourceFile, SourceIdentity, *dirtyGitInventory, error) {
-	root, err := gitOutput(ctx, sourceAbs, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return nil, SourceIdentity{}, nil, diag.Wrap(err, CodeSourceNotGit, "source directory must be a Git work tree unless non-Git freezing is explicitly enabled.")
-	}
-	root = strings.TrimSpace(root)
-	if resolvedRoot, err := canonicalPath(root); err == nil {
-		root = resolvedRoot
-	}
-	head, err := gitOutput(ctx, sourceAbs, "rev-parse", "--verify", "HEAD^{commit}")
-	if err != nil {
-		return nil, SourceIdentity{}, nil, diag.Wrap(err, CodeSourceUnborn, "source Git work tree must have a committed HEAD.")
-	}
-	status, err := gitOutput(ctx, sourceAbs, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
+func collectGitFiles(ctx context.Context, sourceAbs string, allowDirtySource bool) ([]sourceFile, SourceIdentity, *dirtyGitDerivation, error) {
+	gitState, err := collectGitSourceState(ctx, sourceAbs)
 	if err != nil {
 		return nil, SourceIdentity{}, nil, err
 	}
-	if status != "" {
+	if gitState.statusPorcelainZ != "" {
 		if allowDirtySource {
-			dirtyInventory, err := collectDirtyGitInventory(ctx, sourceAbs)
+			dirtyDerivation, err := completeDirtyGitDerivation(ctx, sourceAbs, gitState)
 			if err != nil {
 				return nil, SourceIdentity{}, nil, err
 			}
-			return dirtyInventory.files, SourceIdentity{
-				Path:           sourceAbs,
-				GitRoot:        root,
-				GitHead:        strings.TrimSpace(head),
-				GitTrackedOnly: dirtyInventory.trackedOnly,
-				GitDirty:       true,
-				GitDirtyStatus: dirtyInventory.status,
-			}, dirtyInventory, nil
+			return dirtyDerivation.sourceFiles(), dirtyDerivation.source, dirtyDerivation, nil
 		}
 		return nil, SourceIdentity{}, nil, diag.New(
 			CodeSourceDirty,
 			"source Git work tree must be clean before freezing.",
-			diag.WithDetail("status_porcelain_z", status),
+			diag.WithDetail("status_porcelain_z", gitState.statusPorcelainZ),
 		)
 	}
 	stage, err := gitOutput(ctx, sourceAbs, "ls-files", "--stage", "-z")
@@ -375,119 +374,82 @@ func collectGitFiles(ctx context.Context, sourceAbs string, allowDirtySource boo
 	}
 	return files, SourceIdentity{
 		Path:           sourceAbs,
-		GitRoot:        root,
-		GitHead:        strings.TrimSpace(head),
+		GitRoot:        gitState.root,
+		GitHead:        gitState.head,
 		GitTrackedOnly: true,
 	}, nil, nil
 }
 
-func collectDirtyGitInventory(ctx context.Context, sourceAbs string) (*dirtyGitInventory, error) {
-	files, trackedOnly, err := collectDirtyGitFiles(ctx, sourceAbs)
+func collectGitSourceState(ctx context.Context, sourceAbs string) (gitSourceState, error) {
+	root, err := gitOutput(ctx, sourceAbs, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return gitSourceState{}, diag.Wrap(err, CodeSourceNotGit, "source directory must be a Git work tree unless non-Git freezing is explicitly enabled.")
+	}
+	root = strings.TrimSpace(root)
+	if resolvedRoot, err := canonicalPath(root); err == nil {
+		root = resolvedRoot
+	}
+	head, err := gitOutput(ctx, sourceAbs, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return gitSourceState{}, diag.Wrap(err, CodeSourceUnborn, "source Git work tree must have a committed HEAD.")
+	}
+	statusPorcelainZ, err := gitOutput(ctx, sourceAbs, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
+	if err != nil {
+		return gitSourceState{}, err
+	}
+	return gitSourceState{root: root, head: strings.TrimSpace(head), statusPorcelainZ: statusPorcelainZ}, nil
+}
+
+// collectDirtyGitDerivation re-runs the full dirty-mode derivation after
+// capture, including the Git source state collected before enumeration.
+func collectDirtyGitDerivation(ctx context.Context, sourceAbs string) (*dirtyGitDerivation, error) {
+	gitState, err := collectGitSourceState(ctx, sourceAbs)
 	if err != nil {
 		return nil, err
 	}
-	summary, err := gitOutput(ctx, sourceAbs, "status", "--porcelain=v1", "--untracked-files=normal")
+	if gitState.statusPorcelainZ == "" {
+		return nil, diag.New(
+			CodeSourceChangedDuringCapture,
+			"source worktree mutated during freeze; quiesce the worktree and retry.",
+		)
+	}
+	return completeDirtyGitDerivation(ctx, sourceAbs, gitState)
+}
+
+// completeDirtyGitDerivation completes the same dirty-mode derivation used
+// for the first pass after collectGitSourceState has found a dirty worktree.
+func completeDirtyGitDerivation(ctx context.Context, sourceAbs string, gitState gitSourceState) (*dirtyGitDerivation, error) {
+	trackedStage, err := gitOutput(ctx, sourceAbs, "ls-files", "--stage", "-z")
 	if err != nil {
 		return nil, err
 	}
-	return &dirtyGitInventory{
-		files:       files,
-		trackedOnly: trackedOnly,
-		status:      strings.TrimSpace(summary),
-	}, nil
-}
-
-func verifyDirtyGitCapture(ctx context.Context, sourceAbs string, before *dirtyGitInventory, entries []FileEntry, afterCapture func()) error {
-	if before == nil {
-		return nil
-	}
-	if afterCapture != nil {
-		afterCapture()
-	}
-	after, err := collectDirtyGitInventory(ctx, sourceAbs)
+	tracked, err := parseGitStage(trackedStage)
 	if err != nil {
-		return err
-	}
-	contentUnchanged := capturedFileDigestsMatch(sourceAbs, before.files, entries)
-	if dirtyGitInventoriesEqual(*before, *after) && contentUnchanged {
-		return nil
-	}
-	return diag.New(
-		CodeSourceChangedDuringCapture,
-		"source worktree mutated during freeze; quiesce the worktree and retry.",
-		diag.WithDetail("before_status", before.status),
-		diag.WithDetail("after_status", after.status),
-	)
-}
-
-// capturedFileDigestsMatch re-reads every file captured from the working tree.
-// A false result includes a path which disappeared or ceased to match its
-// captured file type while the snapshot was being made.
-func capturedFileDigestsMatch(sourceAbs string, capturedFiles []sourceFile, entries []FileEntry) bool {
-	capturedDigests := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		capturedDigests[entry.Path] = entry.Digest
-	}
-	for _, item := range capturedFiles {
-		capturedDigest, found := capturedDigests[item.path]
-		if !found {
-			return false
-		}
-		data, _, err := readSnapshotBytes(sourceAbs, item)
-		if err != nil || digest.RawBytes(data) != capturedDigest {
-			return false
-		}
-	}
-	return true
-}
-
-func dirtyGitInventoriesEqual(left dirtyGitInventory, right dirtyGitInventory) bool {
-	if left.trackedOnly != right.trackedOnly || left.status != right.status || len(left.files) != len(right.files) {
-		return false
-	}
-	for index := range left.files {
-		if left.files[index] != right.files[index] {
-			return false
-		}
-	}
-	return true
-}
-
-// collectDirtyGitFiles inventories the work tree as it is now: tracked files
-// use their on-disk mode and bytes, deleted tracked files are absent, and
-// non-ignored untracked files are included.
-func collectDirtyGitFiles(ctx context.Context, sourceAbs string) ([]sourceFile, bool, error) {
-	stage, err := gitOutput(ctx, sourceAbs, "ls-files", "--stage", "-z")
-	if err != nil {
-		return nil, false, err
-	}
-	tracked, err := parseGitStage(stage)
-	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	files := make(map[string]sourceFile, len(tracked))
 	for _, item := range tracked {
 		file, present, err := sourceFileFromWorkingTree(sourceAbs, item.path)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if present {
 			files[file.path] = file
 		}
 	}
 
-	untrackedOutput, err := gitOutput(ctx, sourceAbs, "ls-files", "--others", "--exclude-standard", "-z")
+	untrackedPaths, err := gitOutput(ctx, sourceAbs, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	untracked, err := parseGitPaths(untrackedOutput)
+	untracked, err := parseGitPaths(untrackedPaths)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	for _, path := range untracked {
 		file, present, err := sourceFileFromWorkingTree(sourceAbs, path)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if present {
 			files[file.path] = file
@@ -499,7 +461,94 @@ func collectDirtyGitFiles(ctx context.Context, sourceAbs string) ([]sourceFile, 
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].path < items[j].path })
-	return items, len(untracked) == 0, nil
+	summary, err := gitOutput(ctx, sourceAbs, "status", "--porcelain=v1", "--untracked-files=normal")
+	if err != nil {
+		return nil, err
+	}
+	capturedFiles, err := dirtyGitFileIdentities(sourceAbs, items)
+	if err != nil {
+		return nil, err
+	}
+	return &dirtyGitDerivation{
+		source: SourceIdentity{
+			Path:           sourceAbs,
+			GitRoot:        gitState.root,
+			GitHead:        gitState.head,
+			GitTrackedOnly: len(untracked) == 0,
+			GitDirty:       true,
+			GitDirtyStatus: strings.TrimSpace(summary),
+		},
+		statusPorcelainZ: gitState.statusPorcelainZ,
+		trackedStage:     trackedStage,
+		untrackedPaths:   untrackedPaths,
+		files:            capturedFiles,
+	}, nil
+}
+
+func (derivation *dirtyGitDerivation) sourceFiles() []sourceFile {
+	files := make([]sourceFile, len(derivation.files))
+	for index, item := range derivation.files {
+		files[index] = item.sourceFile
+	}
+	return files
+}
+
+func dirtyGitFileIdentities(sourceAbs string, files []sourceFile) ([]dirtyGitFile, error) {
+	captured := make([]dirtyGitFile, 0, len(files))
+	for _, item := range files {
+		data, size, err := readSnapshotBytes(sourceAbs, item)
+		if err != nil {
+			return nil, err
+		}
+		captured = append(captured, dirtyGitFile{
+			sourceFile: item,
+			size:       strictjson.Int64(size),
+			digest:     digest.RawBytes(data),
+		})
+	}
+	return captured, nil
+}
+
+func dirtyGitSnapshotEntries(files []dirtyGitFile) []FileEntry {
+	entries := make([]FileEntry, 0, len(files))
+	for _, item := range files {
+		blobName := strings.TrimPrefix(item.digest, digest.Prefix)
+		entries = append(entries, FileEntry{
+			Path:   item.path,
+			Mode:   item.mode,
+			Size:   item.size,
+			Digest: item.digest,
+			Blob:   filepath.ToSlash(filepath.Join("blobs", "sha256", blobName)),
+		})
+	}
+	return entries
+}
+
+func verifyDirtyGitCapture(ctx context.Context, sourceAbs string, before *dirtyGitDerivation, entries []FileEntry, afterCapture func()) error {
+	if before == nil {
+		return nil
+	}
+	if afterCapture != nil {
+		afterCapture()
+	}
+	after, err := collectDirtyGitDerivation(ctx, sourceAbs)
+	if err != nil {
+		return diag.New(
+			CodeSourceChangedDuringCapture,
+			"source worktree mutated during freeze; quiesce the worktree and retry.",
+			diag.WithDetail("before_status", before.source.GitDirtyStatus),
+			diag.WithDetail("recheck_error", err.Error()),
+		)
+	}
+	if reflect.DeepEqual(before, after) && reflect.DeepEqual(dirtyGitSnapshotEntries(before.files), entries) {
+		return nil
+	}
+	return diag.New(
+		CodeSourceChangedDuringCapture,
+		"source worktree mutated during freeze; quiesce the worktree and retry.",
+		diag.WithDetail("before_status", before.source.GitDirtyStatus),
+		diag.WithDetail("after_status", after.source.GitDirtyStatus),
+	)
 }
 
 func parseGitPaths(output string) ([]string, error) {
