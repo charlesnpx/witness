@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/planning"
@@ -60,14 +61,18 @@ func assembleResultPath(config Config) string {
 	return filepath.Join(config.StateDir, "verification", "assemble-result.json")
 }
 
-func retainedIntegrationBundlePath(config Config) string {
+func retainedIntegrationBundlePath(config Config) (string, error) {
 	if retainedIntegrationBundleBodyExists(config) {
-		return retainedIntegrationBundleBodyPath(config)
+		return retainedIntegrationBundleBodyPath(config), nil
 	}
-	// Pass states created before retained authored bodies were added retain only
-	// the authenticated envelope. Keep them resumable while new passes always
-	// bind relay to the directly consumable body above.
-	return retainedIntegrationBundleEnvelopePath(config)
+	return "", diag.New(
+		CodeInvalidState,
+		"pass state predates directly consumable retained integration bundle bodies or is missing its retained body; refusing to bind the retention envelope to relay.",
+		diag.WithDetail("expected_body_path", retainedIntegrationBundleBodyPath(config)),
+		diag.WithDetail("retained_envelope_path", retainedIntegrationBundleEnvelopePath(config)),
+		diag.WithDetail("original_bundle_path", config.IntegrationBundlePath),
+		diag.WithDetail("rebind_instruction", "re-run preflight with -integration-bundle set to the original authored bundle path so integration-bundle.body.json is retained"),
+	)
 }
 
 func retainedIntegrationBundleBodyPath(config Config) string {

@@ -543,7 +543,7 @@ smoke run, for example, reports:
 {
   "charter_freeze": "charter.freeze.json",
   "compatibility_manifest": "compatibility-manifest.json",
-  "integration_bundle": "integration-bundle.json",
+  "integration_bundle": "integration-bundle.body.json",
   "pass_state": "pass-state.json",
   "preflight": "preflight.json",
   "relay_capabilities": "relay-capabilities.json",
@@ -557,7 +557,7 @@ The complete run layout is:
 | Writer | State-directory-relative artifact |
 | --- | --- |
 | Pass freeze | `pass-state.json`, `charter.freeze.json`, `source-snapshot/manifest.json`, `source-snapshot/blobs/sha256/<content-digest>` |
-| Preflight | `preflight.json`, `relay-capabilities.json`, `backend-status.json`, `recipes-list.json`, `integration-bundle.json`, `contract-digests.json`, `compatibility-manifest.json` |
+| Preflight | `preflight.json`, `relay-capabilities.json`, `backend-status.json`, `recipes-list.json`, `integration-bundle.json` (authenticated envelope), `integration-bundle.body.json` (directly bindable authored bundle), `contract-digests.json`, `compatibility-manifest.json` |
 | Preflight compilation | `compile-reports/witness-falsify-v2.json`, `compile-reports/witness-falsify-v2-codex.json`, `compile-reports/witness-falsify-v2-claude.json`, `compile-reports/economy-equivalence-v2.json`, `compile-reports/economy-equivalence-v2-codex.json`, `compile-reports/economy-equivalence-v2-claude.json`; a relay that emits plans also retains `recipe-plans/<recipe-id>.json` |
 | Finders | `role-outputs/defect-output.json`, `role-outputs/economy-output.json` |
 | Plan and assembly | `verification-plan.json`, `verification/index.skeleton.json`, `verification/index.json`, and, when applicable, `verification/assemble-result.json` |

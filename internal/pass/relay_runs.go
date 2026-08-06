@@ -26,6 +26,14 @@ func relayRunRecordPath(config Config, batchID string) string {
 }
 
 func readRecordedRelayRuns(state *State, batches []RelayBatchRecord) (map[string]recordedRelayRun, error) {
+	if state == nil {
+		return nil, diag.New(CodeInvalidState, "cannot read retained relay run records without pass state.")
+	}
+	preflightResult, err := readPreflightResult(state.Config.Outputs.PreflightPath)
+	if err != nil {
+		return nil, err
+	}
+	integrationBundleDigest := preflightResult.ContractDigests["integration_bundle"]
 	runs := make(map[string]recordedRelayRun, len(batches))
 	for _, batch := range batches {
 		path := relayRunRecordPath(state.Config, batch.BatchID)
@@ -68,7 +76,7 @@ func readRecordedRelayRuns(state *State, batches []RelayBatchRecord) (map[string
 				diag.WithDetail("batch_id", batch.BatchID),
 			)
 		}
-		if err := validateRecordedRelayRunBindings(state, batch, record); err != nil {
+		if err := validateRecordedRelayRunBindings(state, batch, record, integrationBundleDigest); err != nil {
 			return nil, err
 		}
 		metadata, err := relayrun.ManifestRunRecordMetadata(record)
@@ -102,9 +110,13 @@ func readRecordedRelayRuns(state *State, batches []RelayBatchRecord) (map[string
 // input_bindings and digest suffixes, so absence remains governed by
 // relayrun's existing record validation; any binding that is present must
 // still identify the pass's planned input.
-func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, record relayrun.RunRecord) error {
+func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, record relayrun.RunRecord, integrationBundleDigest string) error {
 	if state == nil {
 		return diag.New(CodeInvalidState, "cannot validate a retained relay run record without pass state.")
+	}
+	integrationBundlePath, err := retainedIntegrationBundlePath(state.Config)
+	if err != nil {
+		return err
 	}
 	type expectedBinding struct {
 		path   string
@@ -123,6 +135,10 @@ func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, reco
 			path:   state.Config.SnapshotManifestPath,
 			digest: stageOutputDigest(state, "source-snapshot-manifest"),
 		},
+		"integration_bundle": {
+			path:   integrationBundlePath,
+			digest: integrationBundleDigest,
+		},
 	}
 	for _, binding := range record.InputBindings {
 		name, value, found := strings.Cut(binding, "=")
@@ -135,9 +151,9 @@ func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, reco
 		}
 		path := strings.TrimSpace(value)
 		suppliedDigest := ""
-		if candidate, claimedDigest, hasDigest := strings.Cut(path, "@"); hasDigest && strings.HasPrefix(claimedDigest, digest.Prefix) {
-			path = candidate
-			suppliedDigest = claimedDigest
+		if suffixStart := strings.LastIndex(path, "@"+digest.Prefix); suffixStart >= 0 {
+			suppliedDigest = path[suffixStart+1:]
+			path = path[:suffixStart]
 		}
 		if !recordedPathsEqual(path, want.path) {
 			return diag.New(
@@ -181,27 +197,25 @@ func relayBackend(recipeID string) string {
 	}
 }
 
-func allRelayRunsRecorded(batches []RelayBatchRecord, runs map[string]recordedRelayRun) bool {
-	return len(batches) == len(runs)
-}
-
-func relayEvidenceFromRecordedRuns(batches []RelayBatchRecord, runs map[string]recordedRelayRun) []planning.RelayEvidence {
-	evidence := make([]planning.RelayEvidence, 0, len(batches))
-	for _, batch := range batches {
-		if run, found := runs[batch.BatchID]; found {
-			evidence = append(evidence, run.Evidence)
-		}
-	}
-	return evidence
-}
-
 func relayEvidenceForAssembly(state *State, batches []RelayBatchRecord) ([]planning.RelayEvidence, map[string]recordedRelayRun, error) {
 	runs, err := readRecordedRelayRuns(state, batches)
 	if err != nil {
 		return nil, nil, err
 	}
-	if allRelayRunsRecorded(batches, runs) {
-		return relayEvidenceFromRecordedRuns(batches, runs), runs, nil
+	readyEvidence := relayEvidenceFromReadyBatches(state, batches)
+	readyByBatchID := make(map[string]planning.RelayEvidence, len(readyEvidence))
+	for _, evidence := range readyEvidence {
+		readyByBatchID[evidence.BatchID] = evidence
 	}
-	return relayEvidenceFromReadyBatches(state, batches), runs, nil
+	evidence := make([]planning.RelayEvidence, 0, len(batches))
+	for _, batch := range batches {
+		if run, found := runs[batch.BatchID]; found {
+			evidence = append(evidence, run.Evidence)
+			continue
+		}
+		if ready, found := readyByBatchID[batch.BatchID]; found {
+			evidence = append(evidence, ready)
+		}
+	}
+	return evidence, runs, nil
 }

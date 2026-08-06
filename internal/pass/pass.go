@@ -1282,22 +1282,25 @@ func nextRelayBatchAction(state *State) (*RelayBatchAction, error) {
 				continue
 			}
 			batch.Status = statusPending
-			return relayBatchAction(state, batch, preflightResult), nil
+			return relayBatchAction(state, batch, preflightResult)
 		}
 		if portableExportReady(batch.PortableExportDir) {
 			batch.Status = statusComplete
 			continue
 		}
 		batch.Status = statusPending
-		return relayBatchAction(state, batch, preflightResult), nil
+		return relayBatchAction(state, batch, preflightResult)
 	}
 	return nil, nil
 }
 
-func relayBatchAction(state *State, batch *RelayBatchRecord, preflightResult preflight.Result) *RelayBatchAction {
+func relayBatchAction(state *State, batch *RelayBatchRecord, preflightResult preflight.Result) (*RelayBatchAction, error) {
 	charterDigest := stageOutputDigest(state, "charter-freeze")
 	snapshotDigest := stageOutputDigest(state, "source-snapshot-manifest")
-	integrationBundlePath := retainedIntegrationBundlePath(state.Config)
+	integrationBundlePath, err := retainedIntegrationBundlePath(state.Config)
+	if err != nil {
+		return nil, err
+	}
 	integrationBundleDigest := preflightResult.ContractDigests["integration_bundle"]
 	return &RelayBatchAction{
 		BatchID:                 batch.BatchID,
@@ -1317,7 +1320,7 @@ func relayBatchAction(state *State, batch *RelayBatchRecord, preflightResult pre
 			boundInput("artifact", state.Config.SnapshotManifestPath, snapshotDigest),
 			boundInput("integration_bundle", integrationBundlePath, integrationBundleDigest),
 		},
-	}
+	}, nil
 }
 
 func markRelayBatchesNotRequired(state *State) {
@@ -1722,8 +1725,10 @@ func manifestEvidenceRefs(config Config, consumerIdentity map[string]any) (plann
 	refs := planning.ManifestEvidenceRefs{ConsumerIdentity: cloneMap(consumerIdentity)}
 	compatibilityPath := filepath.Join(config.StateDir, "compatibility-manifest.json")
 	capabilitiesPath := filepath.Join(config.StateDir, "relay-capabilities.json")
-	integrationBundlePath := retainedIntegrationBundlePath(config)
-	var err error
+	integrationBundlePath, err := retainedIntegrationBundlePath(config)
+	if err != nil {
+		return refs, err
+	}
 	refs.CompatibilityManifest, err = artifactRefForFile("compatibility-manifest", compatibilityPath)
 	if err != nil {
 		return refs, err
