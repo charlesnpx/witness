@@ -1281,6 +1281,10 @@ func nextRelayBatchAction(state *State) (*RelayBatchAction, error) {
 				batch.Status = statusComplete
 				continue
 			}
+			if portableExportReady(batch.PortableExportDir) {
+				batch.Status = statusComplete
+				continue
+			}
 			batch.Status = statusPending
 			return relayBatchAction(state, batch, preflightResult)
 		}

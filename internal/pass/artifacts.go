@@ -283,11 +283,13 @@ func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInp
 			artifactInput{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
 			artifactInput{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
 			artifactInput{role: "integration-bundle-retained", path: retainedIntegrationBundleEnvelopePath(config), digestClass: digest.ClassRawBytes},
-			artifactInput{role: "integration-bundle-body", path: retainedIntegrationBundleBodyPath(config), digestClass: digest.ClassRawBytes},
 		)
 	}
 	for _, relativePath := range sortedStringMapKeys(result.ArtifactDigests) {
 		if relativePath == "source-snapshot-manifest" {
+			continue
+		}
+		if relativePath == preflight.RetainedIntegrationBundleBodyFile && strings.TrimSpace(result.ArtifactDigests[relativePath]) == "" {
 			continue
 		}
 		specs = append(specs, artifactInput{

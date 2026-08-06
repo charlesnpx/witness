@@ -52,6 +52,10 @@ type Options struct {
 	IntegrationBundlePath string
 	CharterPath           string
 	ArtifactPaths         []string
+	// ArtifactDigests aligns with ArtifactPaths and retains one digest for
+	// every artifact supplied to relay. ArtifactDigest remains the legacy
+	// single-artifact planned snapshot digest.
+	ArtifactDigests []string
 	// The planned digests are retained with the run record, rather than passed
 	// to relay. Relay's --input contract takes plain paths.
 	CharterDigest           string
@@ -893,12 +897,36 @@ func inputBindings(charterPath string, batchPath string, artifactPaths []string)
 // validates. The relay launch intentionally receives inputBindings instead:
 // relay's documented --input form is name=path, not name=path@digest.
 func recordedInputBindings(options Options, batch BatchInput) []string {
-	bindings := make([]string, 0, 4)
+	bindings := make([]string, 0, 3+len(options.ArtifactPaths))
 	bindings = appendRecordedInputBinding(bindings, "charter", options.CharterPath, firstPlannedDigest(options.CharterDigest, batch.Plan.CharterDigest))
 	bindings = appendRecordedInputBinding(bindings, "findings", batch.Path, batch.Plan.BatchDigest)
-	bindings = appendRecordedInputBinding(bindings, "artifact", firstArtifactPath(options.ArtifactPaths), firstPlannedDigest(options.ArtifactDigest, batch.Plan.PreflightSnapshotDigest, batch.Plan.ArtifactDigest))
+	firstArtifact := true
+	for index, path := range options.ArtifactPaths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		bindings = appendRecordedInputBinding(bindings, "artifact", path, recordedArtifactDigest(options, batch, index, path, firstArtifact))
+		firstArtifact = false
+	}
 	bindings = appendRecordedInputBinding(bindings, "integration_bundle", options.IntegrationBundlePath, firstPlannedDigest(options.IntegrationBundleDigest, batch.Plan.IntegrationBundleDigest))
 	return bindings
+}
+
+func recordedArtifactDigest(options Options, batch BatchInput, index int, path string, firstArtifact bool) string {
+	if index < len(options.ArtifactDigests) {
+		if valueDigest := strings.TrimSpace(options.ArtifactDigests[index]); valueDigest != "" {
+			return valueDigest
+		}
+	}
+	if firstArtifact {
+		return firstPlannedDigest(options.ArtifactDigest, batch.Plan.PreflightSnapshotDigest, batch.Plan.ArtifactDigest)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return digest.RawBytes(data)
 }
 
 func appendRecordedInputBinding(bindings []string, name string, path string, valueDigest string) []string {
@@ -908,15 +936,6 @@ func appendRecordedInputBinding(bindings []string, name string, path string, val
 		return bindings
 	}
 	return append(bindings, name+"="+path+"@"+valueDigest)
-}
-
-func firstArtifactPath(paths []string) string {
-	for _, path := range paths {
-		if path = strings.TrimSpace(path); path != "" {
-			return path
-		}
-	}
-	return ""
 }
 
 func firstPlannedDigest(values ...string) string {

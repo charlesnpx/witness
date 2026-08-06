@@ -107,8 +107,9 @@ func readRecordedRelayRuns(state *State, batches []RelayBatchRecord) (map[string
 
 // validateRecordedRelayRunBindings rejects rebinding to another planned input
 // or digest. A record that consumes a batch must prove all of the frozen
-// inputs it consumed. A non-consuming launch_failed record may omit bindings,
-// but any binding it does provide must still identify the pass's planned input.
+// inputs it consumed. A non-consuming launch_failed record may omit bindings;
+// its planned bindings must still match, while any additional artifact binding
+// must retain a well-formed path and digest.
 func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, record relayrun.RunRecord, integrationBundleDigest string) error {
 	if state == nil {
 		return diag.New(CodeInvalidState, "cannot validate a retained relay run record without pass state.")
@@ -170,13 +171,14 @@ func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, reco
 	}
 	for _, name := range requiredNames {
 		want := expected[name]
-		for _, value := range suppliedValues[name] {
-			path := value
-			suppliedDigest := ""
-			if suffixStart := strings.LastIndex(path, "@"+digest.Prefix); suffixStart >= 0 {
-				suppliedDigest = path[suffixStart+1:]
-				path = path[:suffixStart]
+		if name == "artifact" {
+			if err := validateRecordedArtifactBindings(batch.BatchID, want.path, want.digest, suppliedValues[name], record.ConsumesBatch); err != nil {
+				return err
 			}
+			continue
+		}
+		for _, value := range suppliedValues[name] {
+			path, suppliedDigest := splitRecordedRelayRunBinding(value)
 			if record.ConsumesBatch && suppliedDigest == "" {
 				return diag.New(
 					CodeInvalidState,
@@ -223,6 +225,113 @@ func validateRecordedRelayRunBindings(state *State, batch RelayBatchRecord, reco
 		}
 	}
 	return nil
+}
+
+// validateRecordedArtifactBindings requires a consuming record to retain the
+// planned snapshot binding. Relay may receive additional artifact paths; their
+// retained provenance is acceptable only when both components are well-formed.
+func validateRecordedArtifactBindings(batchID string, expectedPath string, expectedDigest string, values []string, consumesBatch bool) error {
+	type artifactBinding struct {
+		path   string
+		digest string
+	}
+	bindings := make([]artifactBinding, 0, len(values))
+	hasPlannedBinding := false
+	for _, value := range values {
+		path, valueDigest := splitRecordedRelayRunBinding(value)
+		bindings = append(bindings, artifactBinding{path: path, digest: valueDigest})
+		if recordedPathsEqual(path, expectedPath) && valueDigest == expectedDigest {
+			hasPlannedBinding = true
+		}
+	}
+	if consumesBatch {
+		if hasPlannedBinding {
+			for _, binding := range bindings {
+				if !wellFormedRecordedArtifactBinding(binding.path, binding.digest) {
+					return invalidRecordedArtifactBinding(batchID, binding.path, binding.digest)
+				}
+			}
+			return nil
+		}
+		for _, binding := range bindings {
+			if !recordedPathsEqual(binding.path, expectedPath) {
+				continue
+			}
+			if binding.digest == "" {
+				return diag.New(
+					CodeInvalidState,
+					"a retained relay run record that consumes a batch must bind each planned input with its digest.",
+					diag.WithDetail("batch_id", batchID),
+					diag.WithDetail("binding", "artifact"),
+					diag.WithDetail("actual_path", binding.path),
+					diag.WithDetail("expected_digest", expectedDigest),
+				)
+			}
+			return diag.New(
+				CodeInvalidState,
+				"retained relay run record input binding digest does not match the planned batch input.",
+				diag.WithDetail("batch_id", batchID),
+				diag.WithDetail("binding", "artifact"),
+				diag.WithDetail("actual_digest", binding.digest),
+				diag.WithDetail("expected_digest", expectedDigest),
+			)
+		}
+		for _, binding := range bindings {
+			if !wellFormedRecordedArtifactBinding(binding.path, binding.digest) {
+				return invalidRecordedArtifactBinding(batchID, binding.path, binding.digest)
+			}
+		}
+		return diag.New(
+			CodeInvalidState,
+			"a retained relay run record that consumes a batch is missing the planned source snapshot artifact binding.",
+			diag.WithDetail("batch_id", batchID),
+			diag.WithDetail("binding", "artifact"),
+			diag.WithDetail("expected_path", expectedPath),
+			diag.WithDetail("expected_digest", expectedDigest),
+		)
+	}
+	for _, binding := range bindings {
+		if recordedPathsEqual(binding.path, expectedPath) {
+			if binding.digest != "" && expectedDigest != "" && binding.digest != expectedDigest {
+				return diag.New(
+					CodeInvalidState,
+					"retained relay run record input binding digest does not match the planned batch input.",
+					diag.WithDetail("batch_id", batchID),
+					diag.WithDetail("binding", "artifact"),
+					diag.WithDetail("actual_digest", binding.digest),
+					diag.WithDetail("expected_digest", expectedDigest),
+				)
+			}
+			continue
+		}
+		if !wellFormedRecordedArtifactBinding(binding.path, binding.digest) {
+			return invalidRecordedArtifactBinding(batchID, binding.path, binding.digest)
+		}
+	}
+	return nil
+}
+
+func splitRecordedRelayRunBinding(value string) (string, string) {
+	path := value
+	if suffixStart := strings.LastIndex(path, "@"+digest.Prefix); suffixStart >= 0 {
+		return path[:suffixStart], path[suffixStart+1:]
+	}
+	return path, ""
+}
+
+func wellFormedRecordedArtifactBinding(path string, valueDigest string) bool {
+	return strings.TrimSpace(path) != "" && !strings.Contains(path, "\x00") && digest.WellFormed(valueDigest)
+}
+
+func invalidRecordedArtifactBinding(batchID string, path string, valueDigest string) error {
+	return diag.New(
+		CodeInvalidState,
+		"retained relay run record additional artifact binding must have a non-empty path and a well-formed digest.",
+		diag.WithDetail("batch_id", batchID),
+		diag.WithDetail("binding", "artifact"),
+		diag.WithDetail("actual_path", path),
+		diag.WithDetail("actual_digest", valueDigest),
+	)
 }
 
 func relayRecipeFamily(recipeID string) string {
