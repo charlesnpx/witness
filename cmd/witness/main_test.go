@@ -24,6 +24,7 @@ import (
 	"github.com/charlesnpx/witness/internal/policy"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/relayclient"
+	"github.com/charlesnpx/witness/internal/relayrun"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
@@ -1734,6 +1735,122 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 	}
 	if batchMetadata["backend"] != "codex" || batchMetadata["recipe_family"] != "witness-falsify-v2" {
 		t.Fatalf("relay batch metadata = %#v, want codex witness-falsify-v2", batchMetadata)
+	}
+}
+
+func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutput := validCLIRoleOutput(frozen)
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	stateDir := filepath.Join(dir, "state")
+	manifestOut := filepath.Join(dir, "manifest-run-record.json")
+	compatibility := writeCLIArtifact(t, dir, "compatibility-run-record.json")
+	capabilities := writeCLIArtifact(t, dir, "capabilities-run-record.json")
+	bundle := writeCLIArtifact(t, dir, "bundle-run-record.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-run-record.json", stateDir, compatibility, capabilities, bundle)
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", filepath.Join(dir, "plan-run-record.json"),
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	runRecordPath := filepath.Join(dir, "relay-run-record.json")
+	if err := writeCanonical(runRecordPath, relayrun.RunRecord{
+		SchemaVersion:   relayrun.RunRecordSchema,
+		BatchID:         "defect-batch-1",
+		Status:          relayrun.RunStatusLaunchFailed,
+		RecipeID:        "witness-falsify-v2-codex",
+		InputBindings:   []string{"charter=" + frozenPath},
+		ProviderInvoked: relayrun.ProviderInvokedFalse,
+		ConsumesBatch:   false,
+		RelayLaunch: &relayrun.LaunchRecord{
+			Argv:             []string{"fake-relay", "run", "--recipe", "witness-falsify-v2-codex", "--json"},
+			WorkingDirectory: dir,
+			ExitCode:         1,
+			Stdout:           `{"message":"authentication failed"}`,
+			Stderr:           "authentication failed",
+		},
+		Diagnostics: []diag.Diagnostic{{
+			Code:    relayrun.CodeRelayRunFailed,
+			Message: "relay verification run failed.",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selectedContract := writeCLISelectedContractArtifact(t, dir, "contract-run-record.json")
+	batchPath := filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json")
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-batch", batchPath,
+		"-run-record", runRecordPath,
+		"-compatibility-manifest", compatibility,
+		"-relay-capabilities", capabilities,
+		"-integration-bundle", bundle,
+		"-selected-contract", selectedContract,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble -run-record: %v", err)
+	}
+	data, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics := contracts.ValidateVerificationManifest(manifest); len(diagnostics) > 0 {
+		t.Fatalf("manifest diagnostics = %#v", diagnostics)
+	}
+	if _, err := contracts.VerificationManifestDigest(manifest); err != nil {
+		t.Fatalf("manifest digest: %v", err)
+	}
+	if len(manifest.Batches) != 1 || manifest.Batches[0].Status != contracts.RecordStatusUnavailable || manifest.Batches[0].FailureReason != "relay_launch_failed" {
+		t.Fatalf("manifest batches = %#v, want valid unavailable launch-failed record", manifest.Batches)
+	}
+	relayBatches, ok := manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer identity = %#v, missing relay batch metadata", manifest.ConsumerIdentity)
+	}
+	batchMetadata, ok := relayBatches["defect-batch-1"].(map[string]any)
+	if !ok {
+		t.Fatalf("relay batch metadata = %#v", relayBatches)
+	}
+	runRecords, ok := batchMetadata["run_records"].([]any)
+	if !ok || len(runRecords) != 1 {
+		t.Fatalf("run records = %#v, want retained launch evidence", batchMetadata["run_records"])
+	}
+	retained, ok := runRecords[0].(map[string]any)
+	if !ok || retained["provider_invoked"] != relayrun.ProviderInvokedFalse || retained["status"] != relayrun.RunStatusLaunchFailed {
+		t.Fatalf("retained run record = %#v", runRecords[0])
+	}
+	launch, ok := retained["relay_launch"].(map[string]any)
+	if !ok || launch["exit_code"] != json.Number("1") || launch["stderr"] != "authentication failed" {
+		t.Fatalf("retained launch = %#v", retained["relay_launch"])
+	}
+	adjudication, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter: &frozen,
+		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: roleOutputPath, Document: roleOutput}},
+		Manifest:      manifest,
+	})
+	if err != nil {
+		t.Fatalf("adjudicate unavailable manifest: %v", err)
+	}
+	if len(adjudication.Findings) != 1 || adjudication.Findings[0].Disposition != contracts.DispositionPendingVerification {
+		t.Fatalf("adjudication findings = %#v, want pending verification", adjudication.Findings)
 	}
 }
 

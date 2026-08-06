@@ -120,6 +120,32 @@ func TestCommandErrorTaxonomy(t *testing.T) {
 	}
 }
 
+func TestRunRecipeWithCommandResultRetainsSuccessfulCommand(t *testing.T) {
+	client := Client{
+		Executable: "fake-relay",
+		Runner: runnerFunc(func(context.Context, string, ...string) CommandResult {
+			return CommandResult{Stdout: []byte(`{"session_dir":"/tmp/relay-session"}`)}
+		}),
+	}
+	result, command, err := client.RunRecipeWithCommandResult(context.Background(), RunRecipeOptions{
+		Task:      "verify",
+		RecipeID:  "witness-falsify-v2-codex",
+		LaunchCWD: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("RunRecipeWithCommandResult: %v", err)
+	}
+	if result["session_dir"] != "/tmp/relay-session" {
+		t.Fatalf("result = %#v", result)
+	}
+	if command.Command != "fake-relay" || len(command.Args) < 2 || command.Args[0] != "run" || command.ExitCode != 0 {
+		t.Fatalf("command = %#v", command)
+	}
+	if !containsCommandArgPair(command.Args, "--launch-cwd", "/workspace") {
+		t.Fatalf("command args = %#v, want launch cwd", command.Args)
+	}
+}
+
 func TestCompileRecipeNonzeroDecodesRelayDiagnostic(t *testing.T) {
 	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	stdout, err := os.ReadFile(filepath.Join(fixtures, "compile-witness-falsify-v2-missing-contract.json"))
@@ -146,6 +172,15 @@ func TestCompileRecipeNonzeroDecodesRelayDiagnostic(t *testing.T) {
 	if commandError.Diagnostic.Code != "integration_contract_not_found" {
 		t.Fatalf("diagnostic = %#v", commandError.Diagnostic)
 	}
+}
+
+func containsCommandArgPair(args []string, key string, value string) bool {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == key && args[index+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeFixture[T any](path string) (T, error) {

@@ -488,12 +488,14 @@ func runVerificationAssemble(args []string) error {
 	var batchPaths repeatedStrings
 	var verdictPaths repeatedStrings
 	var portableExports repeatedStrings
+	var runRecordPaths repeatedStrings
 	var receiptPaths repeatedStrings
 	var selectedContractPaths repeatedStrings
 	var artifactPaths repeatedStrings
 	flags.Var(&batchPaths, "batch", "verification-batch JSON path; may be repeated")
 	flags.Var(&verdictPaths, "relay-verdict", "relay verdict JSON path or batch-id=path; may be repeated")
 	flags.Var(&portableExports, "portable-export", "batch-id=portable export directory; may be repeated")
+	flags.Var(&runRecordPaths, "run-record", "retained relay run record or runs index JSON path; may be repeated")
 	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
 	flags.Var(&selectedContractPaths, "selected-contract", "selected relay contract artifact path; may be repeated")
 	flags.Var(&artifactPaths, "artifact", "artifact input path for relay verification runs; may be repeated")
@@ -526,13 +528,14 @@ func runVerificationAssemble(args []string) error {
 	}
 	protected = append(protected, protectedInputsForPaths("batch", batchPaths)...)
 	protected = append(protected, protectedInputsForSpecs("relay-verdict", verdictPaths)...)
+	protected = append(protected, protectedInputsForPaths("run-record", runRecordPaths)...)
 	protected = append(protected, protectedInputsForPaths("receipt", receiptPaths)...)
 	protected = append(protected, protectedInputsForPaths("selected-contract", selectedContractPaths)...)
 	protected = append(protected, protectedInputsForPaths("artifact", artifactPaths)...)
 	if err := rejectOutputPathAliases(*out, protected...); err != nil {
 		return err
 	}
-	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0) {
+	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0 || len(runRecordPaths) > 0) {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble -run-relay cannot be combined with pre-produced relay evidence flags.")
 	}
 	plan, err := readPlanFile(*planPath)
@@ -551,6 +554,11 @@ func runVerificationAssemble(args []string) error {
 	if err != nil {
 		return err
 	}
+	runRecordEvidence, err := readRunRecordEvidence(runRecordPaths)
+	if err != nil {
+		return err
+	}
+	relayEvidence = mergeRelayEvidence(relayEvidence, runRecordEvidence)
 	if *runRelay {
 		runBatches, err := relayRunBatchInputs(plan, batches, *stateDir)
 		if err != nil {
@@ -573,7 +581,10 @@ func runVerificationAssemble(args []string) error {
 		if err != nil {
 			return err
 		}
-		relayEvidence = relayEvidenceFromRunResult(runResult)
+		relayEvidence, err = relayEvidenceFromRunResult(runResult)
+		if err != nil {
+			return err
+		}
 		batches = batchEvidenceFromRunInputs(runBatches)
 	}
 	receipts, err := readReceipts(receiptPaths)
@@ -1730,17 +1741,22 @@ func batchEvidenceFromRunInputs(inputs []relayrun.BatchInput) []planning.BatchEv
 	return batches
 }
 
-func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidence {
+func relayEvidenceFromRunResult(result *relayrun.Result) ([]planning.RelayEvidence, error) {
 	if result == nil {
-		return nil
+		return nil, nil
 	}
 	evidence := make([]planning.RelayEvidence, 0, len(result.Runs))
 	for _, run := range result.Runs {
+		runRecord, err := relayRunRecordMetadata(run)
+		if err != nil {
+			return nil, err
+		}
 		record := planning.RelayEvidence{
 			BatchID:           run.BatchID,
 			RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
 			Backend:           relayBackendFromRecipeID(run.RecipeID),
 			PortableExportDir: run.PortableExportDir,
+			RunRecords:        []map[string]any{runRecord},
 		}
 		if run.PortableExportDigest != "" {
 			record.PortableExportRef = &contracts.ArtifactRef{
@@ -1753,7 +1769,7 @@ func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidenc
 		}
 		evidence = append(evidence, record)
 	}
-	return evidence
+	return evidence, nil
 }
 
 func relayRecipeFamilyFromRecipeID(recipeID string) string {
@@ -1812,6 +1828,84 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 		result = append(result, byBatch[batchID])
 	}
 	return result, nil
+}
+
+func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
+	evidence := make([]planning.RelayEvidence, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fileReadError(err, path, "open retained relay run record")
+		}
+		runs, err := relayrun.ReadRunRecordsBytes(data)
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runs {
+			runRecord, err := relayRunRecordMetadata(run)
+			if err != nil {
+				return nil, err
+			}
+			record := planning.RelayEvidence{
+				BatchID:           run.BatchID,
+				RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
+				Backend:           relayBackendFromRecipeID(run.RecipeID),
+				PortableExportDir: run.PortableExportDir,
+				RunRecords:        []map[string]any{runRecord},
+			}
+			if run.PortableExportDigest != "" {
+				record.PortableExportRef = &contracts.ArtifactRef{
+					Kind:          "relay-root-portable-export",
+					ID:            run.BatchID,
+					Digest:        run.PortableExportDigest,
+					DigestProfile: digest.Profile,
+					MediaType:     "application/json",
+				}
+			}
+			evidence = append(evidence, record)
+		}
+	}
+	return evidence, nil
+}
+
+func relayRunRecordMetadata(record relayrun.RunRecord) (map[string]any, error) {
+	data, err := contracts.CanonicalBytes(record)
+	if err != nil {
+		return nil, err
+	}
+	return strictjson.DecodeBytes[map[string]any](data, strictjson.DefaultMaxBytes*32)
+}
+
+func mergeRelayEvidence(sources ...[]planning.RelayEvidence) []planning.RelayEvidence {
+	byBatch := map[string]planning.RelayEvidence{}
+	for _, source := range sources {
+		for _, incoming := range source {
+			current := byBatch[incoming.BatchID]
+			current.BatchID = incoming.BatchID
+			if incoming.RecipeFamily != "" {
+				current.RecipeFamily = incoming.RecipeFamily
+			}
+			if incoming.Backend != "" {
+				current.Backend = incoming.Backend
+			}
+			if incoming.PortableExportDir != "" {
+				current.PortableExportDir = incoming.PortableExportDir
+			}
+			if incoming.PortableExportRef != nil {
+				current.PortableExportRef = incoming.PortableExportRef
+			}
+			if incoming.Verdicts != nil {
+				current.Verdicts = incoming.Verdicts
+			}
+			current.RunRecords = append(current.RunRecords, incoming.RunRecords...)
+			byBatch[incoming.BatchID] = current
+		}
+	}
+	result := make([]planning.RelayEvidence, 0, len(byBatch))
+	for _, batchID := range sortedRelayEvidenceBatchIDs(byBatch) {
+		result = append(result, byBatch[batchID])
+	}
+	return result
 }
 
 func readReceipts(paths []string) ([]contracts.ExecutionReceipt, error) {

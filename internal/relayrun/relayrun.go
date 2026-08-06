@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	SchemaVersion         = "witness-relay-verification-runs-v1"
-	RunRecordSchema       = "witness-relay-verification-run-v1"
+	SchemaVersion         = "witness-relay-verification-runs-v2"
+	RunRecordSchema       = "witness-relay-verification-run-v2"
 	CodeMissingBatchPath  = "relayrun_missing_batch_path"
 	CodeRelayRunFailed    = "relayrun_launch_failed"
 	CodeRelayExportFailed = "relayrun_export_failed"
@@ -30,6 +30,18 @@ const (
 	CodePortableInvalid   = "relayrun_portable_invalid"
 	CodeOutputFailed      = "relayrun_output_failed"
 	CodeInvalidBatchInput = "relayrun_invalid_batch_input"
+	CodeInvalidRunRecord  = "relayrun_invalid_run_record"
+
+	// RunStatusLaunchFailed marks a nonzero relay run with no session or
+	// provider artifact. It is the only status that does not consume the
+	// batch's single verification run.
+	RunStatusLaunchFailed = "launch_failed"
+
+	ProviderInvokedTrue    = "true"
+	ProviderInvokedFalse   = "false"
+	ProviderInvokedUnknown = "unknown"
+
+	launchCaptureLimitBytes = 64 * 1024
 )
 
 type Options struct {
@@ -59,12 +71,32 @@ type Result struct {
 	Runs          []RunRecord `json:"runs"`
 }
 
+// LaunchRecord is the bounded witness-side evidence for one relay run command.
+// The stdout and stderr fields each retain at most launchCaptureLimitBytes of
+// source output, split evenly between the head and tail when truncated.
+type LaunchRecord struct {
+	Argv             []string `json:"argv"`
+	WorkingDirectory string   `json:"working_directory"`
+	ExitCode         int      `json:"exit_code"`
+	Stdout           string   `json:"stdout"`
+	Stderr           string   `json:"stderr"`
+	StdoutTruncated  bool     `json:"stdout_truncated"`
+	StderrTruncated  bool     `json:"stderr_truncated"`
+}
+
 type RunRecord struct {
-	SchemaVersion        string            `json:"schema_version"`
-	BatchID              string            `json:"batch_id"`
-	Status               string            `json:"status"`
-	RecipeID             string            `json:"recipe_id"`
-	InputBindings        []string          `json:"input_bindings"`
+	SchemaVersion string        `json:"schema_version"`
+	BatchID       string        `json:"batch_id"`
+	Status        string        `json:"status"`
+	RecipeID      string        `json:"recipe_id"`
+	InputBindings []string      `json:"input_bindings"`
+	RelayLaunch   *LaunchRecord `json:"relay_launch,omitempty"`
+	// ProviderInvoked is one of true, false, or unknown. False is assigned
+	// only to a nonzero launch with no session or provider artifact.
+	ProviderInvoked string `json:"provider_invoked"`
+	// ConsumesBatch is false only for provider_invoked=false launch_failed
+	// records; true and unknown remain fail-closed and consume the batch.
+	ConsumesBatch        bool              `json:"consumes_batch"`
 	SessionDir           string            `json:"session_dir,omitempty"`
 	PortableExportDir    string            `json:"portable_export_dir,omitempty"`
 	PortableExportDigest string            `json:"portable_export_digest,omitempty"`
@@ -77,12 +109,15 @@ type RunRecord struct {
 func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Result, error) {
 	client := relayclient.Client{Executable: options.RelayPath, Runner: options.Runner}
 	result := &Result{SchemaVersion: SchemaVersion}
+	launchCWD := effectiveLaunchCWD(options.LaunchCWD)
 	for _, batch := range batches {
 		record := RunRecord{
-			SchemaVersion: RunRecordSchema,
-			BatchID:       batch.Plan.BatchID,
-			RecipeID:      RecipeID(batch.Plan.TaskShape, options.Backend),
-			Status:        contracts.RecordStatusUnavailable,
+			SchemaVersion:   RunRecordSchema,
+			BatchID:         batch.Plan.BatchID,
+			RecipeID:        RecipeID(batch.Plan.TaskShape, options.Backend),
+			Status:          contracts.RecordStatusUnavailable,
+			ProviderInvoked: ProviderInvokedUnknown,
+			ConsumesBatch:   true,
 		}
 		if strings.TrimSpace(batch.Path) == "" {
 			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeMissingBatchPath, "relay verification requires a persisted verification-batch path.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
@@ -95,7 +130,7 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			continue
 		}
 		record.InputBindings = inputBindings(options.CharterPath, batch.Path, options.ArtifactPaths)
-		runResult, err := client.RunRecipe(ctx, relayclient.RunRecipeOptions{
+		runResult, commandResult, err := client.RunRecipeWithCommandResult(ctx, relayclient.RunRecipeOptions{
 			Task:                  relayTask(batch),
 			RecipeID:              record.RecipeID,
 			IntegrationBundlePath: options.IntegrationBundlePath,
@@ -106,13 +141,24 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			SettingsPath:          options.SettingsPath,
 			AllowDirtySource:      options.AllowDirtySource,
 		})
+		record.RelayLaunch = launchRecord(commandResult, launchCWD)
+		if runResult == nil {
+			runResult = runResultFromFailedCommand(commandResult)
+		}
+		if runResult != nil {
+			record.RelayRunResult = runResult
+			record.SessionDir = firstString(runResult, "session_dir", "session_directory", "directory")
+		}
+		record.ProviderInvoked = classifyProviderInvocation(record.RelayLaunch, record.SessionDir, record.RelayRunResult)
+		if record.ProviderInvoked == ProviderInvokedFalse {
+			record.Status = RunStatusLaunchFailed
+			record.ConsumesBatch = false
+		}
 		if err != nil {
 			record.Diagnostics = append(record.Diagnostics, commandDiagnostic(CodeRelayRunFailed, "relay verification run failed.", err))
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		record.RelayRunResult = runResult
-		record.SessionDir = firstString(runResult, "session_dir", "session_directory", "directory")
 		if record.SessionDir == "" {
 			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeRelayRunFailed, "relay run result did not include a session_dir.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
 			result.Runs = append(result.Runs, record)
@@ -160,6 +206,203 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 		}
 	}
 	return result, nil
+}
+
+// ReadRunRecordsBytes accepts one v2 run record or a v2 runs index. The
+// version bump is required because strict JSON decoding rejects unknown fields.
+func ReadRunRecordsBytes(data []byte) ([]RunRecord, error) {
+	raw, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, err
+	}
+	document, ok := raw.(map[string]any)
+	if !ok {
+		return nil, diag.New(CodeInvalidRunRecord, "relay run record input must be a JSON object.")
+	}
+	schemaVersion, _ := document["schema_version"].(string)
+	switch schemaVersion {
+	case RunRecordSchema:
+		record, err := strictjson.DecodeBytes[RunRecord](data, strictjson.DefaultMaxBytes*32)
+		if err != nil {
+			return nil, err
+		}
+		if err := requireValidRunRecord(record); err != nil {
+			return nil, err
+		}
+		return []RunRecord{record}, nil
+	case SchemaVersion:
+		index, err := strictjson.DecodeBytes[Result](data, strictjson.DefaultMaxBytes*32)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range index.Runs {
+			if err := requireValidRunRecord(record); err != nil {
+				return nil, err
+			}
+		}
+		return index.Runs, nil
+	default:
+		return nil, diag.New(
+			CodeInvalidRunRecord,
+			"relay run record input has an unsupported schema_version.",
+			diag.WithDetail("actual", schemaVersion),
+			diag.WithDetail("record_schema", RunRecordSchema),
+			diag.WithDetail("index_schema", SchemaVersion),
+		)
+	}
+}
+
+func requireValidRunRecord(record RunRecord) error {
+	if record.SchemaVersion != RunRecordSchema {
+		return diag.New(CodeInvalidRunRecord, "relay run record schema_version is unsupported.", diag.WithDetail("actual", record.SchemaVersion), diag.WithDetail("expected", RunRecordSchema))
+	}
+	if strings.TrimSpace(record.BatchID) == "" {
+		return diag.New(CodeInvalidRunRecord, "relay run record batch_id is required.")
+	}
+	if record.ProviderInvoked != ProviderInvokedTrue && record.ProviderInvoked != ProviderInvokedFalse && record.ProviderInvoked != ProviderInvokedUnknown {
+		return diag.New(CodeInvalidRunRecord, "relay run record provider_invoked is unsupported.", diag.WithDetail("value", record.ProviderInvoked))
+	}
+	if record.Status != contracts.RecordStatusValid && record.Status != contracts.RecordStatusFailed && record.Status != contracts.RecordStatusUnavailable && record.Status != RunStatusLaunchFailed {
+		return diag.New(CodeInvalidRunRecord, "relay run record status is unsupported.", diag.WithDetail("value", record.Status))
+	}
+	providerArtifactPresent := strings.TrimSpace(record.SessionDir) != "" || containsSessionOrProviderArtifact(record.RelayRunResult)
+	if record.ProviderInvoked == ProviderInvokedFalse {
+		if record.Status != RunStatusLaunchFailed {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires launch_failed status.", diag.WithDetail("status", record.Status))
+		}
+		if record.ConsumesBatch {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false run records must not consume the batch.")
+		}
+		if record.RelayLaunch == nil || record.RelayLaunch.ExitCode <= 0 {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires a retained nonzero relay launch exit status.")
+		}
+		if providerArtifactPresent {
+			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires no session or provider artifact.")
+		}
+		return nil
+	}
+	if record.Status == RunStatusLaunchFailed {
+		return diag.New(CodeInvalidRunRecord, "launch_failed status requires provider_invoked=false.")
+	}
+	if !record.ConsumesBatch {
+		return diag.New(CodeInvalidRunRecord, "provider_invoked=true or unknown run records must consume the batch.")
+	}
+	if providerArtifactPresent && record.ProviderInvoked != ProviderInvokedTrue {
+		return diag.New(CodeInvalidRunRecord, "session or provider artifacts require provider_invoked=true.")
+	}
+	if !providerArtifactPresent && record.ProviderInvoked == ProviderInvokedTrue {
+		return diag.New(CodeInvalidRunRecord, "provider_invoked=true requires a session or provider artifact.")
+	}
+	return nil
+}
+
+func effectiveLaunchCWD(value string) string {
+	if strings.TrimSpace(value) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		return cwd
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return value
+	}
+	return abs
+}
+
+func launchRecord(result relayclient.CommandResult, workingDirectory string) *LaunchRecord {
+	if result.Command == "" && len(result.Args) == 0 {
+		return nil
+	}
+	stdout, stdoutTruncated := boundedLaunchOutput(result.Stdout)
+	stderr, stderrTruncated := boundedLaunchOutput(result.Stderr)
+	argv := make([]string, 0, len(result.Args)+1)
+	argv = append(argv, result.Command)
+	argv = append(argv, result.Args...)
+	return &LaunchRecord{
+		Argv:             argv,
+		WorkingDirectory: workingDirectory,
+		ExitCode:         result.ExitCode,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		StdoutTruncated:  stdoutTruncated,
+		StderrTruncated:  stderrTruncated,
+	}
+}
+
+func boundedLaunchOutput(value []byte) (string, bool) {
+	if len(value) <= launchCaptureLimitBytes {
+		return string(value), false
+	}
+	head := launchCaptureLimitBytes / 2
+	tail := launchCaptureLimitBytes - head
+	return string(append(append([]byte(nil), value[:head]...), value[len(value)-tail:]...)), true
+}
+
+func runResultFromFailedCommand(result relayclient.CommandResult) map[string]any {
+	for _, output := range [][]byte{result.Stdout, result.Stderr} {
+		value, err := strictjson.DecodeBytes[map[string]any](output, strictjson.DefaultMaxBytes*32)
+		if err == nil && value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func classifyProviderInvocation(launch *LaunchRecord, sessionDir string, runResult map[string]any) string {
+	if strings.TrimSpace(sessionDir) != "" || containsSessionOrProviderArtifact(runResult) {
+		return ProviderInvokedTrue
+	}
+	if launch != nil && launch.ExitCode > 0 {
+		return ProviderInvokedFalse
+	}
+	return ProviderInvokedUnknown
+}
+
+func containsSessionOrProviderArtifact(value any) bool {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, item := range current {
+			if nonEmptyRelayArtifact(item) && isSessionOrProviderArtifactKey(key) {
+				return true
+			}
+			if containsSessionOrProviderArtifact(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range current {
+			if containsSessionOrProviderArtifact(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSessionOrProviderArtifactKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "session_dir", "session_directory", "provider_result", "provider_results", "provider_artifact", "provider_artifacts", "provider_output", "provider_outputs", "provider_response", "provider_responses", "provider_invocation", "provider_invocations", "provider_result_ref":
+		return true
+	default:
+		return false
+	}
+}
+
+func nonEmptyRelayArtifact(value any) bool {
+	switch current := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(current) != ""
+	case []any:
+		return len(current) > 0
+	case map[string]any:
+		return len(current) > 0
+	default:
+		return true
+	}
 }
 
 func validatePreLaunchBatchInput(batch BatchInput, options Options) []diag.Diagnostic {

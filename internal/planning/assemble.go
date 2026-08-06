@@ -53,6 +53,7 @@ type RelayEvidence struct {
 	PortableExportDir string
 	PortableExportRef *contracts.ArtifactRef
 	Verdicts          *contracts.RelayWitnessVerdictsDocument
+	RunRecords        []map[string]any
 }
 
 type ManifestEvidenceRefs struct {
@@ -180,7 +181,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			continue
 		}
 		if !hasRelay || relay.PortableExportDir == "" {
-			record.FailureReason = "relay_verification_unavailable"
+			record.FailureReason = relayUnavailableFailureReason(relay)
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
 			manifest.Batches = append(manifest.Batches, record)
 			continue
@@ -431,7 +432,36 @@ func attachRelayBatchMetadata(manifest *contracts.VerificationManifest, planned 
 	if backend := strings.TrimSpace(relay.Backend); backend != "" {
 		entry["backend"] = backend
 	}
+	if len(relay.RunRecords) > 0 {
+		entry["run_records"] = cloneRelayRunRecords(relay.RunRecords)
+	}
 	raw[planned.BatchID] = entry
+}
+
+func relayUnavailableFailureReason(relay RelayEvidence) string {
+	for _, record := range relay.RunRecords {
+		status, _ := record["status"].(string)
+		providerInvoked, _ := record["provider_invoked"].(string)
+		if status == "launch_failed" && providerInvoked == "false" {
+			return "relay_launch_failed"
+		}
+	}
+	if len(relay.RunRecords) > 0 {
+		return "relay_run_recorded_unavailable"
+	}
+	return "relay_verification_unavailable"
+}
+
+func cloneRelayRunRecords(records []map[string]any) []map[string]any {
+	cloned := make([]map[string]any, 0, len(records))
+	for _, record := range records {
+		copy := make(map[string]any, len(record))
+		for key, value := range record {
+			copy[key] = value
+		}
+		cloned = append(cloned, copy)
+	}
+	return cloned
 }
 
 func relayLaunchStatusForCompatibility(compatibility *contracts.RelayCompatibility) string {

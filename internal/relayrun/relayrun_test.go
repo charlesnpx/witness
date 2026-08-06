@@ -1,10 +1,12 @@
 package relayrun
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charlesnpx/witness/internal/contracts"
@@ -17,6 +19,7 @@ type fakeRelayRunner struct {
 	t         *testing.T
 	runCalls  int
 	batchPath string
+	result    relayclient.CommandResult
 }
 
 func (runner *fakeRelayRunner) Run(ctx context.Context, executable string, args ...string) relayclient.CommandResult {
@@ -37,62 +40,105 @@ func (runner *fakeRelayRunner) Run(ctx context.Context, executable string, args 
 	if !containsArgPair(args, "--input", "charter=charter.json") || !containsArgPair(args, "--input", "findings="+runner.batchPath) {
 		runner.t.Fatalf("missing required input bindings: %v", args)
 	}
-	return relayclient.CommandResult{
-		Stdout:   []byte(`{"message":"auth failed"}`),
-		ExitCode: 1,
-		Err:      errors.New("exit status 1"),
-	}
+	return runner.result
 }
 
 func TestRunBatchesLaunchesEachBatchOnceAndRoutesFailurePending(t *testing.T) {
 	dir := t.TempDir()
-	batchPath := filepath.Join(dir, "batch.json")
-	batchBytes := []byte(`{"batch":"input"}`)
-	if err := os.WriteFile(batchPath, batchBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	artifactPath := filepath.Join(dir, "artifact.json")
-	artifactBytes := []byte("artifact")
-	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	artifactDigest := digest.RawBytes(artifactBytes)
-	runner := &fakeRelayRunner{t: t, batchPath: batchPath}
-	result, err := RunBatches(context.Background(), []BatchInput{{
-		Plan: planning.BatchPlan{
-			BatchID:           "defect-batch-1",
-			TaskShape:         contracts.BatchTaskDefect,
-			BatchDigest:       digest.RawBytes(batchBytes),
-			ArtifactDigest:    artifactDigest,
-			ArtifactDigestSet: []string{artifactDigest},
-		},
-		Document: contracts.VerificationBatchDocument{
-			ArtifactDigest: artifactDigest,
-		},
-		Path:     batchPath,
-		RawBytes: batchBytes,
-	}}, Options{
-		RelayPath:             "fake-relay",
-		IntegrationBundlePath: "bundle.json",
-		CharterPath:           "charter.json",
-		ArtifactPaths:         []string{artifactPath},
-		Backend:               "codex",
-		Runner:                runner,
+	record, runner := runLaunchFailure(t, dir, relayclient.CommandResult{
+		Stdout:   []byte(`{"message":"auth failed"}`),
+		Stderr:   []byte("relay authentication failed"),
+		ExitCode: 1,
+		Err:      errors.New("exit status 1"),
 	})
-	if err != nil {
-		t.Fatalf("RunBatches: %v", err)
-	}
 	if runner.runCalls != 1 {
 		t.Fatalf("run calls = %d, want 1", runner.runCalls)
 	}
-	if len(result.Runs) != 1 {
-		t.Fatalf("runs = %#v", result.Runs)
+	if record.Status != RunStatusLaunchFailed {
+		t.Fatalf("status = %s, want %s", record.Status, RunStatusLaunchFailed)
 	}
-	if result.Runs[0].Status != contracts.RecordStatusUnavailable {
-		t.Fatalf("status = %s, want unavailable", result.Runs[0].Status)
+	if record.ProviderInvoked != ProviderInvokedFalse || record.ConsumesBatch {
+		t.Fatalf("provider classification = %q consumes_batch=%t, want false/non-consuming", record.ProviderInvoked, record.ConsumesBatch)
 	}
-	if len(result.Runs[0].Diagnostics) != 1 || result.Runs[0].Diagnostics[0].Code != CodeRelayRunFailed {
-		t.Fatalf("diagnostics = %#v", result.Runs[0].Diagnostics)
+	if record.RelayLaunch == nil {
+		t.Fatal("missing retained relay launch")
+	}
+	launch := record.RelayLaunch
+	if launch.WorkingDirectory != dir || launch.ExitCode != 1 {
+		t.Fatalf("launch = %#v, want cwd %q and exit 1", launch, dir)
+	}
+	if len(launch.Argv) < 2 || launch.Argv[0] != "fake-relay" || launch.Argv[1] != "run" || !containsArgPair(launch.Argv, "--launch-cwd", dir) {
+		t.Fatalf("argv = %#v, want fake relay run with launch cwd", launch.Argv)
+	}
+	if launch.Stdout != `{"message":"auth failed"}` || launch.Stderr != "relay authentication failed" {
+		t.Fatalf("launch captures = %#v", launch)
+	}
+	if len(record.Diagnostics) != 1 || record.Diagnostics[0].Code != CodeRelayRunFailed {
+		t.Fatalf("diagnostics = %#v", record.Diagnostics)
+	}
+}
+
+func TestRunBatchesNonzeroWithSessionConsumesBatch(t *testing.T) {
+	record, _ := runLaunchFailure(t, t.TempDir(), relayclient.CommandResult{
+		Stdout:   []byte(`{"session_dir":"/tmp/relay-session"}`),
+		ExitCode: 1,
+		Err:      errors.New("exit status 1"),
+	})
+	if record.ProviderInvoked != ProviderInvokedTrue || !record.ConsumesBatch {
+		t.Fatalf("provider classification = %q consumes_batch=%t, want true/consumed", record.ProviderInvoked, record.ConsumesBatch)
+	}
+	if record.Status != contracts.RecordStatusUnavailable {
+		t.Fatalf("status = %q, want unavailable", record.Status)
+	}
+}
+
+func TestRunBatchesBoundsLaunchOutput(t *testing.T) {
+	stdout := append(bytes.Repeat([]byte("h"), launchCaptureLimitBytes/2+1), bytes.Repeat([]byte("t"), launchCaptureLimitBytes/2+1)...)
+	stderr := append(bytes.Repeat([]byte("x"), launchCaptureLimitBytes/2+1), bytes.Repeat([]byte("z"), launchCaptureLimitBytes/2+1)...)
+	record, _ := runLaunchFailure(t, t.TempDir(), relayclient.CommandResult{
+		Stdout:   stdout,
+		Stderr:   stderr,
+		ExitCode: 1,
+		Err:      errors.New("exit status 1"),
+	})
+	if record.RelayLaunch == nil {
+		t.Fatal("missing retained relay launch")
+	}
+	launch := record.RelayLaunch
+	if !launch.StdoutTruncated || !launch.StderrTruncated || len(launch.Stdout) != launchCaptureLimitBytes || len(launch.Stderr) != launchCaptureLimitBytes {
+		t.Fatalf("bounded launch captures = %#v", launch)
+	}
+	if !strings.HasPrefix(launch.Stdout, "hhhh") || !strings.HasSuffix(launch.Stdout, "tttt") || !strings.HasPrefix(launch.Stderr, "xxxx") || !strings.HasSuffix(launch.Stderr, "zzzz") {
+		t.Fatalf("launch captures did not retain head and tail")
+	}
+}
+
+func TestReadRunRecordsBytesAcceptsV2Index(t *testing.T) {
+	data, err := contracts.CanonicalBytes(Result{
+		SchemaVersion: SchemaVersion,
+		Runs: []RunRecord{{
+			SchemaVersion:   RunRecordSchema,
+			BatchID:         "defect-batch-1",
+			Status:          RunStatusLaunchFailed,
+			RecipeID:        "witness-falsify-v2-codex",
+			ProviderInvoked: ProviderInvokedFalse,
+			ConsumesBatch:   false,
+			RelayLaunch: &LaunchRecord{
+				Argv:             []string{"fake-relay", "run", "--json"},
+				WorkingDirectory: "/tmp/workspace",
+				ExitCode:         1,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := ReadRunRecordsBytes(data)
+	if err != nil {
+		t.Fatalf("ReadRunRecordsBytes: %v", err)
+	}
+	if len(runs) != 1 || runs[0].BatchID != "defect-batch-1" || runs[0].Status != RunStatusLaunchFailed {
+		t.Fatalf("runs = %#v", runs)
 	}
 }
 
@@ -310,6 +356,51 @@ func TestRunBatchesRejectsExtraUnplannedArtifactInputBeforeLaunch(t *testing.T) 
 	if len(result.Runs[0].Diagnostics) != 1 || result.Runs[0].Diagnostics[0].Code != CodeInvalidBatchInput {
 		t.Fatalf("diagnostics = %#v, want %s", result.Runs[0].Diagnostics, CodeInvalidBatchInput)
 	}
+}
+
+func runLaunchFailure(t *testing.T, dir string, commandResult relayclient.CommandResult) (RunRecord, *fakeRelayRunner) {
+	t.Helper()
+	batchPath := filepath.Join(dir, "batch.json")
+	batchBytes := []byte(`{"batch":"input"}`)
+	if err := os.WriteFile(batchPath, batchBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(dir, "artifact.json")
+	artifactBytes := []byte("artifact")
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest := digest.RawBytes(artifactBytes)
+	runner := &fakeRelayRunner{t: t, batchPath: batchPath, result: commandResult}
+	result, err := RunBatches(context.Background(), []BatchInput{{
+		Plan: planning.BatchPlan{
+			BatchID:           "defect-batch-1",
+			TaskShape:         contracts.BatchTaskDefect,
+			BatchDigest:       digest.RawBytes(batchBytes),
+			ArtifactDigest:    artifactDigest,
+			ArtifactDigestSet: []string{artifactDigest},
+		},
+		Document: contracts.VerificationBatchDocument{
+			ArtifactDigest: artifactDigest,
+		},
+		Path:     batchPath,
+		RawBytes: batchBytes,
+	}}, Options{
+		RelayPath:             "fake-relay",
+		IntegrationBundlePath: "bundle.json",
+		CharterPath:           "charter.json",
+		ArtifactPaths:         []string{artifactPath},
+		Backend:               "codex",
+		LaunchCWD:             dir,
+		Runner:                runner,
+	})
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if len(result.Runs) != 1 {
+		t.Fatalf("runs = %#v", result.Runs)
+	}
+	return result.Runs[0], runner
 }
 
 func argAfter(args []string, key string) string {
