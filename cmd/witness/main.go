@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -273,6 +274,16 @@ func runRoleOutputInit(args []string) error {
 	if *out == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness role-output init requires -out.")
 	}
+	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+		return diag.Wrap(
+			err,
+			charter.CodeFileIO,
+			"file operation failed.",
+			diag.WithDetail("action", "create role-output parent directory"),
+			diag.WithDetail("path", filepath.Dir(*out)),
+			diag.WithDetail("error", err.Error()),
+		)
+	}
 	document := contracts.RoleOutputDocument{
 		SchemaVersion:  contracts.RoleOutputV3,
 		Role:           *role,
@@ -329,6 +340,25 @@ func runRoleOutputValidate(args []string) error {
 	return diag.WriteCanonical(os.Stdout, result)
 }
 
+// resolveRelayExecutable resolves a bare -relay value before the pass driver
+// treats configured inputs as filesystem paths. Separator-containing values
+// deliberately retain their existing path semantics, while an unresolved bare
+// name is left unchanged for the existing relay_missing degradation path.
+func resolveRelayExecutable(path string) string {
+	if path == "" || strings.ContainsRune(path, rune(filepath.Separator)) {
+		return path
+	}
+	resolved, err := exec.LookPath(path)
+	if err != nil {
+		return path
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return resolved
+	}
+	return filepath.Clean(absolute)
+}
+
 func runVerificationPreflight(args []string) error {
 	flags := newFlagSet("witness verification preflight", "Check prerequisites for a verification run.")
 	relayPath := flags.String("relay", "", "convo-relay executable path")
@@ -355,7 +385,7 @@ func runVerificationPreflight(args []string) error {
 		return err
 	}
 	result, err := preflight.Run(context.Background(), preflight.Options{
-		RelayPath:             *relayPath,
+		RelayPath:             resolveRelayExecutable(*relayPath),
 		IntegrationBundlePath: *integrationBundlePath,
 		StateDir:              *stateDir,
 		SourceDir:             *sourceDir,
@@ -571,7 +601,7 @@ func runVerificationAssemble(args []string) error {
 			return err
 		}
 		runResult, err := relayrun.RunBatches(context.Background(), runBatches, relayrun.Options{
-			RelayPath:             *relayPath,
+			RelayPath:             resolveRelayExecutable(*relayPath),
 			IntegrationBundlePath: *integrationBundlePath,
 			CharterPath:           *charterPath,
 			ArtifactPaths:         append([]string(nil), artifactPaths...),
@@ -2402,7 +2432,7 @@ func runPassBegin(args []string) error {
 		AllowNonGitSource:     *allowNonGitSource,
 		AllowDirtySource:      *allowDirtySource,
 		AllowEmptyCharter:     *allowEmptyCharter,
-		RelayPath:             *relayPath,
+		RelayPath:             resolveRelayExecutable(*relayPath),
 		IntegrationBundlePath: *integrationBundlePath,
 		Backend:               *backend,
 		PolicyPath:            *policyPath,

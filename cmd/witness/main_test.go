@@ -85,9 +85,12 @@ func TestRouteHelp(t *testing.T) {
 
 func TestRoleOutputValidate(t *testing.T) {
 	dir := t.TempDir()
-	initializedPath := filepath.Join(dir, "initialized.json")
+	initializedPath := filepath.Join(dir, "role-outputs", "initialized.json")
 	if err := route([]string{"role-output", "init", "-role", contracts.RoleDefect, "-out", initializedPath}); err != nil {
 		t.Fatalf("role-output init: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(initializedPath)); err != nil {
+		t.Fatalf("role-output parent directory: %v", err)
 	}
 
 	initialized, err := readRoleOutputFile(initializedPath)
@@ -408,65 +411,100 @@ func TestVerificationPreflightCLIWiredToRun(t *testing.T) {
 	}
 }
 
-func TestVerificationPreflightRelayAbsentWritesPassingResult(t *testing.T) {
-	dir := t.TempDir()
-	stateDir := filepath.Join(dir, "state")
-	outPath := filepath.Join(dir, "preflight.json")
-	missingRelay := filepath.Join(dir, "missing-convo-relay")
-	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
-
-	if err := route([]string{
-		"verification", "preflight",
-		"-relay", missingRelay,
-		"-integration-bundle", bundlePath,
-		"-state-dir", stateDir,
-		"-out", outPath,
-	}); err != nil {
-		t.Fatalf("relay-absent preflight: %v", err)
-	}
-
-	data, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.OK || len(result.Diagnostics) != 0 {
-		t.Fatalf("preflight result = %#v, want ok degraded result without blocking diagnostics", result)
-	}
-	if !preflight.RelayAbsent(result) {
-		t.Fatalf("backend strata = %#v, want relay_absent", result.BackendStrata)
-	}
-	for _, required := range []string{
-		"compatibility-manifest.json",
-		"relay-capabilities.json",
-		"integration-bundle.json",
-		filepath.ToSlash(filepath.Join("compile-reports", "witness-falsify-v2.json")),
-	} {
-		if result.ArtifactDigests[required] == "" {
-			t.Fatalf("artifact digests = %#v, missing %s", result.ArtifactDigests, required)
+func TestRelayExecutableResolution(t *testing.T) {
+	t.Run("bare name resolves through PATH", func(t *testing.T) {
+		dir := t.TempDir()
+		const relayName = "relay-on-path"
+		relayPath := filepath.Join(dir, relayName)
+		if err := os.WriteFile(relayPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
 		}
-	}
-	compatibilityBytes, err := os.ReadFile(filepath.Join(stateDir, "compatibility-manifest.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	payloadBytes, err := retainedPayloadCanonicalBytes(compatibilityBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compatibility, err := contracts.ReadRelayCompatibilityBytes(payloadBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !contracts.RelayCompatibilityRelayAbsent(compatibility) {
-		t.Fatalf("compatibility backend status = %#v, want relay_absent", compatibility.BackendStatus)
-	}
-	if diagnostics := contracts.ValidateRelayCompatibility(compatibility); len(diagnostics) != 0 {
-		t.Fatalf("compatibility diagnostics = %#v", diagnostics)
-	}
+		t.Setenv("PATH", dir)
+
+		if got := resolveRelayExecutable(relayName); got != relayPath {
+			t.Fatalf("resolved relay = %q, want %q", got, relayPath)
+		}
+		if got := resolveRelayExecutable("./" + relayName); got != "./"+relayName {
+			t.Fatalf("separator-containing relay = %q, want unchanged path", got)
+		}
+	})
+
+	t.Run("missing bare name degrades honestly", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		outPath := filepath.Join(dir, "preflight.json")
+		const missingRelay = "missing-convo-relay"
+		bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
+		t.Setenv("PATH", t.TempDir())
+
+		if err := route([]string{
+			"verification", "preflight",
+			"-relay", missingRelay,
+			"-integration-bundle", bundlePath,
+			"-state-dir", stateDir,
+			"-out", outPath,
+		}); err != nil {
+			t.Fatalf("relay-absent preflight: %v", err)
+		}
+
+		data, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.OK || len(result.Diagnostics) != 0 {
+			t.Fatalf("preflight result = %#v, want ok degraded result without blocking diagnostics", result)
+		}
+		if !preflight.RelayAbsent(result) {
+			t.Fatalf("backend strata = %#v, want relay_absent", result.BackendStrata)
+		}
+		for _, required := range []string{
+			"compatibility-manifest.json",
+			"relay-capabilities.json",
+			"integration-bundle.json",
+			filepath.ToSlash(filepath.Join("compile-reports", "witness-falsify-v2.json")),
+		} {
+			if result.ArtifactDigests[required] == "" {
+				t.Fatalf("artifact digests = %#v, missing %s", result.ArtifactDigests, required)
+			}
+		}
+		capabilitiesBytes, err := os.ReadFile(filepath.Join(stateDir, "relay-capabilities.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		capabilitiesPayload, err := retainedPayloadCanonicalBytes(capabilitiesBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		absentPayload, err := strictjson.DecodeBytes[map[string]any](capabilitiesPayload, strictjson.DefaultMaxBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if absentPayload["relay_error_kind"] != relayclient.ErrorRelayMissing || absentPayload["relay_executable"] != missingRelay || absentPayload["relay_command"] != missingRelay {
+			t.Fatalf("relay-absent payload = %#v, want the attempted bare executable and relay_missing", absentPayload)
+		}
+		compatibilityBytes, err := os.ReadFile(filepath.Join(stateDir, "compatibility-manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		payloadBytes, err := retainedPayloadCanonicalBytes(compatibilityBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compatibility, err := contracts.ReadRelayCompatibilityBytes(payloadBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !contracts.RelayCompatibilityRelayAbsent(compatibility) {
+			t.Fatalf("compatibility backend status = %#v, want relay_absent", compatibility.BackendStatus)
+		}
+		if diagnostics := contracts.ValidateRelayCompatibility(compatibility); len(diagnostics) != 0 {
+			t.Fatalf("compatibility diagnostics = %#v", diagnostics)
+		}
+	})
 }
 
 func TestVerificationPreflightRejectsOutputAliasingInputBeforeWrite(t *testing.T) {
