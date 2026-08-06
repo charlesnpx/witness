@@ -29,6 +29,7 @@ const (
 	CodeSourceNotGit               = "freeze_source_not_git"
 	CodeSourceUnborn               = "freeze_source_unborn"
 	CodeSourceDirty                = "freeze_source_dirty"
+	CodeSourceSparseCheckout       = "freeze_source_sparse_checkout"
 	CodeSourceChangedDuringCapture = "freeze_source_changed_during_capture"
 	CodeInvalidGitOutput           = "freeze_invalid_git_output"
 	CodeUnsupportedFileType        = "freeze_unsupported_file_type"
@@ -419,6 +420,9 @@ func collectDirtyGitDerivation(ctx context.Context, sourceAbs string) (*dirtyGit
 // completeDirtyGitDerivation completes the same dirty-mode derivation used
 // for the first pass after collectGitSourceState has found a dirty worktree.
 func completeDirtyGitDerivation(ctx context.Context, sourceAbs string, gitState gitSourceState) (*dirtyGitDerivation, error) {
+	if err := rejectDirtySparseCheckout(ctx, sourceAbs); err != nil {
+		return nil, err
+	}
 	trackedStage, err := gitOutput(ctx, sourceAbs, "ls-files", "--stage", "-z")
 	if err != nil {
 		return nil, err
@@ -483,6 +487,27 @@ func completeDirtyGitDerivation(ctx context.Context, sourceAbs string, gitState 
 		untrackedPaths:   untrackedPaths,
 		files:            capturedFiles,
 	}, nil
+}
+
+// rejectDirtySparseCheckout checks the index's skip-worktree entries instead
+// of sparse-checkout configuration. Git marks intentionally absent paths with
+// the S tag in `git ls-files -t` for both cone and non-cone sparse checkouts;
+// those paths are precisely what dirty capture cannot distinguish from
+// ordinary deletions without changing its snapshot semantics.
+func rejectDirtySparseCheckout(ctx context.Context, sourceAbs string) error {
+	taggedPaths, err := gitOutput(ctx, sourceAbs, "ls-files", "-t", "-z")
+	if err != nil {
+		return err
+	}
+	for _, record := range strings.Split(taggedPaths, "\x00") {
+		if strings.HasPrefix(record, "S ") {
+			return diag.New(
+				CodeSourceSparseCheckout,
+				"dirty source capture cannot represent tracked files absent from a sparse checkout; use a full checkout before freezing.",
+			)
+		}
+	}
+	return nil
 }
 
 func (derivation *dirtyGitDerivation) sourceFiles() []sourceFile {

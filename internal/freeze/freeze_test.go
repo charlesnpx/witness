@@ -191,6 +191,39 @@ func TestCreateDirtyGitWorktreeRequiresOverrideAndCapturesWorkingBytes(t *testin
 	}
 }
 
+func TestCreateRejectsDirtySparseCheckout(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	mustWriteFile(t, filepath.Join(repo, "omitted.txt"), []byte("omitted\n"), 0o644)
+	runGit(t, repo, "add", "app.txt", "omitted.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	runGit(t, repo, "sparse-checkout", "set", "--no-cone", "app.txt")
+
+	taggedPaths, err := gitOutput(context.Background(), repo, "ls-files", "-t", "-z")
+	if err != nil {
+		t.Fatalf("inspect sparse index: %v", err)
+	}
+	if !strings.Contains(taggedPaths, "S omitted.txt\x00") {
+		t.Fatalf("sparse index tags = %q, want skip-worktree omitted.txt", taggedPaths)
+	}
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	_, err = Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+	})
+	if got := errorCode(err); got != CodeSourceSparseCheckout {
+		t.Fatalf("dirty sparse checkout error code = %q, want %q; err=%v", got, CodeSourceSparseCheckout, err)
+	}
+	if !strings.Contains(err.Error(), "full checkout") {
+		t.Fatalf("dirty sparse checkout diagnostic = %v, want full-checkout guidance", err)
+	}
+}
+
 func TestCreateRejectsDirtyGitWorktreeContentMutationDuringCapture(t *testing.T) {
 	repo := t.TempDir()
 	runGit(t, repo, "init")
