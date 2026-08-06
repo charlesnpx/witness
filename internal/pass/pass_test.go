@@ -173,6 +173,43 @@ func TestBeginAllowsDirtyGitSnapshotAndReportsRetainedArtifacts(t *testing.T) {
 	}
 }
 
+func TestPassRetainedArtifactsRejectsAdversarialPreflightEntries(t *testing.T) {
+	stateDir := t.TempDir()
+	retainedPath := filepath.Join(stateDir, "retained.json")
+	if err := os.WriteFile(retainedPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(filepath.Dir(stateDir), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		artifacts map[string]string
+		code      string
+	}{
+		{
+			name:      "absolute path",
+			artifacts: map[string]string{"external": outsidePath},
+			code:      CodeInvalidRetainedArtifact,
+		},
+		{
+			name:      "reserved core role",
+			artifacts: map[string]string{"pass_state": filepath.Base(retainedPath)},
+			code:      CodeReservedRetainedArtifactRole,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := passRetainedArtifacts(Config{StateDir: stateDir}, preflight.Result{RetainedArtifacts: test.artifacts})
+			if err == nil {
+				t.Fatal("pass retained-artifact inventory accepted adversarial preflight entry")
+			}
+			assertValidationCode(t, err, test.code)
+		})
+	}
+}
+
 func TestBeginRejectsZeroGoalCharterUnlessExplicitlyAllowed(t *testing.T) {
 	options := newBeginOptions(t)
 	writeCanonicalForTest(t, options.CharterPath, charter.Charter{

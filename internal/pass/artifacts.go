@@ -64,11 +64,19 @@ func retainedIntegrationBundlePath(config Config) string {
 	return filepath.Join(config.StateDir, "integration-bundle.json")
 }
 
+// source_manifest and workspace_manifest are intentionally shared with
+// preflight; only lifecycle artifacts owned by the pass driver are reserved.
+var reservedPassRetainedArtifactRoles = map[string]struct{}{
+	"pass_state":     {},
+	"charter_freeze": {},
+	"preflight":      {},
+}
+
 // passRetainedArtifacts reports the retained artifacts already written by the
 // pass as state-directory-relative paths. It deliberately shares the
 // preflight retained_artifacts map shape so callers need only consume one
 // inventory format while a pass advances.
-func passRetainedArtifacts(config Config, preflightResult preflight.Result) map[string]string {
+func passRetainedArtifacts(config Config, preflightResult preflight.Result) (map[string]string, error) {
 	artifacts := map[string]string{}
 	for _, item := range []struct {
 		role string
@@ -84,12 +92,40 @@ func passRetainedArtifacts(config Config, preflightResult preflight.Result) map[
 			artifacts[item.role] = relativePath
 		}
 	}
-	for role, relativePath := range preflightResult.RetainedArtifacts {
-		if relativePath != "" {
-			artifacts[role] = relativePath
+	for _, role := range sortedStringMapKeys(preflightResult.RetainedArtifacts) {
+		relativePath := preflightResult.RetainedArtifacts[role]
+		if _, reserved := reservedPassRetainedArtifactRoles[role]; reserved {
+			return nil, validationError(
+				CodeReservedRetainedArtifactRole,
+				"preflight retained artifact role collides with a reserved pass core role.",
+				"/retained_artifacts/"+jsonPointerEscape(role),
+				map[string]any{"role": role},
+			)
+		}
+		validatedPath, ok := stateDirRelativeExistingPreflightFile(config.StateDir, relativePath)
+		if !ok {
+			return nil, validationError(
+				CodeInvalidRetainedArtifact,
+				"preflight retained artifact path must be a state-directory-relative existing regular file.",
+				"/retained_artifacts/"+jsonPointerEscape(role),
+				map[string]any{"role": role, "path": relativePath},
+			)
+		}
+		artifacts[role] = validatedPath
+	}
+	return artifacts, nil
+}
+
+func stateDirRelativeExistingPreflightFile(stateDir string, relativePath string) (string, bool) {
+	if strings.TrimSpace(relativePath) == "" || filepath.IsAbs(relativePath) || strings.Contains(relativePath, "\x00") {
+		return "", false
+	}
+	for _, part := range strings.Split(filepath.ToSlash(relativePath), "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", false
 		}
 	}
-	return artifacts
+	return stateDirRelativeExistingFile(stateDir, filepath.Join(stateDir, filepath.FromSlash(relativePath)))
 }
 
 func stateDirRelativeExistingFile(stateDir string, path string) (string, bool) {

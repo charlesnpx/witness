@@ -191,6 +191,32 @@ func TestCreateDirtyGitWorktreeRequiresOverrideAndCapturesWorkingBytes(t *testin
 	}
 }
 
+func TestCreateRejectsDirtyGitWorktreeMutationDuringCapture(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "witness-test@example.com")
+	runGit(t, repo, "config", "user.name", "Witness Test")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("committed\n"), 0o644)
+	runGit(t, repo, "add", "app.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	mustWriteFile(t, filepath.Join(repo, "app.txt"), []byte("working-copy\n"), 0o644)
+
+	_, err := Create(context.Background(), Options{
+		SourceDir:        repo,
+		OutputDir:        filepath.Join(t.TempDir(), "snapshot"),
+		AllowDirtySource: true,
+		afterDirtySourceCapture: func() {
+			mustWriteFile(t, filepath.Join(repo, "created-during-capture.txt"), []byte("created\n"), 0o644)
+		},
+	})
+	if got := errorCode(err); got != CodeSourceChangedDuringCapture {
+		t.Fatalf("freeze error code = %q, want %q; err=%v", got, CodeSourceChangedDuringCapture, err)
+	}
+	if !strings.Contains(err.Error(), "quiesce") || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("freeze diagnostic = %v, want quiesce-and-retry guidance", err)
+	}
+}
+
 func TestCreateRejectsSymlinkedManifestPath(t *testing.T) {
 	source := t.TempDir()
 	mustWriteFile(t, filepath.Join(source, "file.txt"), []byte("content"), 0o644)

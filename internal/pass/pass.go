@@ -33,23 +33,25 @@ const (
 
 	StateFileName = "pass-state.json"
 
-	CodeMissingStateDir         = "pass_missing_state_dir"
-	CodeMissingCharter          = "pass_missing_charter"
-	CodeMissingSource           = "pass_missing_source"
-	CodeMissingBundle           = "pass_missing_integration_bundle"
-	CodeStateExistsInvalid      = "pass_state_exists_invalid"
-	CodeStateUnsupported        = "pass_state_unsupported"
-	CodeStateDigestMismatch     = "pass_state_digest_mismatch"
-	CodeStateInvalid            = "pass_state_invalid"
-	CodeStateDrift              = "pass_state_drift"
-	CodeStateDirInsideSource    = "pass_state_dir_inside_source"
-	CodeInvalidRoleOutputSpec   = "pass_invalid_role_output_spec"
-	CodeInvalidPreflight        = "pass_invalid_preflight"
-	CodeInvalidState            = "pass_invalid_state"
-	CodePassStateConfigMismatch = "pass_state_config_mismatch"
-	CodeHeadManifestMismatch    = "pass_head_manifest_snapshot_mismatch"
-	CodeNextActionDrift         = "pass_next_action_drift"
-	CodeCharterZeroGoals        = "charter_zero_goals"
+	CodeMissingStateDir              = "pass_missing_state_dir"
+	CodeMissingCharter               = "pass_missing_charter"
+	CodeMissingSource                = "pass_missing_source"
+	CodeMissingBundle                = "pass_missing_integration_bundle"
+	CodeStateExistsInvalid           = "pass_state_exists_invalid"
+	CodeStateUnsupported             = "pass_state_unsupported"
+	CodeStateDigestMismatch          = "pass_state_digest_mismatch"
+	CodeStateInvalid                 = "pass_state_invalid"
+	CodeStateDrift                   = "pass_state_drift"
+	CodeStateDirInsideSource         = "pass_state_dir_inside_source"
+	CodeInvalidRoleOutputSpec        = "pass_invalid_role_output_spec"
+	CodeInvalidPreflight             = "pass_invalid_preflight"
+	CodeInvalidRetainedArtifact      = "pass_invalid_retained_artifact"
+	CodeReservedRetainedArtifactRole = "pass_reserved_retained_artifact_role"
+	CodeInvalidState                 = "pass_invalid_state"
+	CodePassStateConfigMismatch      = "pass_state_config_mismatch"
+	CodeHeadManifestMismatch         = "pass_head_manifest_snapshot_mismatch"
+	CodeNextActionDrift              = "pass_next_action_drift"
+	CodeCharterZeroGoals             = "charter_zero_goals"
 
 	stageFreeze     = "freeze"
 	stagePreflight  = "preflight"
@@ -429,6 +431,10 @@ func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 		return nil, err
 	}
 	preflightResult, _ := readPreflightResult(state.Config.Outputs.PreflightPath)
+	retainedArtifacts, err := passRetainedArtifacts(state.Config, preflightResult)
+	if err != nil {
+		return nil, err
+	}
 	backendStrata := cloneStringMap(preflightResult.BackendStrata)
 	degraded := preflight.RelayAbsent(preflightResult)
 	sourceDirty, sourceDirtyStatus := state.SourceDirty, state.SourceDirtyStatus
@@ -448,7 +454,7 @@ func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 		Complete:          state.Complete,
 		Degraded:          degraded,
 		BackendStrata:     backendStrata,
-		RetainedArtifacts: passRetainedArtifacts(state.Config, preflightResult),
+		RetainedArtifacts: retainedArtifacts,
 		SourceDirty:       sourceDirty,
 		SourceDirtyStatus: sourceDirtyStatus,
 		NextAction:        state.NextAction,
