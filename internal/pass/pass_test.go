@@ -1214,6 +1214,56 @@ func TestResumeRejectsForgedRelayBatchActionFields(t *testing.T) {
 	assertValidationCode(t, err, CodeStateInvalid)
 }
 
+func TestPlanRoundTripsSafeIntegerEstimatedDeltaInVerificationBatch(t *testing.T) {
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume preflight: %v", err)
+	}
+	writeRoleOutputsForState(t, options.StateDir, true)
+
+	state := readPassStateForTest(t, options.StateDir)
+	var defectPath string
+	for _, roleOutput := range state.Config.RoleOutputs {
+		if roleOutput.Role == contracts.RoleDefect {
+			defectPath = roleOutput.Path
+			break
+		}
+	}
+	if defectPath == "" {
+		t.Fatal("test pass has no defect role output")
+	}
+	roleOutput := readJSONForTest[contracts.RoleOutputDocument](t, defectPath)
+	roleOutput.Findings[0].EstimatedDelta.Test.Lines = 20
+	writeCanonicalForTest(t, defectPath, roleOutput)
+
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	state = readPassStateForTest(t, options.StateDir)
+	batchPath := filepath.Join(state.Config.StateDir, "verification", "batches", "defect-batch-1.json")
+	batchBytes, err := os.ReadFile(batchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(batchBytes, []byte(`"lines":20`)) {
+		t.Fatalf("verification batch = %s, want integer estimated_delta lines", batchBytes)
+	}
+	batch, err := contracts.ReadVerificationBatchBytes(batchBytes)
+	if err != nil {
+		t.Fatalf("re-decode verification batch: %v", err)
+	}
+	if diagnostics := contracts.ValidateVerificationBatch(batch, nil); len(diagnostics) > 0 {
+		t.Fatalf("re-validated verification batch diagnostics = %#v", diagnostics)
+	}
+
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("resume after plan validation: %v", err)
+	}
+}
+
 func TestResumeRejectsSurplusVerificationBatchOutput(t *testing.T) {
 	options := newBeginOptions(t)
 	if _, err := Begin(context.Background(), options); err != nil {

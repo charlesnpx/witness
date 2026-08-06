@@ -76,10 +76,14 @@ func TestCanonicalManifestDecodeAcceptsExponentSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte(`"size":2.578e3`)) {
-		t.Fatalf("canonical manifest size was not exponent form:\n%s", data)
+	if !bytes.Contains(data, []byte(`"size":2578`)) {
+		t.Fatalf("canonical manifest size was not integer form:\n%s", data)
 	}
-	decoded, err := strictjson.DecodeBytes[Manifest](data, strictjson.DefaultMaxBytes*4)
+	legacyData := bytes.Replace(data, []byte(`"size":2578`), []byte(`"size":2.578e3`), 1)
+	if bytes.Equal(legacyData, data) {
+		t.Fatalf("could not construct legacy exponent-form manifest:\n%s", data)
+	}
+	decoded, err := strictjson.DecodeBytes[Manifest](legacyData, strictjson.DefaultMaxBytes*4)
 	if err != nil {
 		t.Fatalf("DecodeBytes returned error: %v", err)
 	}
