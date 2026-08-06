@@ -21,6 +21,13 @@ RELAY="convo-relay"
 mkdir -p "$STATE"
 ```
 
+A bare `RELAY` value (one without a path separator) is resolved through
+`PATH`; Witness uses the resulting absolute executable path for the pass and
+relay launch evidence. Supply a value containing a path separator when you
+intend to use that path as written. If a bare name is not on `PATH`, preflight
+records `relay_missing` and continues with the documented unavailable-relay
+degradation.
+
 Create a minimal, owner-authored Charter:
 
 ```sh
@@ -52,6 +59,13 @@ example:
   ],
   "schema_version": "review-charter-v2"
 }
+```
+
+`non_goals` is an array of structured statements, not an array of strings. Its
+one-line shape is:
+
+```json
+{"non_goals":[{"id":"deferred-work","statement":"This pass does not add a deployment workflow."}]}
 ```
 
 Freeze the owner-visible Charter. The pass will make and retain its own freeze
@@ -123,8 +137,6 @@ The default pass requests the `defect` and `economy` finder roles. Create their
 files at the exact paths requested by `next_action`:
 
 ```sh
-mkdir -p "$STATE/role-outputs"
-
 witness role-output init \
   -role defect \
   -out "$STATE/role-outputs/defect-output.json"
@@ -133,6 +145,9 @@ witness role-output init \
   -role economy \
   -out "$STATE/role-outputs/economy-output.json"
 ```
+
+`role-output init` creates the parent directory of `-out`; no separate
+directory-creation step is required.
 
 An initialized document is structurally valid but is only a template. For
 example, validating either freshly initialized file succeeds while warning
@@ -194,6 +209,174 @@ for a zero-findings defect or economy role output. Do not leave the initializer'
 `{"kind":"placeholder","id":"replace-before-use"}` identities in either
 document. Angle-bracket values in the example are instructions to insert values
 from this pass, not literal placeholder identities.
+
+### Filing a non-empty finding
+
+Finder output is strict JSON: every key below is a literal contract field name,
+and unknown keys are rejected. The following is a structurally valid worked
+defect example. It assumes that the real Charter declares the
+`preserve-reviewed-behavior` goal and a bounded `entry_points` entry named
+`cli`; replace the illustrative digests and identities with values from the
+current pass before filing it.
+
+```json
+{
+  "schema_version": "review-role-output-v3",
+  "role": "defect",
+  "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_identity": {
+    "kind": "witness-source-snapshot",
+    "id": "snapshot-example"
+  },
+  "consumer_identity": {
+    "kind": "finder",
+    "id": "defect-finder-example"
+  },
+  "findings": [
+    {
+      "id": "illustrative-declared-input-rejection",
+      "kind": "defect",
+      "title": "Illustrative reachable input is rejected",
+      "charter_goal_ids": ["preserve-reviewed-behavior"],
+      "claimed_severity": "medium",
+      "scope_anchors": [
+        {
+          "dimension": "entry_points",
+          "entry_id": "cli"
+        }
+      ],
+      "witness": {
+        "kind": "defect",
+        "strength": "argued",
+        "content": "In this illustrative frozen artifact, the reachable CLI branch rejects a declared input.",
+        "artifact_refs": [
+          {
+            "kind": "source-file",
+            "id": "cmd-witness-main-go",
+            "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "digest_profile": "relay-root-digests-v1",
+            "media_type": "text/x-go"
+          }
+        ],
+        "entry_point": {
+          "dimension": "entry_points",
+          "entry_id": "cli"
+        },
+        "reachability_chain": [
+          {
+            "dimension": "entry_points",
+            "entry_id": "cli"
+          }
+        ]
+      },
+      "estimated_delta": {
+        "production": {
+          "status": "known",
+          "lines": 1,
+          "files": 1
+        },
+        "test": {
+          "status": "known",
+          "lines": 1,
+          "files": 1
+        }
+      },
+      "smallest_sufficient_remedy": {
+        "direction": "change",
+        "summary": "Change the rejecting branch for the declared input.",
+        "minimality_argument": "Only the reachable rejection branch and its direct regression test need to change.",
+        "touched_production": ["cmd/witness/main.go"],
+        "touched_tests": ["cmd/witness/main_test.go"]
+      },
+      "proposed_tests": [
+        {
+          "id": "illustrative-declared-input-regression",
+          "name": "accepts the declared CLI input",
+          "reachable_partition": "declared CLI input",
+          "charter_refs": [
+            {
+              "goal_id": "preserve-reviewed-behavior"
+            },
+            {
+              "anchor": {
+                "dimension": "entry_points",
+                "entry_id": "cli"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The root fields are `schema_version`, `role`, `charter_hash`,
+`artifact_digest`, `source_identity`, `consumer_identity`, `findings`, and the
+optional `missing_goal_questions`. `source_identity` and `consumer_identity`
+must each be non-empty JSON objects; their internal identity fields are owned by
+the producer. Defect and economy role outputs require `findings` to be an
+array, including `[]` when there are no findings.
+
+Each `findings` entry has `id`, `kind`, `title`, `charter_goal_ids`,
+`claimed_severity`, `scope_anchors`, `witness`, `estimated_delta`,
+`smallest_sufficient_remedy`, and optional `proposed_tests` and `recurrence`.
+The `witness` fields are `kind`, `strength`, `content`, optional
+`artifact_refs`, optional `executable`, optional `entry_point`, and optional
+`reachability_chain`. An `artifact_refs` item, and an optional executable
+`transformation_ref`, use `kind`, `id`, `digest`, optional `digest_profile`,
+and optional `media_type`. When `strength` is `executable`, `executable` is
+required and has `argv`, `cwd`, `expected_observation`, and optional
+`transformation_ref`.
+
+`estimated_delta` always has `production` and `test`; each has `status` and,
+when known, `lines` and `files`. `smallest_sufficient_remedy` has `direction`,
+`summary`, `minimality_argument`, optional `touched_production`, and optional
+`touched_tests`. Every `proposed_tests` item has `id`, `name`,
+`reachable_partition`, and `charter_refs`; each `charter_refs` item has an
+optional `goal_id` and optional `anchor`, but must provide at least one of them.
+If present, `recurrence` has `prior_finding_id`, `finding_key`,
+`witness_digest`, and `artifact_digest`. If an unspecified envelope dimension
+requires a question, each `missing_goal_questions` item has `id`, `finding_id`,
+`dimension`, `anchor_index`, `property`, `value`, `affected_decision`, and
+`statement`.
+
+Use these enum values exactly:
+
+- `role`: `defect`, `economy`, `goal_fit`
+- finding `kind`: `defect`, `economy`; witness `kind`: `defect`, `equivalence`
+- witness `strength`: `argued`, `constructed`, `executable`
+- `claimed_severity`: `critical`, `high`, `medium`, `low`
+- delta `status`: `known`, `unknown`
+- remedy `direction`: `add`, `change`, `remove`
+
+For a `known` delta, provide the measured `lines` and `files`; an `unknown`
+delta must not provide either count. Economy findings use `kind: "economy"`,
+an `equivalence` witness, and a size-reducing `remove` or `change` remedy.
+
+Scope anchors are only meaningful against the Charter's
+`operational_envelope`: every `dimension` must be declared there. For example,
+the finding's `{"dimension":"entry_points","entry_id":"cli"}` anchor
+requires a matching bounded Charter entry such as this fragment:
+
+```json
+"entry_points": {"state":"bounded","statement":"Supported entry points.","entries":[{"id":"cli","statement":"Witness CLI."}]}
+```
+
+A bounded dimension uses a declared `entry_id`; an unbounded dimension uses a
+concrete `value`; an unspecified dimension also needs `property`, `value`, and
+`affected_decision` plus its Charter-derived `missing_goal_questions` entry.
+`excluded: true` marks an anchor as excluded. Constructed and executable defect
+witnesses additionally need a reachable `entry_point` and a
+`reachability_chain` that the operational envelope can resolve.
+
+Save a real non-empty role output and validate it before filing it:
+
+```sh
+witness role-output validate \
+  -input "$STATE/role-outputs/defect-output.json"
+```
 
 Validate the completed documents again:
 
