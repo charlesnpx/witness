@@ -3,6 +3,7 @@ package pass
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"go/parser"
 	"go/token"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -2479,6 +2481,70 @@ func TestNextRelayBatchActionUsesReadyPortableExportAfterLaunchFailure(t *testin
 	}
 }
 
+func TestPassResumeAssemblesReadyPortableExportAfterLaunchFailure(t *testing.T) {
+	options, state, batch := readyPassAtRelayBatchActionForTest(t, true)
+	writeRecordedRelayRunForTest(t, state.Config, batch, relayrun.RunRecord{
+		SchemaVersion:   relayrun.RunRecordSchema,
+		BatchID:         batch.BatchID,
+		Status:          relayrun.RunStatusLaunchFailed,
+		RecipeID:        batch.RecipeID,
+		InputBindings:   plannedRelayInputBindingsForTest(t, state.Config, batch),
+		ProviderInvoked: relayrun.ProviderInvokedFalse,
+		ConsumesBatch:   false,
+		RelayLaunch: &relayrun.LaunchRecord{
+			ExitCode:    -1,
+			StartFailed: true,
+		},
+	})
+	writePassPortableExportForTest(t, state, batch)
+
+	evidence, recordedRuns, err := relayEvidenceForAssembly(state, state.RelayBatches)
+	if err != nil {
+		t.Fatalf("relayEvidenceForAssembly: %v", err)
+	}
+	if len(evidence) != 1 {
+		t.Fatalf("relay evidence = %#v, want one batch", evidence)
+	}
+	if got := evidence[0]; got.BatchID != batch.BatchID || got.PortableExportDir != batch.PortableExportDir || len(got.RunRecords) != 0 {
+		t.Fatalf("relay evidence = %#v, want ready export evidence without the launch-failure record", got)
+	}
+	recorded, found := recordedRuns[batch.BatchID]
+	if !found || recorded.Record.PortableExportDir != batch.PortableExportDir {
+		t.Fatalf("recorded runs = %#v, want the ready export as the retained assembly input", recordedRuns)
+	}
+
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume assemble from ready export after launch failure: %v", err)
+	}
+	assertInvocation(t, invocation, stageAssemble, actionWitnessCommand, false)
+
+	state = readPassStateForTest(t, options.StateDir)
+	assembleStage := stageRecordForTest(t, state, stageAssemble)
+	exportPath := filepath.Join(batch.PortableExportDir, "manifest.json")
+	if _, found := findArtifactRecord(assembleStage.Inputs, "portable-export:"+batch.BatchID, exportPath); !found {
+		t.Fatalf("assemble inputs = %#v, want ready portable export %s", assembleStage.Inputs, exportPath)
+	}
+	if _, found := findArtifactRecord(assembleStage.Inputs, "relay-run-record:"+batch.BatchID, relayRunRecordPath(state.Config, batch.BatchID)); !found {
+		t.Fatalf("assemble inputs = %#v, want retained launch-failure record", assembleStage.Inputs)
+	}
+	manifest := readJSONForTest[contracts.VerificationManifest](t, state.Config.Outputs.ManifestPath)
+	if len(manifest.Batches) != 1 || manifest.Batches[0].Status != contracts.RecordStatusValid {
+		t.Fatalf("manifest batches = %#v, want the ready portable export assembled as valid", manifest.Batches)
+	}
+
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume adjudicate: %v", err)
+	}
+	assertInvocation(t, invocation, stageAdjudicate, actionWitnessCommand, false)
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume metrics: %v", err)
+	}
+	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
+}
+
 func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
 	options := newBeginOptions(t)
 	invocation, err := Begin(context.Background(), options)
@@ -2727,6 +2793,375 @@ func writeRecordedRelayRunForTest(t *testing.T, config Config, batch RelayBatchR
 		t.Fatal(err)
 	}
 	writeCanonicalForTest(t, path, record)
+}
+
+type passPortablePayload struct {
+	entry map[string]any
+	body  []byte
+}
+
+func writePassPortableExportForTest(t *testing.T, state *State, batch RelayBatchRecord) {
+	t.Helper()
+	batchBytes, err := os.ReadFile(batch.BatchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchDocument, err := contracts.ReadVerificationBatchBytes(batchBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batchDocument.Findings) == 0 {
+		t.Fatal("portable export fixture requires a finding")
+	}
+	charterBytes, err := os.ReadFile(state.Config.Outputs.CharterFreezePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactBytes, err := os.ReadFile(state.Config.SnapshotManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
+	bundle, bundleDigest, err := configuredIntegrationBundle(state.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundleDigest != preflightResult.ContractDigests["integration_bundle"] {
+		t.Fatalf("integration bundle digest = %s, want preflight digest %s", bundleDigest, preflightResult.ContractDigests["integration_bundle"])
+	}
+	contractID := passContractIDForRecipeForTest(t, batch.RecipeID)
+	bundleObject, ok := bundle.(map[string]any)
+	if !ok {
+		t.Fatal("integration bundle is not an object")
+	}
+	contractsObject, ok := bundleObject["contracts"].(map[string]any)
+	if !ok {
+		t.Fatal("integration bundle is missing contracts")
+	}
+	contract, ok := contractsObject[contractID].(map[string]any)
+	if !ok {
+		t.Fatalf("integration bundle is missing contract %s", contractID)
+	}
+	contractDigest, err := digest.SemanticJSON(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrationContract := map[string]any{
+		"kind":            "integration_contract",
+		"schema_version":  2,
+		"digest_profile":  digest.Profile,
+		"contract_id":     contractID,
+		"contract_digest": contractDigest,
+		"contract":        contract,
+	}
+	integrationContractDigest, err := digest.StorageEnvelope("integration_contract", integrationContract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdicts := contracts.RelayWitnessVerdictsDocument{
+		SchemaVersion: contracts.RelayWitnessVerdictsV2,
+		BatchID:       batch.BatchID,
+		Verdicts: []contracts.WitnessVerdict{{
+			FindingID:      batchDocument.Findings[0].FindingID,
+			WitnessDigest:  batchDocument.Findings[0].WitnessDigest,
+			Verdict:        contracts.VerdictSurvived,
+			VerdictClass:   nil,
+			CounterWitness: nil,
+		}},
+	}
+	canonicalResult, err := contracts.CanonicalBytes(verdicts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads := []passPortablePayload{
+		passPortablePayloadForTest(t, "root_session", "session", map[string]any{
+			"execution_kind":  "recipe",
+			"kind":            "portable_root_session",
+			"provider_retry":  "forbid",
+			"result_source":   "reducer",
+			"status":          "completed",
+			"terminal_status": "completed",
+		}, nil),
+		passPortablePayloadForTest(t, "participant_transcript", "transcript", []any{
+			map[string]any{"participant_turn": 1, "actor": "presenter", "content": "turn one", "provider_result_ref": passPortableRefForTest("artifact-000001", "provider_result:000001")},
+			map[string]any{"participant_turn": 2, "actor": "falsifier", "content": "turn two", "provider_result_ref": passPortableRefForTest("artifact-000007", "provider_result:000003")},
+			map[string]any{"participant_turn": 3, "actor": "presenter", "content": "turn three", "provider_result_ref": passPortableRefForTest("artifact-000013", "provider_result:000005")},
+			map[string]any{"participant_turn": 4, "actor": "falsifier", "content": "turn four", "provider_result_ref": passPortableRefForTest("artifact-000019", "provider_result:000007")},
+		}, nil),
+		passPortablePayloadForTest(t, "diagnostics", "diagnostics", map[string]any{"execution_kind": "recipe", "status": "completed"}, nil),
+		passPortablePayloadForTest(t, "root_recipe_plan", "root-plan", map[string]any{
+			"kind":                        "root_recipe_plan",
+			"schema_version":              2,
+			"digest_profile":              digest.Profile,
+			"recipe_id":                   batch.RecipeID,
+			"provider_retry":              "forbid",
+			"result_source":               "reducer",
+			"participant_turns":           4,
+			"integration_bundle_digest":   bundleDigest,
+			"integration_contract_id":     contractID,
+			"integration_contract_digest": contractDigest,
+			"integration_contract_ref":    passPortableRefWithDigestForTest("integration-contract", "integration_contract:selected", integrationContractDigest),
+			"prompt_context":              map[string]any{"participant_transcript": "complete", "facilitator_ledger": "trace_only"},
+		}, passPortableSourceRefForTest("root_recipe_plan:selected")),
+		passPortablePayloadForTest(t, "integration_contract", "integration-contract", integrationContract, map[string]any{"id": "integration_contract:selected", "digest": integrationContractDigest}),
+		passPortablePayloadForTest(t, "named_input_content", "named-input-content-1", passNamedInputContentForTest("charter", 1, charterBytes), passPortableSourceRefForTest("named_input_content:000001")),
+		passPortablePayloadForTest(t, "named_input_content", "named-input-content-2", passNamedInputContentForTest("findings", 2, batchBytes), passPortableSourceRefForTest("named_input_content:000002")),
+		passPortablePayloadForTest(t, "named_input_content", "named-input-content-3", passNamedInputContentForTest("artifact", 3, artifactBytes), passPortableSourceRefForTest("named_input_content:000003")),
+		passPortablePayloadForTest(t, "named_input_manifest", "named-input-manifest", map[string]any{
+			"kind":           "named_input_manifest",
+			"schema_version": 2,
+			"digest_profile": digest.Profile,
+			"contract_id":    contractID,
+			"input_count":    3,
+			"inputs": []any{
+				passNamedInputEntryForTest("charter", 1, "named-input-content-1", "named_input_content:000001", len(charterBytes), digest.RawBytes(charterBytes)),
+				passNamedInputEntryForTest("findings", 2, "named-input-content-2", "named_input_content:000002", len(batchBytes), digest.RawBytes(batchBytes)),
+				passNamedInputEntryForTest("artifact", 3, "named-input-content-3", "named_input_content:000003", len(artifactBytes), digest.RawBytes(artifactBytes)),
+			},
+		}, passPortableSourceRefForTest("named_input_manifest:selected")),
+		passPortablePayloadForTest(t, "canonical_result", "canonical-result", map[string]any{
+			"kind":           "canonical_result",
+			"schema_version": 2,
+			"digest_profile": digest.Profile,
+			"transport":      "json",
+			"canonical_json": string(canonicalResult),
+			"value":          verdicts,
+		}, passPortableSourceRefForTest("canonical_result:selected")),
+		passPortablePayloadForTest(t, "result_validation", "result-validation", map[string]any{
+			"kind":                 "result_validation",
+			"schema_version":       2,
+			"digest_profile":       digest.Profile,
+			"status":               "validated",
+			"canonical_result_ref": passPortableRefForTest("canonical-result", "canonical_result:selected"),
+		}, passPortableSourceRefForTest("result_validation:selected")),
+	}
+	for _, spec := range []struct {
+		resultID     string
+		invocationID string
+		promptID     string
+		source       string
+		phase        string
+		ordinal      int
+	}{
+		{resultID: "artifact-000001", invocationID: "artifact-000002", promptID: "artifact-000003", source: "000001", phase: "participant", ordinal: 1},
+		{resultID: "artifact-000004", invocationID: "artifact-000005", promptID: "artifact-000006", source: "000002", phase: "facilitator", ordinal: 1},
+		{resultID: "artifact-000007", invocationID: "artifact-000008", promptID: "artifact-000009", source: "000003", phase: "participant", ordinal: 2},
+		{resultID: "artifact-000010", invocationID: "artifact-000011", promptID: "artifact-000012", source: "000004", phase: "facilitator", ordinal: 2},
+		{resultID: "artifact-000013", invocationID: "artifact-000014", promptID: "artifact-000015", source: "000005", phase: "participant", ordinal: 3},
+		{resultID: "artifact-000016", invocationID: "artifact-000017", promptID: "artifact-000018", source: "000006", phase: "facilitator", ordinal: 3},
+		{resultID: "artifact-000019", invocationID: "artifact-000020", promptID: "artifact-000021", source: "000007", phase: "participant", ordinal: 4},
+		{resultID: "artifact-000022", invocationID: "artifact-000023", promptID: "artifact-000024", source: "000008", phase: "facilitator", ordinal: 4},
+		{resultID: "artifact-000025", invocationID: "artifact-000026", promptID: "artifact-000027", source: "000009", phase: "reducer"},
+	} {
+		prompt := passRenderedPromptForTest(spec.phase + " prompt " + spec.source)
+		promptDigest := prompt["rendered_prompt"].(map[string]any)["raw_digest"].(string)
+		result, invocation := passProviderPayloadsForTest(spec.resultID, spec.promptID, spec.source, spec.phase, spec.ordinal, promptDigest)
+		payloads = append(payloads,
+			passPortablePayloadForTest(t, "provider_result", spec.resultID, result, passPortableSourceRefForTest("provider_result:"+spec.source)),
+			passPortablePayloadForTest(t, "provider_invocation", spec.invocationID, invocation, passPortableSourceRefForTest("provider_invocation:"+spec.source)),
+			passPortablePayloadForTest(t, "rendered_prompt", spec.promptID, prompt, passPortableSourceRefForTest("rendered_prompt:"+spec.source)),
+		)
+	}
+	sort.Slice(payloads, func(i, j int) bool {
+		return payloads[i].entry["path"].(string) < payloads[j].entry["path"].(string)
+	})
+	inventory := make([]any, 0, len(payloads))
+	for _, payload := range payloads {
+		passWritePortableFileForTest(t, batch.PortableExportDir, payload.entry["path"].(string), payload.body)
+		inventory = append(inventory, payload.entry)
+	}
+	inventoryDigest, err := digest.SemanticJSON(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := map[string]any{
+		"schema_version":      "relay-root-portable-export-v2",
+		"convo_relay_version": "v1.4.0",
+		"digest_profile":      digest.Profile,
+		"terminal_status":     "completed",
+		"stop_reason":         nil,
+		"session_payload":     "payloads/root_session/session.json",
+		"transcript_payload":  "payloads/participant_transcript/transcript.json",
+		"diagnostics_payload": "payloads/diagnostics/diagnostics.json",
+		"payload_inventory":   inventory,
+		"inventory_digest":    inventoryDigest,
+	}
+	manifestDigest, err := digest.SemanticJSON(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest["manifest_digest"] = manifestDigest
+	manifestBytes, err := contracts.CanonicalBytes(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passWritePortableFileForTest(t, batch.PortableExportDir, "manifest.json", manifestBytes)
+}
+
+func passContractIDForRecipeForTest(t *testing.T, recipeID string) string {
+	t.Helper()
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		if requirement.RecipeID == recipeID {
+			return requirement.ContractID
+		}
+	}
+	t.Fatalf("recipe %s has no required integration contract", recipeID)
+	return ""
+}
+
+func passProviderPayloadsForTest(resultPortableID string, promptPortableID string, sourceOrdinal string, phase string, participantOrdinal int, promptDigest string) (map[string]any, map[string]any) {
+	invocationDraft := map[string]any{
+		"schema_version":            "relay-provider-invocation-v2",
+		"invocation_id":             phase + ":" + sourceOrdinal,
+		"phase":                     phase,
+		"actor":                     "Agent " + sourceOrdinal,
+		"participant_ordinal":       nil,
+		"reducer_fresh":             phase == "reducer",
+		"rendered_prompt_ref":       passPortableRefForTest(promptPortableID, "rendered_prompt:"+sourceOrdinal),
+		"rendered_prompt_digest":    promptDigest,
+		"backend":                   "codex",
+		"mapped_working_directory":  ".",
+		"runner_attempt":            1,
+		"provider_launch_attempted": true,
+		"provider_retry":            "forbid",
+		"started_at":                "2026-01-01T00:00:00Z",
+		"completed_at":              "2026-01-01T00:00:01Z",
+		"outcome":                   "completed",
+		"failure_stage":             nil,
+		"classification":            nil,
+		"provider_result_ref":       nil,
+	}
+	if participantOrdinal > 0 {
+		invocationDraft["participant_ordinal"] = participantOrdinal
+	}
+	resultPayload := map[string]any{
+		"kind":            "provider_result",
+		"schema_version":  2,
+		"digest_profile":  digest.Profile,
+		"invocation_id":   invocationDraft["invocation_id"],
+		"phase":           invocationDraft["phase"],
+		"actor":           invocationDraft["actor"],
+		"runner_attempt":  invocationDraft["runner_attempt"],
+		"provider_retry":  invocationDraft["provider_retry"],
+		"backend":         invocationDraft["backend"],
+		"started_at":      invocationDraft["started_at"],
+		"completed_at":    invocationDraft["completed_at"],
+		"outcome":         invocationDraft["outcome"],
+		"failure_stage":   invocationDraft["failure_stage"],
+		"classification":  invocationDraft["classification"],
+		"provider_result": map[string]any{"backend": "codex", "return_code": 0},
+		"invocation":      invocationDraft,
+	}
+	boundInvocation := make(map[string]any, len(invocationDraft))
+	for key, value := range invocationDraft {
+		boundInvocation[key] = value
+	}
+	boundInvocation["provider_result_ref"] = passPortableRefForTest(resultPortableID, "provider_result:"+sourceOrdinal)
+	return resultPayload, map[string]any{
+		"kind":           "provider_invocation",
+		"schema_version": 2,
+		"digest_profile": digest.Profile,
+		"invocation":     boundInvocation,
+	}
+}
+
+func passPortablePayloadForTest(t *testing.T, kind string, id string, value any, sourceRef map[string]any) passPortablePayload {
+	t.Helper()
+	body, err := contracts.CanonicalBytes(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := map[string]any{
+		"kind":         kind,
+		"portable_id":  id,
+		"path":         filepath.ToSlash(filepath.Join("payloads", kind, id+".json")),
+		"media_type":   "application/json",
+		"size_bytes":   len(body),
+		"digest_class": digest.ClassRawBytes,
+		"digest":       digest.RawBytes(body),
+	}
+	if sourceRef != nil {
+		entry["source_artifact_id"] = sourceRef["id"]
+		entry["source_artifact_digest"] = sourceRef["digest"]
+	}
+	return passPortablePayload{entry: entry, body: body}
+}
+
+func passNamedInputContentForTest(name string, ordinal int, data []byte) map[string]any {
+	return map[string]any{
+		"kind":           "named_input_content",
+		"schema_version": 2,
+		"digest_profile": digest.Profile,
+		"ordinal":        ordinal,
+		"name":           name,
+		"name_ordinal":   1,
+		"encoding":       "base64",
+		"bytes_base64":   base64.StdEncoding.EncodeToString(data),
+		"size_bytes":     len(data),
+		"raw_digest":     digest.RawBytes(data),
+		"media_type":     "application/json",
+		"schema_status":  "unchecked",
+	}
+}
+
+func passRenderedPromptForTest(text string) map[string]any {
+	data := []byte(text)
+	return map[string]any{
+		"kind":           "rendered_prompt",
+		"schema_version": 2,
+		"digest_profile": digest.Profile,
+		"rendered_prompt": map[string]any{
+			"schema_version": "relay-rendered-prompt-v1",
+			"media_type":     "text/plain; charset=utf-8",
+			"encoding":       "base64",
+			"bytes_base64":   base64.StdEncoding.EncodeToString(data),
+			"size_bytes":     len(data),
+			"raw_digest":     digest.RawBytes(data),
+		},
+	}
+}
+
+func passNamedInputEntryForTest(name string, ordinal int, portableID string, sourceID string, sizeBytes int, rawDigest string) map[string]any {
+	return map[string]any{
+		"ordinal":       ordinal,
+		"name":          name,
+		"name_ordinal":  1,
+		"source_path":   name + ".json",
+		"display_name":  name + ".json",
+		"size_bytes":    sizeBytes,
+		"raw_digest":    rawDigest,
+		"media_type":    "application/json",
+		"schema_status": "unchecked",
+		"content_ref":   passPortableRefForTest(portableID, sourceID),
+	}
+}
+
+func passPortableRefForTest(portableID string, sourceID string) map[string]any {
+	return passPortableRefWithDigestForTest(portableID, sourceID, passPortableSourceRefForTest(sourceID)["digest"].(string))
+}
+
+func passPortableRefWithDigestForTest(portableID string, sourceID string, sourceDigest string) map[string]any {
+	return map[string]any{
+		"kind":                   "portable_payload_ref",
+		"portable_id":            portableID,
+		"source_artifact_id":     sourceID,
+		"source_artifact_digest": sourceDigest,
+	}
+}
+
+func passPortableSourceRefForTest(id string) map[string]any {
+	return map[string]any{"id": id, "digest": digest.RawBytes([]byte(id))}
+}
+
+func passWritePortableFileForTest(t *testing.T, root string, relative string, body []byte) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func plannedRelayInputBindingsForTest(t *testing.T, config Config, batch RelayBatchRecord) []string {

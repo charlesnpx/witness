@@ -100,7 +100,16 @@ func readRecordedRelayRuns(state *State, batches []RelayBatchRecord) (map[string
 				MediaType:     "application/json",
 			}
 		}
-		runs[batch.BatchID] = recordedRelayRun{Path: path, Record: record, Evidence: evidence}
+		// A non-consuming launch failure is retained for auditability, but a
+		// ready planned export is the batch's effective assembly input. Keep
+		// that dependency on the returned record so runAssemble and subsequent
+		// state validation record the same portable-export input while retaining
+		// the launch-failure record itself.
+		recordForInputs := record
+		if !record.ConsumesBatch && portableExportReady(batch.PortableExportDir) {
+			recordForInputs.PortableExportDir = batch.PortableExportDir
+		}
+		runs[batch.BatchID] = recordedRelayRun{Path: path, Record: recordForInputs, Evidence: evidence}
 	}
 	return runs, nil
 }
@@ -364,12 +373,17 @@ func relayEvidenceForAssembly(state *State, batches []RelayBatchRecord) ([]plann
 	}
 	evidence := make([]planning.RelayEvidence, 0, len(batches))
 	for _, batch := range batches {
-		if run, found := runs[batch.BatchID]; found {
+		run, recorded := runs[batch.BatchID]
+		if recorded && run.Record.ConsumesBatch {
 			evidence = append(evidence, run.Evidence)
 			continue
 		}
 		if ready, found := readyByBatchID[batch.BatchID]; found {
 			evidence = append(evidence, ready)
+			continue
+		}
+		if recorded {
+			evidence = append(evidence, run.Evidence)
 		}
 	}
 	return evidence, runs, nil
