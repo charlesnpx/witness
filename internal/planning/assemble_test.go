@@ -1,6 +1,7 @@
 package planning
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"sort"
@@ -176,6 +177,100 @@ func TestAssembleSummarizesRelayCapturesAndPrefersConsumedRunRecord(t *testing.T
 	}
 	if launch["stderr_digest"] != digest.RawBytes([]byte(stderr)) || launch["stderr_bytes"] != len([]byte(stderr)) || launch["stderr_truncated"] != false {
 		t.Fatalf("stderr metadata = %#v", launch)
+	}
+}
+
+func TestAssembleAllowListsRelayRunRecordMetadata(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	const sentinel = "relay-run-record-secret-sentinel"
+	runRecordDigest := digest.RawBytes([]byte("locally-retained-run-record"))
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:      batch.Plan.BatchID,
+			RecipeFamily: batch.Plan.RecipeFamily,
+			Backend:      "codex",
+			RunRecords: []map[string]any{{
+				"schema_version":   "witness-relay-verification-run-v2",
+				"batch_id":         batch.Plan.BatchID,
+				"recipe_id":        "witness-falsify-v2-codex",
+				"status":           contracts.RecordStatusUnavailable,
+				"provider_invoked": "unknown",
+				"consumes_batch":   true,
+				"input_bindings":   []string{"token=" + sentinel},
+				"relay_run_result": map[string]any{"provider_response": sentinel},
+				"session_dir":      sentinel,
+				"diagnostics": []map[string]any{{
+					"code":    "relayrun_launch_failed",
+					"message": sentinel,
+					"details": map[string]any{"provider_payload": sentinel},
+				}},
+				"run_record_digest": runRecordDigest,
+				"relay_launch": map[string]any{
+					"argv":              []string{"fake-relay", "run", "--json"},
+					"working_directory": "/tmp/workspace",
+					"exit_code":         1,
+					"start_failed":      false,
+					"stdout":            sentinel,
+					"stderr":            "relay failed",
+					"stdout_truncated":  true,
+					"stderr_truncated":  false,
+				},
+			}},
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	manifestBytes, err := contracts.CanonicalBytes(result.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(manifestBytes, []byte(sentinel)) {
+		t.Fatalf("encoded manifest retained local relay content: %s", manifestBytes)
+	}
+	rawBatches := result.Manifest.ConsumerIdentity[contracts.VerificationManifestRelayBatchesKey].(map[string]any)
+	metadata := rawBatches[batch.Plan.BatchID].(map[string]any)
+	runRecords, ok := metadata["run_records"].([]map[string]any)
+	if !ok || len(runRecords) != 1 {
+		t.Fatalf("run records = %#v", metadata["run_records"])
+	}
+	retained := runRecords[0]
+	if _, exists := retained["relay_run_result"]; exists {
+		t.Fatalf("manifest metadata retained relay_run_result: %#v", retained)
+	}
+	if retained["run_record_digest"] != runRecordDigest {
+		t.Fatalf("run record metadata = %#v, want retained run-record digest", retained)
+	}
+	launch, ok := retained["relay_launch"].(map[string]any)
+	if !ok {
+		t.Fatalf("run record = %#v, missing launch summary", retained)
+	}
+	if launch["stdout_digest"] != digest.RawBytes([]byte(sentinel)) || launch["stdout_bytes"] != len([]byte(sentinel)) || launch["stdout_truncated"] != true {
+		t.Fatalf("stdout launch summary = %#v", launch)
+	}
+	if launch["stderr_digest"] != digest.RawBytes([]byte("relay failed")) || launch["stderr_bytes"] != len([]byte("relay failed")) || launch["stderr_truncated"] != false {
+		t.Fatalf("stderr launch summary = %#v", launch)
+	}
+	diagnostics, ok := retained["diagnostics"].([]map[string]any)
+	if !ok || len(diagnostics) != 1 || len(diagnostics[0]) != 1 || diagnostics[0]["code"] != "relayrun_launch_failed" {
+		t.Fatalf("manifest diagnostics = %#v, want code-only failure diagnostic", retained["diagnostics"])
 	}
 }
 

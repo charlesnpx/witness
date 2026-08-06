@@ -268,6 +268,18 @@ func requireValidRunRecord(record RunRecord) error {
 		return diag.New(CodeInvalidRunRecord, "relay run record status is unsupported.", diag.WithDetail("value", record.Status))
 	}
 	providerEvidence := runRecordProviderEvidence(record)
+	if record.RelayLaunch != nil && record.RelayLaunch.StartFailed {
+		if record.ProviderInvoked != ProviderInvokedFalse || record.Status != RunStatusLaunchFailed || record.ConsumesBatch || len(providerEvidence) > 0 {
+			return diag.New(
+				CodeInvalidRunRecord,
+				"relay_launch.start_failed=true requires provider_invoked=false, launch_failed status, a non-consuming batch, and no provider evidence.",
+				diag.WithDetail("provider_invoked", record.ProviderInvoked),
+				diag.WithDetail("status", record.Status),
+				diag.WithDetail("consumes_batch", record.ConsumesBatch),
+				diag.WithDetail("provider_evidence", providerEvidence),
+			)
+		}
+	}
 	if record.ProviderInvoked == ProviderInvokedFalse {
 		if record.Status != RunStatusLaunchFailed {
 			return diag.New(CodeInvalidRunRecord, "provider_invoked=false requires launch_failed status.", diag.WithDetail("status", record.Status))

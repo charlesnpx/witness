@@ -1,8 +1,10 @@
 package planning
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charlesnpx/witness/internal/changesurface"
@@ -466,41 +468,158 @@ func cloneRelayRunRecords(records []map[string]any) []map[string]any {
 	return cloned
 }
 
-// SanitizeRelayRunRecordMetadata keeps locally retained relay run records
-// referencable from a manifest without copying captured stdout or stderr into
-// consumer identity metadata.
+// SanitizeRelayRunRecordMetadata builds a manifest projection from an explicit
+// allow-list. Retained relay run records can include raw process output and
+// provider payloads, which must remain local-only.
 func SanitizeRelayRunRecordMetadata(record map[string]any) map[string]any {
-	cloned := make(map[string]any, len(record))
-	for key, value := range record {
-		cloned[key] = value
+	metadata := make(map[string]any, 10)
+	for _, key := range []string{
+		"schema_version",
+		"batch_id",
+		"recipe_id",
+		"status",
+		"provider_invoked",
+	} {
+		if value, ok := record[key].(string); ok {
+			metadata[key] = value
+		}
 	}
-	rawLaunch, ok := record["relay_launch"].(map[string]any)
+	if consumesBatch, ok := record["consumes_batch"].(bool); ok {
+		metadata["consumes_batch"] = consumesBatch
+	}
+	if diagnosticCodes := relayRunRecordDiagnosticCodes(record["diagnostics"]); len(diagnosticCodes) > 0 {
+		metadata["diagnostics"] = diagnosticCodes
+	}
+	if launch := relayLaunchMetadataSummary(record["relay_launch"]); len(launch) > 0 {
+		metadata["relay_launch"] = launch
+	}
+	if runRecordDigest, ok := record["run_record_digest"].(string); ok && digest.WellFormed(runRecordDigest) {
+		metadata["run_record_digest"] = runRecordDigest
+	}
+	return metadata
+}
+
+func relayRunRecordDiagnosticCodes(value any) []map[string]any {
+	codes := make([]map[string]any, 0)
+	appendCode := func(code string) {
+		if code = strings.TrimSpace(code); code != "" {
+			codes = append(codes, map[string]any{"code": code})
+		}
+	}
+	switch diagnostics := value.(type) {
+	case []any:
+		for _, diagnostic := range diagnostics {
+			if diagnostic, ok := diagnostic.(map[string]any); ok {
+				if code, ok := diagnostic["code"].(string); ok {
+					appendCode(code)
+				}
+			}
+		}
+	case []map[string]any:
+		for _, diagnostic := range diagnostics {
+			if code, ok := diagnostic["code"].(string); ok {
+				appendCode(code)
+			}
+		}
+	case []diag.Diagnostic:
+		for _, diagnostic := range diagnostics {
+			appendCode(diagnostic.Code)
+		}
+	}
+	return codes
+}
+
+func relayLaunchMetadataSummary(value any) map[string]any {
+	launch, ok := value.(map[string]any)
 	if !ok {
-		return cloned
+		return nil
 	}
-	launch := make(map[string]any, len(rawLaunch)+4)
-	for key, value := range rawLaunch {
-		launch[key] = value
+	summary := make(map[string]any, 9)
+	if argv, ok := relayLaunchArgv(launch["argv"]); ok {
+		summary["argv"] = argv
 	}
-	for _, stream := range []string{"stdout", "stderr"} {
-		raw, present := launch[stream]
-		if !present {
-			continue
+	if workingDirectory, ok := launch["working_directory"].(string); ok {
+		summary["working_directory"] = workingDirectory
+	}
+	if exitCode, ok := relayLaunchInteger(launch["exit_code"], false); ok {
+		summary["exit_code"] = exitCode
+	}
+	if startFailed, ok := launch["start_failed"].(bool); ok {
+		summary["start_failed"] = startFailed
+	}
+	appendRelayLaunchStreamSummary(summary, launch, "stdout")
+	appendRelayLaunchStreamSummary(summary, launch, "stderr")
+	return summary
+}
+
+func relayLaunchArgv(value any) ([]string, bool) {
+	switch argv := value.(type) {
+	case []string:
+		return append([]string(nil), argv...), true
+	case []any:
+		values := make([]string, 0, len(argv))
+		for _, value := range argv {
+			argument, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			values = append(values, argument)
 		}
-		delete(launch, stream)
-		capture, ok := raw.(string)
+		return values, true
+	default:
+		return nil, false
+	}
+}
+
+func appendRelayLaunchStreamSummary(summary, launch map[string]any, stream string) {
+	digestKey := stream + "_digest"
+	bytesKey := stream + "_bytes"
+	truncatedKey := stream + "_truncated"
+	if capture, ok := launch[stream].(string); ok {
+		summary[digestKey] = digest.RawBytes([]byte(capture))
+		summary[bytesKey] = len([]byte(capture))
+		truncated, ok := launch[truncatedKey].(bool)
 		if !ok {
-			continue
+			truncated = false
 		}
-		launch[stream+"_digest"] = digest.RawBytes([]byte(capture))
-		launch[stream+"_bytes"] = len([]byte(capture))
-		truncatedKey := stream + "_truncated"
-		if _, ok := launch[truncatedKey].(bool); !ok {
-			launch[truncatedKey] = false
-		}
+		summary[truncatedKey] = truncated
+		return
 	}
-	cloned["relay_launch"] = launch
-	return cloned
+	if captureDigest, ok := launch[digestKey].(string); ok && digest.WellFormed(captureDigest) {
+		summary[digestKey] = captureDigest
+	}
+	if captureBytes, ok := relayLaunchInteger(launch[bytesKey], true); ok {
+		summary[bytesKey] = captureBytes
+	}
+	if truncated, ok := launch[truncatedKey].(bool); ok {
+		summary[truncatedKey] = truncated
+	}
+}
+
+func relayLaunchInteger(value any, nonNegative bool) (int, bool) {
+	var result int64
+	switch value := value.(type) {
+	case int:
+		result = int64(value)
+	case int64:
+		result = value
+	case json.Number:
+		parsed, err := strconv.ParseInt(value.String(), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		result = parsed
+	default:
+		return 0, false
+	}
+	if nonNegative && result < 0 {
+		return 0, false
+	}
+	converted := int(result)
+	if int64(converted) != result {
+		return 0, false
+	}
+	return converted, true
 }
 
 func relayLaunchStatusForCompatibility(compatibility *contracts.RelayCompatibility) string {

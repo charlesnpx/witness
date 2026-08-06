@@ -1740,6 +1740,7 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 
 func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testing.T) {
 	dir := t.TempDir()
+	const sentinel = "relay-run-record-secret-sentinel"
 	frozen := validCLIFrozenCharter(t)
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutput := validCLIRoleOutput(frozen)
@@ -1775,12 +1776,13 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 		InputBindings:   []string{"charter=" + frozenPath},
 		ProviderInvoked: relayrun.ProviderInvokedFalse,
 		ConsumesBatch:   false,
+		RelayRunResult:  map[string]any{"opaque_response": sentinel},
 		RelayLaunch: &relayrun.LaunchRecord{
 			Argv:             []string{"fake-relay", "run", "--recipe", "witness-falsify-v2-codex", "--json"},
 			WorkingDirectory: dir,
 			ExitCode:         -1,
 			StartFailed:      true,
-			Stdout:           `{"message":"authentication failed"}`,
+			Stdout:           sentinel,
 			Stderr:           "authentication failed",
 		},
 		Diagnostics: []diag.Diagnostic{{
@@ -1819,6 +1821,13 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	if _, err := contracts.VerificationManifestDigest(manifest); err != nil {
 		t.Fatalf("manifest digest: %v", err)
 	}
+	manifestBytes, err := contracts.CanonicalBytes(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(manifestBytes, []byte(sentinel)) {
+		t.Fatalf("encoded manifest retained local relay content: %s", manifestBytes)
+	}
 	if len(manifest.Batches) != 1 || manifest.Batches[0].Status != contracts.RecordStatusUnavailable || manifest.Batches[0].FailureReason != "relay_launch_failed" {
 		t.Fatalf("manifest batches = %#v, want valid unavailable launch-failed record", manifest.Batches)
 	}
@@ -1848,7 +1857,10 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	if _, exists := launch["stderr"]; exists {
 		t.Fatalf("retained launch unexpectedly contains raw stderr: %#v", launch)
 	}
-	if launch["stdout_digest"] != digest.RawBytes([]byte(`{"message":"authentication failed"}`)) || !jsonNumberMatches(launch["stdout_bytes"], len([]byte(`{"message":"authentication failed"}`))) || launch["stdout_truncated"] != false {
+	if _, exists := retained["relay_run_result"]; exists {
+		t.Fatalf("retained run record unexpectedly contains relay run result: %#v", retained)
+	}
+	if launch["stdout_digest"] != digest.RawBytes([]byte(sentinel)) || !jsonNumberMatches(launch["stdout_bytes"], len([]byte(sentinel))) || launch["stdout_truncated"] != false {
 		t.Fatalf("stdout metadata = %#v", launch)
 	}
 	if launch["stderr_digest"] != digest.RawBytes([]byte("authentication failed")) || !jsonNumberMatches(launch["stderr_bytes"], len([]byte("authentication failed"))) || launch["stderr_truncated"] != false {
@@ -1901,6 +1913,31 @@ func TestMergeRelayEvidenceRejectsMixedBatchConsumption(t *testing.T) {
 	}
 	if got := diag.FromError(err).Code; got != verificationAssembleMixedRunRecordConsumption {
 		t.Fatalf("diagnostic code = %q, want %q; err=%v", got, verificationAssembleMixedRunRecordConsumption, err)
+	}
+}
+
+func TestMergeRelayEvidenceRejectsConflictingProvenance(t *testing.T) {
+	_, err := mergeRelayEvidence(
+		[]planning.RelayEvidence{{
+			BatchID:      "defect-batch-1",
+			RecipeFamily: "witness-falsify-v2",
+			Backend:      "codex",
+		}},
+		[]planning.RelayEvidence{{
+			BatchID:      "defect-batch-1",
+			RecipeFamily: "witness-falsify-v3",
+			Backend:      "codex",
+		}},
+	)
+	if err == nil {
+		t.Fatal("mergeRelayEvidence accepted conflicting relay provenance")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != verificationAssembleConflictingRelayProvenance {
+		t.Fatalf("diagnostic code = %q, want %q; err=%v", diagnostic.Code, verificationAssembleConflictingRelayProvenance, err)
+	}
+	if diagnostic.Details["batch_id"] != "defect-batch-1" || diagnostic.Details["field"] != "recipe_family" {
+		t.Fatalf("diagnostic details = %#v, want batch and conflicting field", diagnostic.Details)
 	}
 }
 

@@ -177,7 +177,7 @@ func TestReadRunRecordsBytesRejectsLaunchFailedProviderEvidence(t *testing.T) {
 			Argv:             []string{"fake-relay", "run", "--json"},
 			WorkingDirectory: "/tmp/workspace",
 			ExitCode:         -1,
-			StartFailed:      true,
+			StartFailed:      false,
 		},
 		PortableExportDir: "/tmp/relay-export",
 		RelayVerdicts:     &contracts.RelayWitnessVerdictsDocument{},
@@ -187,6 +187,30 @@ func TestReadRunRecordsBytesRejectsLaunchFailedProviderEvidence(t *testing.T) {
 	}
 	if _, err := ReadRunRecordsBytes(data); err == nil || !strings.Contains(err.Error(), "cannot carry provider evidence") {
 		t.Fatalf("ReadRunRecordsBytes error = %v, want provider-evidence rejection", err)
+	}
+}
+
+func TestReadRunRecordsBytesRejectsStartFailedProviderInvocation(t *testing.T) {
+	data, err := contracts.CanonicalBytes(RunRecord{
+		SchemaVersion:   RunRecordSchema,
+		BatchID:         "defect-batch-1",
+		Status:          contracts.RecordStatusUnavailable,
+		RecipeID:        "witness-falsify-v2-codex",
+		ProviderInvoked: ProviderInvokedTrue,
+		ConsumesBatch:   true,
+		SessionDir:      "/tmp/relay-session",
+		RelayLaunch: &LaunchRecord{
+			Argv:             []string{"fake-relay", "run", "--json"},
+			WorkingDirectory: "/tmp/workspace",
+			ExitCode:         -1,
+			StartFailed:      true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRunRecordsBytes(data); err == nil || !strings.Contains(err.Error(), "start_failed=true requires provider_invoked=false") {
+		t.Fatalf("ReadRunRecordsBytes error = %v, want start-failure converse rejection", err)
 	}
 }
 

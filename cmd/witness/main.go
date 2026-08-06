@@ -36,6 +36,7 @@ const (
 	verificationPlanInvalidPreflight                = "verification_plan_invalid_preflight"
 	verificationAssembleInvalidRunRecordConsumption = "verification_assemble_invalid_run_record_consumption"
 	verificationAssembleMixedRunRecordConsumption   = "verification_assemble_mixed_run_record_consumption"
+	verificationAssembleConflictingRelayProvenance  = "verification_assemble_conflicting_relay_provenance"
 
 	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
 	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
@@ -1890,7 +1891,12 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEv
 	byBatch := map[string]planning.RelayEvidence{}
 	for _, source := range sources {
 		for _, incoming := range source {
-			current := byBatch[incoming.BatchID]
+			current, exists := byBatch[incoming.BatchID]
+			if exists {
+				if err := requireMatchingRelayEvidenceProvenance(incoming.BatchID, current, incoming); err != nil {
+					return nil, err
+				}
+			}
 			current.BatchID = incoming.BatchID
 			if incoming.RecipeFamily != "" {
 				current.RecipeFamily = incoming.RecipeFamily
@@ -1920,6 +1926,60 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEv
 		result = append(result, byBatch[batchID])
 	}
 	return result, nil
+}
+
+func requireMatchingRelayEvidenceProvenance(batchID string, current, incoming planning.RelayEvidence) error {
+	for _, field := range []struct {
+		name     string
+		current  string
+		incoming string
+	}{
+		{name: "recipe_family", current: current.RecipeFamily, incoming: incoming.RecipeFamily},
+		{name: "backend", current: current.Backend, incoming: incoming.Backend},
+		{name: "portable_export_dir", current: current.PortableExportDir, incoming: incoming.PortableExportDir},
+		{name: "portable_export_digest", current: relayPortableExportDigest(current.PortableExportRef), incoming: relayPortableExportDigest(incoming.PortableExportRef)},
+	} {
+		if conflictingRelayProvenanceValue(field.current, field.incoming) {
+			return conflictingRelayProvenance(batchID, field.name)
+		}
+	}
+	if current.Verdicts == nil || incoming.Verdicts == nil {
+		return nil
+	}
+	currentIdentity, err := contracts.RelayWitnessVerdictsDigest(*current.Verdicts)
+	if err != nil {
+		return diag.Wrap(err, verificationAssembleConflictingRelayProvenance, "could not determine existing relay verdict identity for provenance validation.", diag.WithDetail("batch_id", batchID), diag.WithDetail("field", "relay_verdict_identity"))
+	}
+	incomingIdentity, err := contracts.RelayWitnessVerdictsDigest(*incoming.Verdicts)
+	if err != nil {
+		return diag.Wrap(err, verificationAssembleConflictingRelayProvenance, "could not determine incoming relay verdict identity for provenance validation.", diag.WithDetail("batch_id", batchID), diag.WithDetail("field", "relay_verdict_identity"))
+	}
+	if currentIdentity != incomingIdentity {
+		return conflictingRelayProvenance(batchID, "relay_verdict_identity")
+	}
+	return nil
+}
+
+func relayPortableExportDigest(ref *contracts.ArtifactRef) string {
+	if ref == nil {
+		return ""
+	}
+	return strings.TrimSpace(ref.Digest)
+}
+
+func conflictingRelayProvenanceValue(current, incoming string) bool {
+	current = strings.TrimSpace(current)
+	incoming = strings.TrimSpace(incoming)
+	return current != "" && incoming != "" && current != incoming
+}
+
+func conflictingRelayProvenance(batchID, field string) error {
+	return diag.New(
+		verificationAssembleConflictingRelayProvenance,
+		fmt.Sprintf("relay evidence for batch %q has conflicting %s provenance; refusing to merge sources.", batchID, field),
+		diag.WithDetail("batch_id", batchID),
+		diag.WithDetail("field", field),
+	)
 }
 
 func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[string]any, error) {
