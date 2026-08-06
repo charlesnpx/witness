@@ -27,6 +27,7 @@ import (
 	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
+	"github.com/charlesnpx/witness/internal/relayrun"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
@@ -1778,7 +1779,10 @@ func TestRelayBatchActionCarriesBoundDigestsAndRetainedBundle(t *testing.T) {
 			BatchDigest:  batchDigest,
 		}},
 	})
-	action := nextRelayBatchAction(state)
+	action, err := nextRelayBatchAction(state)
+	if err != nil {
+		t.Fatalf("nextRelayBatchAction: %v", err)
+	}
 	if action == nil {
 		t.Fatal("nextRelayBatchAction returned nil")
 	}
@@ -1795,6 +1799,78 @@ func TestRelayBatchActionCarriesBoundDigestsAndRetainedBundle(t *testing.T) {
 		if !strings.Contains(strings.Join(action.InputBindings, "\n"), value) {
 			t.Fatalf("input bindings = %#v, missing digest %s", action.InputBindings, value)
 		}
+	}
+}
+
+func TestPassResumeConsumesRecordedUnavailableRelayRun(t *testing.T) {
+	options, state, batch := readyPassAtRelayBatchActionForTest(t, true)
+	writeRecordedRelayRunForTest(t, state.Config, batch, relayrun.RunRecord{
+		SchemaVersion:   relayrun.RunRecordSchema,
+		BatchID:         batch.BatchID,
+		Status:          contracts.RecordStatusUnavailable,
+		RecipeID:        batch.RecipeID,
+		InputBindings:   plannedRelayInputBindingsForTest(t, state.Config, batch),
+		ProviderInvoked: relayrun.ProviderInvokedUnknown,
+		ConsumesBatch:   true,
+		Diagnostics: []diag.Diagnostic{{
+			Code:    relayrun.CodeRelayRunFailed,
+			Message: "relay verification run failed after launch.",
+		}},
+	})
+
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume assemble from recorded unavailable run: %v", err)
+	}
+	assertInvocation(t, invocation, stageAssemble, actionWitnessCommand, false)
+
+	manifest := readJSONForTest[contracts.VerificationManifest](t, state.Config.Outputs.ManifestPath)
+	if diagnostics := contracts.ValidateVerificationManifest(manifest); len(diagnostics) > 0 {
+		t.Fatalf("manifest diagnostics = %#v", diagnostics)
+	}
+	if len(manifest.Batches) != 1 || manifest.Batches[0].Status != contracts.RecordStatusUnavailable || manifest.Batches[0].FailureReason != "relay_run_recorded_unavailable" {
+		t.Fatalf("manifest batches = %#v, want recorded unavailable evidence", manifest.Batches)
+	}
+
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume adjudicate: %v", err)
+	}
+	assertInvocation(t, invocation, stageAdjudicate, actionWitnessCommand, false)
+	verdict := readJSONForTest[adjudicate.Result](t, state.Config.Outputs.RunResultPath)
+	if len(verdict.Findings) != 1 || verdict.Findings[0].Disposition != contracts.DispositionPendingVerification || verdict.Summary.PendingVerification != 1 || verdict.Summary.FixpointEligible {
+		t.Fatalf("verdict = %#v, want one pending, fixpoint-ineligible finding", verdict)
+	}
+
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume metrics: %v", err)
+	}
+	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
+}
+
+func TestPassResumeKeepsCallerRelayBatchForRecordedLaunchFailure(t *testing.T) {
+	options, state, batch := readyPassAtRelayBatchActionForTest(t, true)
+	writeRecordedRelayRunForTest(t, state.Config, batch, relayrun.RunRecord{
+		SchemaVersion:   relayrun.RunRecordSchema,
+		BatchID:         batch.BatchID,
+		Status:          relayrun.RunStatusLaunchFailed,
+		RecipeID:        batch.RecipeID,
+		InputBindings:   plannedRelayInputBindingsForTest(t, state.Config, batch),
+		ProviderInvoked: relayrun.ProviderInvokedFalse,
+		ConsumesBatch:   false,
+		RelayLaunch: &relayrun.LaunchRecord{
+			ExitCode:    -1,
+			StartFailed: true,
+		},
+	})
+
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume with recorded launch failure: %v", err)
+	}
+	if invocation.StageRun != "" || invocation.Complete || invocation.NextAction.Type != actionCallerRelayBatch || invocation.NextAction.RelayBatch == nil || invocation.NextAction.RelayBatch.BatchID != batch.BatchID {
+		t.Fatalf("invocation = %#v, want caller relay batch retry", invocation)
 	}
 }
 
@@ -1867,7 +1943,6 @@ func TestDriverImportsNoRelayExecutionOrProviderInvocation(t *testing.T) {
 	}
 	forbidden := map[string]bool{
 		"github.com/charlesnpx/witness/internal/relayclient": true,
-		"github.com/charlesnpx/witness/internal/relayrun":    true,
 	}
 	for _, pkg := range files {
 		for path, file := range pkg.Files {
@@ -1880,7 +1955,104 @@ func TestDriverImportsNoRelayExecutionOrProviderInvocation(t *testing.T) {
 					t.Fatalf("%s imports forbidden relay/provider execution package %s", path, value)
 				}
 			}
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("relayrun.RunBatches(")) {
+				t.Fatalf("%s invokes relayrun.RunBatches; the pass driver may read validated records but must not launch relay", path)
+			}
 		}
+	}
+}
+
+func readyPassAtRelayBatchActionForTest(t *testing.T, withFinding bool) (BeginOptions, *State, RelayBatchRecord) {
+	t.Helper()
+	options := newBeginOptions(t)
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	preflightResult := writeReadyPreflightForTest(t, state.Config)
+	if err := validatePreflightOutput(state.Config, preflightResult); err != nil {
+		t.Fatalf("ready preflight does not validate: %v", err)
+	}
+	inputs, err := artifactRecordsForExistingFiles(preflightInputSpecs(state.Config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, err := artifactRecordsForExistingFiles(preflightOutputSpecs(state.Config, &preflightResult))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markStageComplete(state, StageRecord{
+		Name:    stagePreflight,
+		Status:  statusComplete,
+		Inputs:  inputs,
+		Outputs: outputs,
+		Details: map[string]any{
+			"relay_absent":        false,
+			"backend_strata":      cloneStringMap(preflightResult.BackendStrata),
+			"source_dirty":        preflightResult.SourceDirty,
+			"source_dirty_status": preflightResult.SourceDirtyStatus,
+		},
+	})
+	if err := setNextAction(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	invocation, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume to role outputs: %v", err)
+	}
+	if invocation.NextAction.Type != actionCallerRoleOutputs {
+		t.Fatalf("next action = %#v, want caller role outputs", invocation.NextAction)
+	}
+	writeRoleOutputsForState(t, options.StateDir, withFinding)
+
+	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
+	if err != nil {
+		t.Fatalf("resume plan: %v", err)
+	}
+	if invocation.StageRun != stagePlan || invocation.NextAction.Type != actionCallerRelayBatch {
+		t.Fatalf("plan invocation = %#v, want caller relay batch", invocation)
+	}
+	state = readPassStateForTest(t, options.StateDir)
+	if len(state.RelayBatches) != 1 {
+		t.Fatalf("relay batches = %#v, want one", state.RelayBatches)
+	}
+	return options, state, state.RelayBatches[0]
+}
+
+func writeRecordedRelayRunForTest(t *testing.T, config Config, batch RelayBatchRecord, record relayrun.RunRecord) {
+	t.Helper()
+	path := relayRunRecordPath(config, batch.BatchID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCanonicalForTest(t, path, record)
+}
+
+func plannedRelayInputBindingsForTest(t *testing.T, config Config, batch RelayBatchRecord) []string {
+	t.Helper()
+	charterDigest, err := computeArtifactDigest(config.Outputs.CharterFreezePath, digest.ClassRawBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDigest, err := computeArtifactDigest(config.SnapshotManifestPath, digestClassFreezeManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{
+		boundInput("charter", config.Outputs.CharterFreezePath, charterDigest),
+		boundInput("findings", batch.BatchPath, batch.BatchDigest),
+		boundInput("artifact", config.SnapshotManifestPath, snapshotDigest),
 	}
 }
 
@@ -2130,6 +2302,7 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		ContractDigests:      map[string]string{"integration_bundle": bundleDigest},
 		RelayReportedDigests: map[string]string{},
 		BackendStrata:        map[string]string{"claude": "ready", "codex": "ready"},
+		SnapshotDigest:       snapshotDigest,
 		ConsumerIdentity:     map[string]any{"kind": "witness", "id": "pass-driver"},
 	}
 	for _, key := range sortedStringMapKeys(selectedDigests) {
@@ -2145,7 +2318,15 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		},
 	})
 	result.ArtifactDigests["recipes-list.json"] = retainPreflightPayloadForTest(t, config.StateDir, "recipes-list.json", readyRecipesPayloadForTest())
-	result.ArtifactDigests["integration-bundle.json"] = retainPreflightPayloadForTest(t, config.StateDir, "integration-bundle.json", bundlePayload)
+	result.ArtifactDigests[preflight.RetainedIntegrationBundleEnvelopeFile] = retainPreflightPayloadForTest(t, config.StateDir, preflight.RetainedIntegrationBundleEnvelopeFile, bundlePayload)
+	bundleBody, err := os.ReadFile(config.IntegrationBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config.StateDir, preflight.RetainedIntegrationBundleBodyFile), bundleBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result.ArtifactDigests[preflight.RetainedIntegrationBundleBodyFile] = bundleDigest
 	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
 		plan := map[string]any{
 			"schema_version":               "test-root-recipe-plan-v1",

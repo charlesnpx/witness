@@ -692,6 +692,9 @@ func applyVerificationAssembleStateDirDefaults(
 	}
 	if len(*selectedContractPaths) == 0 {
 		candidate, exists := stateDirRetainedArtifactPath(stateDir, assembleStateDirSelectedContract)
+		if !exists && hasRetainedArtifacts && retainedArtifacts["integration_bundle"] != "" {
+			candidate, exists = stateDirRetainedArtifactPath(stateDir, retainedArtifacts["integration_bundle"])
+		}
 		if exists {
 			*selectedContractPaths = append(*selectedContractPaths, candidate)
 		} else {

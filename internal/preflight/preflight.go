@@ -27,6 +27,13 @@ const (
 	ContractDigestDocumentV1 = "witness-preflight-contract-digests-v1"
 	ContractDigestDocumentV2 = "witness-preflight-contract-digests-v2"
 
+	// RetainedIntegrationBundleEnvelopeFile preserves the authenticated
+	// retention envelope. RetainedIntegrationBundleBodyFile is the exact
+	// authored JSON supplied to relay so a planned integration-bundle binding
+	// can be satisfied without treating envelope bytes as bundle bytes.
+	RetainedIntegrationBundleEnvelopeFile = "integration-bundle.json"
+	RetainedIntegrationBundleBodyFile     = "integration-bundle.body.json"
+
 	relayIntegrationBundleV2 = "relay-integration-bundle-v2"
 
 	CodeMissingStateDir             = "preflight_missing_state_dir"
@@ -283,10 +290,15 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	diagnostics = append(diagnostics, bundleDiagnostics...)
 	if len(bundleDiagnostics) == 0 {
 		result.ContractDigests["integration_bundle"] = bundleDigest
-		if retainedDigest, err := retain(options.StateDir, "integration-bundle.json", bundlePayload); err != nil {
+		if retainedDigest, err := retain(options.StateDir, RetainedIntegrationBundleEnvelopeFile, bundlePayload); err != nil {
 			return result, err
 		} else {
-			result.ArtifactDigests["integration-bundle.json"] = retainedDigest
+			result.ArtifactDigests[RetainedIntegrationBundleEnvelopeFile] = retainedDigest
+		}
+		if retainedDigest, err := retainIntegrationBundleBody(options.StateDir, options.IntegrationBundlePath, bundleDigest); err != nil {
+			return result, err
+		} else {
+			result.ArtifactDigests[RetainedIntegrationBundleBodyFile] = retainedDigest
 		}
 	}
 
@@ -478,10 +490,15 @@ func runRelayAbsentPreflight(result *Result, options Options, launchErr error, d
 	diagnostics = append(diagnostics, bundleDiagnostics...)
 	if len(bundleDiagnostics) == 0 {
 		result.ContractDigests["integration_bundle"] = bundleDigest
-		if retainedDigest, err := retain(options.StateDir, "integration-bundle.json", bundlePayload); err != nil {
+		if retainedDigest, err := retain(options.StateDir, RetainedIntegrationBundleEnvelopeFile, bundlePayload); err != nil {
 			return result, err
 		} else {
-			result.ArtifactDigests["integration-bundle.json"] = retainedDigest
+			result.ArtifactDigests[RetainedIntegrationBundleEnvelopeFile] = retainedDigest
+		}
+		if retainedDigest, err := retainIntegrationBundleBody(options.StateDir, options.IntegrationBundlePath, bundleDigest); err != nil {
+			return result, err
+		} else {
+			result.ArtifactDigests[RetainedIntegrationBundleBodyFile] = retainedDigest
 		}
 		contractDigests, contractDiagnostics := selectedContractDigestsFromBundle(bundlePayload)
 		diagnostics = append(diagnostics, contractDiagnostics...)
@@ -1625,6 +1642,44 @@ func retain(stateDir string, relativePath string, payload any) (string, error) {
 	return payloadDigest, nil
 }
 
+// retainIntegrationBundleBody keeps the authored integration-bundle bytes
+// alongside its authenticated envelope. The returned digest is semantic JSON
+// because the pass and relay bindings authenticate bundle meaning, while the
+// retained file remains directly consumable by relay.
+func retainIntegrationBundleBody(stateDir string, sourcePath string, expectedDigest string) (string, error) {
+	if err := validateRelativeOutput(RetainedIntegrationBundleBodyFile); err != nil {
+		return "", err
+	}
+	body, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	payload, err := strictjson.DecodeAnyBytes(body, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return "", err
+	}
+	actualDigest, err := digest.SemanticJSON(payload)
+	if err != nil {
+		return "", err
+	}
+	if actualDigest != expectedDigest {
+		return "", diag.New(
+			CodeIntegrationBundleReadFailed,
+			"integration bundle changed while preflight was retaining its authored body.",
+			diag.WithDetail("actual_digest", actualDigest),
+			diag.WithDetail("expected_digest", expectedDigest),
+		)
+	}
+	path := filepath.Join(stateDir, RetainedIntegrationBundleBodyFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return "", err
+	}
+	return actualDigest, nil
+}
+
 func retainCommandFailure(stateDir string, relativePath string, err error) (string, error) {
 	var commandError *relayclient.CommandError
 	if !errors.As(err, &commandError) || strings.TrimSpace(commandError.Stdout) == "" {
@@ -1960,11 +2015,17 @@ func RetainedArtifacts(stateDir string, snapshotManifestPath string, artifactDig
 	}{
 		{role: "compatibility_manifest", path: "compatibility-manifest.json"},
 		{role: "relay_capabilities", path: "relay-capabilities.json"},
-		{role: "integration_bundle", path: "integration-bundle.json"},
+		{role: "integration_bundle", path: RetainedIntegrationBundleBodyFile},
 	} {
 		if strings.TrimSpace(artifactDigests[item.path]) != "" {
 			artifacts[item.role] = item.path
 		}
+	}
+	// v0.4.0 states retained only the envelope. Keep their inventory readable
+	// when a pass is resumed after upgrading; newly created states always carry
+	// the body above.
+	if artifacts["integration_bundle"] == "" && strings.TrimSpace(artifactDigests[RetainedIntegrationBundleEnvelopeFile]) != "" {
+		artifacts["integration_bundle"] = RetainedIntegrationBundleEnvelopeFile
 	}
 	if strings.TrimSpace(artifactDigests["source-snapshot-manifest"]) == "" {
 		return artifacts

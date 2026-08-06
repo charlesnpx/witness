@@ -813,7 +813,7 @@ func TestRunReportsRetainedArtifactPaths(t *testing.T) {
 	want := map[string]string{
 		"compatibility_manifest": "compatibility-manifest.json",
 		"relay_capabilities":     "relay-capabilities.json",
-		"integration_bundle":     "integration-bundle.json",
+		"integration_bundle":     RetainedIntegrationBundleBodyFile,
 		"source_manifest":        "source-snapshot/manifest.json",
 		"workspace_manifest":     "source-snapshot/manifest.json",
 	}
@@ -826,6 +826,41 @@ func TestRunReportsRetainedArtifactPaths(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(stateDir, filepath.FromSlash(relativePath))); err != nil {
 			t.Fatalf("retained artifact %s at %s: %v", role, relativePath, err)
 		}
+	}
+}
+
+func TestRetainedIntegrationBundleBodyAuthenticatesPlannedBinding(t *testing.T) {
+	stateDir := t.TempDir()
+	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
+	authoredBody, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(context.Background(), Options{
+		RelayPath:             filepath.Join(t.TempDir(), "missing-convo-relay"),
+		IntegrationBundlePath: bundlePath,
+		StateDir:              stateDir,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	bodyPath := filepath.Join(stateDir, RetainedIntegrationBundleBodyFile)
+	retainedBody, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(retainedBody, authoredBody) {
+		t.Fatalf("retained integration bundle body differs from authored bytes")
+	}
+	actualDigest, err := digest.SemanticJSONBytes(retainedBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actualDigest != result.ContractDigests["integration_bundle"] || actualDigest != result.ArtifactDigests[RetainedIntegrationBundleBodyFile] {
+		t.Fatalf("retained body digest = %q, contracts=%#v, artifacts=%#v", actualDigest, result.ContractDigests, result.ArtifactDigests)
+	}
+	if result.RetainedArtifacts["integration_bundle"] != RetainedIntegrationBundleBodyFile {
+		t.Fatalf("retained integration bundle = %q, want %q", result.RetainedArtifacts["integration_bundle"], RetainedIntegrationBundleBodyFile)
 	}
 }
 

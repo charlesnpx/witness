@@ -269,6 +269,23 @@ func ReadRunRecordsBytes(data []byte) ([]RunRecord, error) {
 	}
 }
 
+// ManifestRunRecordMetadata produces the local-safe evidence projection used
+// by assembly consumers. ReadRunRecordsBytes must validate the record first;
+// this helper retains only provenance metadata and a digest of the full local
+// record, never raw launch output or provider payloads.
+func ManifestRunRecordMetadata(record RunRecord) (map[string]any, error) {
+	data, err := contracts.CanonicalBytes(record)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := strictjson.DecodeBytes[map[string]any](data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, err
+	}
+	metadata["run_record_digest"] = digest.RawBytes(data)
+	return planning.SanitizeRelayRunRecordMetadata(metadata), nil
+}
+
 func requireValidRunRecord(record RunRecord, source ...map[string]any) error {
 	var rawRecord map[string]any
 	if len(source) > 0 {

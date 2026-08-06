@@ -61,7 +61,26 @@ func assembleResultPath(config Config) string {
 }
 
 func retainedIntegrationBundlePath(config Config) string {
-	return filepath.Join(config.StateDir, "integration-bundle.json")
+	if retainedIntegrationBundleBodyExists(config) {
+		return retainedIntegrationBundleBodyPath(config)
+	}
+	// Pass states created before retained authored bodies were added retain only
+	// the authenticated envelope. Keep them resumable while new passes always
+	// bind relay to the directly consumable body above.
+	return retainedIntegrationBundleEnvelopePath(config)
+}
+
+func retainedIntegrationBundleBodyPath(config Config) string {
+	return filepath.Join(config.StateDir, preflight.RetainedIntegrationBundleBodyFile)
+}
+
+func retainedIntegrationBundleBodyExists(config Config) bool {
+	info, err := os.Stat(retainedIntegrationBundleBodyPath(config))
+	return err == nil && !info.IsDir()
+}
+
+func retainedIntegrationBundleEnvelopePath(config Config) string {
+	return filepath.Join(config.StateDir, preflight.RetainedIntegrationBundleEnvelopeFile)
 }
 
 // source_manifest and workspace_manifest are intentionally shared with
@@ -258,7 +277,8 @@ func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInp
 		return append(specs,
 			artifactInput{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
 			artifactInput{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
-			artifactInput{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config), digestClass: digest.ClassRawBytes},
+			artifactInput{role: "integration-bundle-retained", path: retainedIntegrationBundleEnvelopePath(config), digestClass: digest.ClassRawBytes},
+			artifactInput{role: "integration-bundle-body", path: retainedIntegrationBundleBodyPath(config), digestClass: digest.ClassRawBytes},
 		)
 	}
 	for _, relativePath := range sortedStringMapKeys(result.ArtifactDigests) {
@@ -282,6 +302,8 @@ func preflightRetainedArtifactRole(relativePath string) string {
 		return "relay-capabilities"
 	case "integration-bundle.json":
 		return "integration-bundle-retained"
+	case preflight.RetainedIntegrationBundleBodyFile:
+		return "integration-bundle-body"
 	case "backend-status.json":
 		return "backend-status"
 	case "recipes-list.json":
