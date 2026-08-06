@@ -32,8 +32,11 @@ import (
 )
 
 const (
-	verificationPlanMissingPreflight = "verification_plan_missing_preflight"
-	verificationPlanInvalidPreflight = "verification_plan_invalid_preflight"
+	verificationPlanMissingPreflight                = "verification_plan_missing_preflight"
+	verificationPlanInvalidPreflight                = "verification_plan_invalid_preflight"
+	verificationAssembleInvalidRunRecordConsumption = "verification_assemble_invalid_run_record_consumption"
+	verificationAssembleMultipleConsumingRunRecords = "verification_assemble_multiple_consuming_run_records"
+	verificationAssembleConflictingRelayProvenance  = "verification_assemble_conflicting_relay_provenance"
 
 	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
 	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
@@ -488,12 +491,14 @@ func runVerificationAssemble(args []string) error {
 	var batchPaths repeatedStrings
 	var verdictPaths repeatedStrings
 	var portableExports repeatedStrings
+	var runRecordPaths repeatedStrings
 	var receiptPaths repeatedStrings
 	var selectedContractPaths repeatedStrings
 	var artifactPaths repeatedStrings
 	flags.Var(&batchPaths, "batch", "verification-batch JSON path; may be repeated")
 	flags.Var(&verdictPaths, "relay-verdict", "relay verdict JSON path or batch-id=path; may be repeated")
 	flags.Var(&portableExports, "portable-export", "batch-id=portable export directory; may be repeated")
+	flags.Var(&runRecordPaths, "run-record", "retained relay run record or runs index JSON path; may be repeated")
 	flags.Var(&receiptPaths, "receipt", "execution receipt JSON path; may be repeated")
 	flags.Var(&selectedContractPaths, "selected-contract", "selected relay contract artifact path; may be repeated")
 	flags.Var(&artifactPaths, "artifact", "artifact input path for relay verification runs; may be repeated")
@@ -526,13 +531,14 @@ func runVerificationAssemble(args []string) error {
 	}
 	protected = append(protected, protectedInputsForPaths("batch", batchPaths)...)
 	protected = append(protected, protectedInputsForSpecs("relay-verdict", verdictPaths)...)
+	protected = append(protected, protectedInputsForPaths("run-record", runRecordPaths)...)
 	protected = append(protected, protectedInputsForPaths("receipt", receiptPaths)...)
 	protected = append(protected, protectedInputsForPaths("selected-contract", selectedContractPaths)...)
 	protected = append(protected, protectedInputsForPaths("artifact", artifactPaths)...)
 	if err := rejectOutputPathAliases(*out, protected...); err != nil {
 		return err
 	}
-	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0) {
+	if *runRelay && (len(verdictPaths) > 0 || len(portableExports) > 0 || len(runRecordPaths) > 0) {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble -run-relay cannot be combined with pre-produced relay evidence flags.")
 	}
 	plan, err := readPlanFile(*planPath)
@@ -548,6 +554,14 @@ func runVerificationAssemble(args []string) error {
 		return err
 	}
 	relayEvidence, err := readRelayEvidence(verdictPaths, portableExports)
+	if err != nil {
+		return err
+	}
+	runRecordEvidence, err := readRunRecordEvidence(runRecordPaths)
+	if err != nil {
+		return err
+	}
+	relayEvidence, err = mergeRelayEvidence(relayEvidence, runRecordEvidence)
 	if err != nil {
 		return err
 	}
@@ -573,7 +587,10 @@ func runVerificationAssemble(args []string) error {
 		if err != nil {
 			return err
 		}
-		relayEvidence = relayEvidenceFromRunResult(runResult)
+		relayEvidence, err = relayEvidenceFromRunResult(runResult)
+		if err != nil {
+			return err
+		}
 		batches = batchEvidenceFromRunInputs(runBatches)
 	}
 	receipts, err := readReceipts(receiptPaths)
@@ -1730,17 +1747,22 @@ func batchEvidenceFromRunInputs(inputs []relayrun.BatchInput) []planning.BatchEv
 	return batches
 }
 
-func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidence {
+func relayEvidenceFromRunResult(result *relayrun.Result) ([]planning.RelayEvidence, error) {
 	if result == nil {
-		return nil
+		return nil, nil
 	}
 	evidence := make([]planning.RelayEvidence, 0, len(result.Runs))
 	for _, run := range result.Runs {
+		runRecord, err := relayRunRecordMetadata(run)
+		if err != nil {
+			return nil, err
+		}
 		record := planning.RelayEvidence{
 			BatchID:           run.BatchID,
 			RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
 			Backend:           relayBackendFromRecipeID(run.RecipeID),
 			PortableExportDir: run.PortableExportDir,
+			RunRecords:        []map[string]any{runRecord},
 		}
 		if run.PortableExportDigest != "" {
 			record.PortableExportRef = &contracts.ArtifactRef{
@@ -1753,7 +1775,7 @@ func relayEvidenceFromRunResult(result *relayrun.Result) []planning.RelayEvidenc
 		}
 		evidence = append(evidence, record)
 	}
-	return evidence
+	return evidence, nil
 }
 
 func relayRecipeFamilyFromRecipeID(recipeID string) string {
@@ -1812,6 +1834,223 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 		result = append(result, byBatch[batchID])
 	}
 	return result, nil
+}
+
+func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
+	evidence := make([]planning.RelayEvidence, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fileReadError(err, path, "open retained relay run record")
+		}
+		runs, err := relayrun.ReadRunRecordsBytes(data)
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runs {
+			runRecord, err := relayRunRecordMetadata(run)
+			if err != nil {
+				return nil, err
+			}
+			record := planning.RelayEvidence{
+				BatchID:           run.BatchID,
+				RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
+				Backend:           relayBackendFromRecipeID(run.RecipeID),
+				PortableExportDir: run.PortableExportDir,
+				Verdicts:          run.RelayVerdicts,
+				RunRecords:        []map[string]any{runRecord},
+			}
+			if run.PortableExportDigest != "" {
+				record.PortableExportRef = &contracts.ArtifactRef{
+					Kind:          "relay-root-portable-export",
+					ID:            run.BatchID,
+					Digest:        run.PortableExportDigest,
+					DigestProfile: digest.Profile,
+					MediaType:     "application/json",
+				}
+			}
+			evidence = append(evidence, record)
+		}
+	}
+	return evidence, nil
+}
+
+func relayRunRecordMetadata(record relayrun.RunRecord) (map[string]any, error) {
+	data, err := contracts.CanonicalBytes(record)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := strictjson.DecodeBytes[map[string]any](data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, err
+	}
+	metadata["run_record_digest"] = digest.RawBytes(data)
+	return planning.SanitizeRelayRunRecordMetadata(metadata), nil
+}
+
+func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEvidence, error) {
+	byBatch := map[string]planning.RelayEvidence{}
+	for _, source := range sources {
+		for _, incoming := range source {
+			current, exists := byBatch[incoming.BatchID]
+			if exists {
+				if err := requireMatchingRelayEvidenceProvenance(incoming.BatchID, current, incoming); err != nil {
+					return nil, err
+				}
+			}
+			current.BatchID = incoming.BatchID
+			if incoming.RecipeFamily != "" {
+				current.RecipeFamily = incoming.RecipeFamily
+			}
+			if incoming.Backend != "" {
+				current.Backend = incoming.Backend
+			}
+			if incoming.PortableExportDir != "" {
+				current.PortableExportDir = incoming.PortableExportDir
+			}
+			if incoming.PortableExportRef != nil {
+				current.PortableExportRef = incoming.PortableExportRef
+			}
+			if incoming.Verdicts != nil {
+				current.Verdicts = incoming.Verdicts
+			}
+			runRecords, err := mergeRelayRunRecords(incoming.BatchID, current.RunRecords, incoming.RunRecords)
+			if err != nil {
+				return nil, err
+			}
+			current.RunRecords = runRecords
+			byBatch[incoming.BatchID] = current
+		}
+	}
+	result := make([]planning.RelayEvidence, 0, len(byBatch))
+	for _, batchID := range sortedRelayEvidenceBatchIDs(byBatch) {
+		result = append(result, byBatch[batchID])
+	}
+	return result, nil
+}
+
+func requireMatchingRelayEvidenceProvenance(batchID string, current, incoming planning.RelayEvidence) error {
+	for _, field := range []struct {
+		name     string
+		current  string
+		incoming string
+	}{
+		{name: "recipe_family", current: current.RecipeFamily, incoming: incoming.RecipeFamily},
+		{name: "backend", current: current.Backend, incoming: incoming.Backend},
+		{name: "portable_export_dir", current: current.PortableExportDir, incoming: incoming.PortableExportDir},
+		{name: "portable_export_digest", current: relayPortableExportDigest(current.PortableExportRef), incoming: relayPortableExportDigest(incoming.PortableExportRef)},
+	} {
+		if conflictingRelayProvenanceValue(field.current, field.incoming) {
+			return conflictingRelayProvenance(batchID, field.name)
+		}
+	}
+	if current.Verdicts == nil || incoming.Verdicts == nil {
+		return nil
+	}
+	currentIdentity, err := contracts.RelayWitnessVerdictsDigest(*current.Verdicts)
+	if err != nil {
+		return diag.Wrap(err, verificationAssembleConflictingRelayProvenance, "could not determine existing relay verdict identity for provenance validation.", diag.WithDetail("batch_id", batchID), diag.WithDetail("field", "relay_verdict_identity"))
+	}
+	incomingIdentity, err := contracts.RelayWitnessVerdictsDigest(*incoming.Verdicts)
+	if err != nil {
+		return diag.Wrap(err, verificationAssembleConflictingRelayProvenance, "could not determine incoming relay verdict identity for provenance validation.", diag.WithDetail("batch_id", batchID), diag.WithDetail("field", "relay_verdict_identity"))
+	}
+	if currentIdentity != incomingIdentity {
+		return conflictingRelayProvenance(batchID, "relay_verdict_identity")
+	}
+	return nil
+}
+
+func relayPortableExportDigest(ref *contracts.ArtifactRef) string {
+	if ref == nil {
+		return ""
+	}
+	return strings.TrimSpace(ref.Digest)
+}
+
+func conflictingRelayProvenanceValue(current, incoming string) bool {
+	current = strings.TrimSpace(current)
+	incoming = strings.TrimSpace(incoming)
+	return current != "" && incoming != "" && current != incoming
+}
+
+func conflictingRelayProvenance(batchID, field string) error {
+	return diag.New(
+		verificationAssembleConflictingRelayProvenance,
+		fmt.Sprintf("relay evidence for batch %q has conflicting %s provenance; refusing to merge sources.", batchID, field),
+		diag.WithDetail("batch_id", batchID),
+		diag.WithDetail("field", field),
+	)
+}
+
+func mergeRelayRunRecords(batchID string, sources ...[]map[string]any) ([]map[string]any, error) {
+	records := make([]map[string]any, 0)
+	seenDigests := map[string]bool{}
+	for _, source := range sources {
+		for _, record := range source {
+			if recordDigest := relayRunRecordDigest(record); recordDigest != "" {
+				if seenDigests[recordDigest] {
+					continue
+				}
+				seenDigests[recordDigest] = true
+			}
+			records = append(records, record)
+		}
+	}
+	consumingRecordIndexes := make([]int, 0, 1)
+	for index, record := range records {
+		value, present := record["consumes_batch"]
+		consumesBatch, ok := value.(bool)
+		if !present || !ok {
+			return nil, diag.New(
+				verificationAssembleInvalidRunRecordConsumption,
+				"relay run record consumption must be a boolean before evidence can be merged.",
+				diag.WithDetail("batch_id", batchID),
+				diag.WithDetail("record_index", index),
+			)
+		}
+		if consumesBatch {
+			consumingRecordIndexes = append(consumingRecordIndexes, index)
+			continue
+		}
+		if !isStartFailureRunRecord(record) {
+			return nil, diag.New(
+				verificationAssembleInvalidRunRecordConsumption,
+				"non-consuming relay run records must be launch_failed records with relay_launch.start_failed=true.",
+				diag.WithDetail("batch_id", batchID),
+				diag.WithDetail("record_index", index),
+			)
+		}
+	}
+	if len(consumingRecordIndexes) > 1 {
+		return nil, diag.New(
+			verificationAssembleMultipleConsumingRunRecords,
+			"relay run records contain multiple consuming attempts for one batch; refusing reviewer-shopping evidence.",
+			diag.WithDetail("batch_id", batchID),
+			diag.WithDetail("consuming_record_indexes", consumingRecordIndexes),
+		)
+	}
+	return records, nil
+}
+
+func relayRunRecordDigest(record map[string]any) string {
+	value, ok := record["run_record_digest"].(string)
+	if !ok {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	if !digest.WellFormed(value) {
+		return ""
+	}
+	return value
+}
+
+func isStartFailureRunRecord(record map[string]any) bool {
+	status, _ := record["status"].(string)
+	providerInvoked, _ := record["provider_invoked"].(string)
+	launch, _ := record["relay_launch"].(map[string]any)
+	startFailed, _ := launch["start_failed"].(bool)
+	return status == relayrun.RunStatusLaunchFailed && providerInvoked == relayrun.ProviderInvokedFalse && startFailed
 }
 
 func readReceipts(paths []string) ([]contracts.ExecutionReceipt, error) {
