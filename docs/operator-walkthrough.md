@@ -148,9 +148,17 @@ document still carries role-output init placeholder identities; replace them bef
 ```
 
 Replace the placeholder `charter_hash`, `artifact_digest`, and both identities
-in each file. For a zero-findings run, the complete defect document has this
-shape; use the `charter_hash` and `snapshot_digest` reported by the pass rather
-than values from another run:
+in each file. In a real pass, these documents are produced by finder agents the
+operator runs outside Witness (using any agent harness), one per role, each
+examining the frozen source snapshot against the Charter goals. The manual
+editing below is solely a stand-in used to demonstrate the required document
+shape and the zero-findings flow. A hand-authored zero-findings document is the
+vacuous case: Witness will record and adjudicate it, but its verdict carries no
+evidentiary weight about the source; see [Zero findings does not prove absence
+of defects](#zero-findings-does-not-prove-absence-of-defects). For a
+zero-findings run, the complete defect document has this shape; use the
+`charter_hash` and `snapshot_digest` reported by the pass rather than values
+from another run:
 
 ```json
 {
@@ -271,6 +279,9 @@ A zero-findings result is only as meaningful as the Charter goals and finder
 effort behind it. Witness records that the submitted finder documents ran
 against the frozen source snapshot and bound their claims to the frozen Charter;
 it does not prove that the repository has no defects.
+The identities in a role-output document assert the frozen source and who
+produced the findings; inventing either defeats the provenance record Witness
+keeps.
 
 An empty Charter is rejected by the pass-driven path with
 `charter_zero_goals`, because a zero-goal review is vacuous by construction.
