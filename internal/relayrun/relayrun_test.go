@@ -579,6 +579,65 @@ func TestRunBatchesRejectsExtraUnplannedArtifactInputBeforeLaunch(t *testing.T) 
 	}
 }
 
+func TestRunBatchesRecordsEveryArtifactBinding(t *testing.T) {
+	dir := t.TempDir()
+	batchPath := filepath.Join(dir, "batch.json")
+	batchBytes := []byte(`{"batch":"input"}`)
+	if err := os.WriteFile(batchPath, batchBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(dir, "artifact.json")
+	artifactBytes := []byte("artifact")
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	extraArtifactPath := filepath.Join(dir, "extra-artifact.json")
+	extraArtifactBytes := []byte("extra artifact")
+	if err := os.WriteFile(extraArtifactPath, extraArtifactBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest := digest.RawBytes(artifactBytes)
+	extraArtifactDigest := digest.RawBytes(extraArtifactBytes)
+	runner := &fakeRelayRunner{t: t, batchPath: batchPath, result: relayclient.CommandResult{
+		ExitCode: 1,
+		Err:      errors.New("exit status 1"),
+	}}
+	result, err := RunBatches(context.Background(), []BatchInput{{
+		Plan: planning.BatchPlan{
+			BatchID:           "defect-batch-1",
+			TaskShape:         contracts.BatchTaskDefect,
+			BatchDigest:       digest.RawBytes(batchBytes),
+			ArtifactDigest:    artifactDigest,
+			ArtifactDigestSet: []string{artifactDigest, extraArtifactDigest},
+		},
+		Document: contracts.VerificationBatchDocument{ArtifactDigest: artifactDigest},
+		Path:     batchPath,
+		RawBytes: batchBytes,
+	}}, Options{
+		RelayPath:             "fake-relay",
+		IntegrationBundlePath: "bundle.json",
+		CharterPath:           "charter.json",
+		ArtifactPaths:         []string{artifactPath, extraArtifactPath},
+		ArtifactDigests:       []string{artifactDigest, extraArtifactDigest},
+		Backend:               "codex",
+		Runner:                runner,
+	})
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if runner.runCalls != 1 || len(result.Runs) != 1 {
+		t.Fatalf("run calls = %d, runs = %#v", runner.runCalls, result.Runs)
+	}
+	want := []string{
+		"findings=" + batchPath + "@" + digest.RawBytes(batchBytes),
+		"artifact=" + artifactPath + "@" + artifactDigest,
+		"artifact=" + extraArtifactPath + "@" + extraArtifactDigest,
+	}
+	if got := result.Runs[0].InputBindings; strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("input bindings = %#v, want %#v", got, want)
+	}
+}
+
 func runLaunchFailure(t *testing.T, dir string, commandResult relayclient.CommandResult) (RunRecord, *fakeRelayRunner) {
 	t.Helper()
 	batchPath := filepath.Join(dir, "batch.json")

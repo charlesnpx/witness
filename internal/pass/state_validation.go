@@ -134,14 +134,18 @@ func validateMandatoryStageArtifacts(state *State) []diag.Diagnostic {
 		if stage.Status != statusComplete {
 			continue
 		}
-		inputs, outputs := mandatoryArtifactsForStage(state, stage)
+		inputs, outputs, err := mandatoryArtifactsForStage(state, stage)
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(err))
+			continue
+		}
 		diagnostics = append(diagnostics, requireArtifactRecords(stage, "inputs", stage.Inputs, inputs)...)
 		diagnostics = append(diagnostics, requireArtifactRecords(stage, "outputs", stage.Outputs, outputs)...)
 	}
 	return diagnostics
 }
 
-func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInput, []artifactInput) {
+func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInput, []artifactInput, error) {
 	config := state.Config
 	switch stage.Name {
 	case stageFreeze:
@@ -152,13 +156,13 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		return inputs, []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
 			{role: "source-snapshot-manifest", path: config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
-		}
+		}, nil
 	case stagePreflight:
 		var result *preflight.Result
 		if decoded, err := readPreflightResult(config.Outputs.PreflightPath); err == nil {
 			result = &decoded
 		}
-		return preflightInputSpecs(config), preflightOutputSpecs(config, result)
+		return preflightInputSpecs(config), preflightOutputSpecs(config, result), nil
 	case stagePlan:
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
@@ -179,7 +183,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 				outputs = append(outputs, artifactInput{role: "change-surface", path: filepath.Join(config.StateDir, "verification", "change-surface.json"), digestClass: digestClassRaw()})
 			}
 		}
-		return inputs, outputs
+		return inputs, outputs, nil
 	case stageAssemble:
 		relayBatches := state.RelayBatches
 		if derived, err := relayBatchRecordsFromValidatedPlan(state); err == nil {
@@ -189,12 +193,26 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "verification-plan", path: config.Outputs.PlanPath, digestClass: digestClassRaw()},
 			{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digestClassRaw()},
 			{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digestClassRaw()},
-			{role: "integration-bundle-retained", path: retainedIntegrationBundlePath(config), digestClass: digestClassRaw()},
+			{role: "integration-bundle-retained", path: retainedIntegrationBundleEnvelopePath(config), digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
 			{role: "head-manifest", path: effectiveHeadManifestPathUnchecked(config), digestClass: digestClassFreezeManifest},
 		}
+		if retainedIntegrationBundleBodyExists(config) {
+			inputs = append(inputs, artifactInput{role: "integration-bundle-body", path: retainedIntegrationBundleBodyPath(config), digestClass: digestClassRaw()})
+		}
+		recordedRuns, err := readRecordedRelayRuns(state, relayBatches)
+		if err != nil {
+			return nil, nil, err
+		}
 		for _, batch := range relayBatches {
 			inputs = append(inputs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digestClassRaw()})
+			if recorded, found := recordedRuns[batch.BatchID]; found {
+				inputs = append(inputs, artifactInput{role: "relay-run-record:" + batch.BatchID, path: recorded.Path, digestClass: digestClassRaw()})
+				if portableExportReady(recorded.Record.PortableExportDir) {
+					inputs = append(inputs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(recorded.Record.PortableExportDir, "manifest.json"), digestClass: digestClassRaw()})
+				}
+				continue
+			}
 			if portableExportReady(batch.PortableExportDir) {
 				inputs = append(inputs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(batch.PortableExportDir, "manifest.json"), digestClass: digestClassRaw()})
 			}
@@ -211,7 +229,7 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		if expected, err := expectedAssembleResult(state); err == nil && hasSupplementaryAssembleContent(expected) {
 			outputs = append(outputs, artifactInput{role: "assemble-result", path: assembleResultPath(config), digestClass: digestClassRaw()})
 		}
-		return inputs, outputs
+		return inputs, outputs, nil
 	case stageAdjudicate:
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
@@ -226,15 +244,15 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		for _, item := range config.RoleOutputs {
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
 		}
-		return inputs, []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}
+		return inputs, []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}, nil
 	case stageMetrics:
 		return []artifactInput{
 			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
 			{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()},
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
-		}, []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}
+		}, []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}, nil
 	default:
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 
@@ -671,7 +689,7 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 	if err != nil {
 		return result, err
 	}
-	retainedBundle, retainedBundleDigest, err := readRetainedPreflightArtifact(config, "integration-bundle.json")
+	retainedBundle, retainedBundleDigest, err := readRetainedPreflightArtifact(config, preflight.RetainedIntegrationBundleEnvelopeFile)
 	if err != nil {
 		return result, err
 	}
@@ -681,7 +699,20 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 	if retainedBundleDigest != bundleDigest {
 		return result, diag.New(CodeStateInvalid, "preflight retained integration bundle digest does not match the configured bundle.", diag.WithDetail("actual_digest", retainedBundleDigest), diag.WithDetail("expected_digest", bundleDigest))
 	}
-	result.ArtifactDigests["integration-bundle.json"] = retainedBundleDigest
+	result.ArtifactDigests[preflight.RetainedIntegrationBundleEnvelopeFile] = retainedBundleDigest
+	retainedBundleBody, retainedBundleBodyDigest, hasRetainedBundleBody, err := readRetainedIntegrationBundleBody(config)
+	if err != nil {
+		return result, err
+	}
+	if hasRetainedBundleBody {
+		if err := requireSemanticMatch("preflight retained integration bundle body", retainedBundleBody, configuredBundle); err != nil {
+			return result, err
+		}
+		if retainedBundleBodyDigest != bundleDigest {
+			return result, diag.New(CodeStateInvalid, "preflight retained integration bundle body digest does not match the configured bundle.", diag.WithDetail("actual_digest", retainedBundleBodyDigest), diag.WithDetail("expected_digest", bundleDigest))
+		}
+		result.ArtifactDigests[preflight.RetainedIntegrationBundleBodyFile] = retainedBundleBodyDigest
+	}
 	result.ContractDigests["integration_bundle"] = bundleDigest
 	selectedDigests, err := selectedContractDigestsFromBundle(configuredBundle)
 	if err != nil {
@@ -811,7 +842,7 @@ func requiredWitnessContractID(contractID string) bool {
 
 func isPreflightRetainedOutputRole(role string) bool {
 	switch role {
-	case "compatibility-manifest", "relay-capabilities", "integration-bundle-retained", "backend-status", "recipes-list", "contract-digests":
+	case "compatibility-manifest", "relay-capabilities", "integration-bundle-retained", "integration-bundle-body", "backend-status", "recipes-list", "contract-digests":
 		return true
 	default:
 		return strings.HasPrefix(role, "compile-report:") ||
@@ -907,6 +938,29 @@ func readRetainedPreflightArtifact(config Config, relativePath string) (any, str
 		return nil, "", err
 	}
 	return payload, payloadDigest, nil
+}
+
+func readRetainedIntegrationBundleBody(config Config) (any, string, bool, error) {
+	path, err := preflightRetainedArtifactPath(config.StateDir, preflight.RetainedIntegrationBundleBodyFile)
+	if err != nil {
+		return nil, "", false, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, "", false, nil
+	}
+	if err != nil {
+		return nil, "", false, err
+	}
+	payload, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
+	if err != nil {
+		return nil, "", false, err
+	}
+	payloadDigest, err := digest.SemanticJSON(payload)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return payload, payloadDigest, true, nil
 }
 
 func readRetainedPayloadFile(path string) (any, string, error) {
@@ -1517,6 +1571,10 @@ func expectedAssembleResult(state *State) (*planning.AssembleResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	relayEvidence, _, err := relayEvidenceForAssembly(state, relayRecords)
+	if err != nil {
+		return nil, err
+	}
 	receipts, err := readReceipts(config.ReceiptPaths)
 	if err != nil {
 		return nil, err
@@ -1528,7 +1586,7 @@ func expectedAssembleResult(state *State) (*planning.AssembleResult, error) {
 	result, err := planning.Assemble(planning.AssembleOptions{
 		Plan:               plan,
 		Batches:            batches,
-		RelayResults:       relayEvidenceFromReadyBatches(state, relayRecords),
+		RelayResults:       relayEvidence,
 		Receipts:           receipts,
 		EvidenceRefs:       refs,
 		BaseManifest:       changeSurface.BaseManifest,

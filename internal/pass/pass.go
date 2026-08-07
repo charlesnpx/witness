@@ -395,7 +395,11 @@ func advance(ctx context.Context, state *State) (*Invocation, error) {
 		}
 		return saveAndReport(state, stagePlan)
 	}
-	if batch := nextRelayBatchAction(state); batch != nil {
+	batch, err := nextRelayBatchAction(state)
+	if err != nil {
+		return nil, err
+	}
+	if batch != nil {
 		setRelayBatchAction(state, batch)
 		return saveAndReport(state, "")
 	}
@@ -699,7 +703,10 @@ func runAssemble(state *State) error {
 	if err != nil {
 		return err
 	}
-	relayEvidence := relayEvidenceFromReadyBatches(state, relayRecords)
+	relayEvidence, recordedRuns, err := relayEvidenceForAssembly(state, relayRecords)
+	if err != nil {
+		return err
+	}
 	receipts, err := readReceipts(config.ReceiptPaths)
 	if err != nil {
 		return err
@@ -731,12 +738,22 @@ func runAssemble(state *State) error {
 		{role: "verification-plan", path: config.Outputs.PlanPath, digestClass: digest.ClassRawBytes},
 		{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
 		{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
-		{role: "integration-bundle-retained", path: filepath.Join(config.StateDir, "integration-bundle.json"), digestClass: digest.ClassRawBytes},
+		{role: "integration-bundle-retained", path: retainedIntegrationBundleEnvelopePath(config), digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
 		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
+	if retainedIntegrationBundleBodyExists(config) {
+		inputSpecs = append(inputSpecs, artifactInput{role: "integration-bundle-body", path: retainedIntegrationBundleBodyPath(config), digestClass: digest.ClassRawBytes})
+	}
 	for _, batch := range relayRecords {
 		inputSpecs = append(inputSpecs, artifactInput{role: "verification-batch:" + batch.BatchID, path: batch.BatchPath, digestClass: digest.ClassRawBytes})
+		if recorded, found := recordedRuns[batch.BatchID]; found {
+			inputSpecs = append(inputSpecs, artifactInput{role: "relay-run-record:" + batch.BatchID, path: recorded.Path, digestClass: digest.ClassRawBytes})
+			if portableExportReady(recorded.Record.PortableExportDir) {
+				inputSpecs = append(inputSpecs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(recorded.Record.PortableExportDir, "manifest.json"), digestClass: digest.ClassRawBytes})
+			}
+			continue
+		}
 		if portableExportReady(batch.PortableExportDir) {
 			inputSpecs = append(inputSpecs, artifactInput{role: "portable-export:" + batch.BatchID, path: filepath.Join(batch.PortableExportDir, "manifest.json"), digestClass: digest.ClassRawBytes})
 		}
@@ -1084,7 +1101,11 @@ func setNextAction(state *State) error {
 		if missing := missingRoleOutputs(state); len(missing) > 0 && stageComplete(state, stagePreflight) {
 			return setRoleOutputAction(state, missing)
 		}
-		if batch := nextRelayBatchAction(state); batch != nil && stageComplete(state, stagePlan) {
+		batch, err := nextRelayBatchAction(state)
+		if err != nil {
+			return err
+		}
+		if batch != nil && stageComplete(state, stagePlan) {
 			setRelayBatchAction(state, batch)
 			return nil
 		}
@@ -1225,59 +1246,85 @@ func missingRoleOutputs(state *State) []RoleOutputSpec {
 	return missing
 }
 
-func nextRelayBatchAction(state *State) *RelayBatchAction {
+func nextRelayBatchAction(state *State) (*RelayBatchAction, error) {
 	if !stageComplete(state, stagePlan) || stageComplete(state, stageAssemble) {
-		return nil
+		return nil, nil
 	}
 	preflightResult, err := readPreflightResult(state.Config.Outputs.PreflightPath)
-	if err == nil && preflight.RelayAbsent(preflightResult) {
+	if err != nil {
+		return nil, err
+	}
+	if preflight.RelayAbsent(preflightResult) {
 		if records, deriveErr := relayBatchRecordsFromValidatedPlan(state); deriveErr == nil {
 			state.RelayBatches = records
 		} else {
 			markRelayBatchesNotRequired(state)
 		}
-		return nil
+		return nil, nil
 	}
 	records, err := relayBatchRecordsFromValidatedPlan(state)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	state.RelayBatches = records
+	recordedRuns, err := readRecordedRelayRuns(state, state.RelayBatches)
+	if err != nil {
+		return nil, err
+	}
 	for index := range state.RelayBatches {
 		batch := &state.RelayBatches[index]
 		if batch.Status == statusNotRequired {
 			continue
+		}
+		if run, found := recordedRuns[batch.BatchID]; found {
+			if run.Record.ConsumesBatch {
+				batch.Status = statusComplete
+				continue
+			}
+			if portableExportReady(batch.PortableExportDir) {
+				batch.Status = statusComplete
+				continue
+			}
+			batch.Status = statusPending
+			return relayBatchAction(state, batch, preflightResult)
 		}
 		if portableExportReady(batch.PortableExportDir) {
 			batch.Status = statusComplete
 			continue
 		}
 		batch.Status = statusPending
-		charterDigest := stageOutputDigest(state, "charter-freeze")
-		snapshotDigest := stageOutputDigest(state, "source-snapshot-manifest")
-		integrationBundlePath := retainedIntegrationBundlePath(state.Config)
-		integrationBundleDigest := preflightResult.ContractDigests["integration_bundle"]
-		return &RelayBatchAction{
-			BatchID:                 batch.BatchID,
-			RecipeID:                batch.RecipeID,
-			RecipeFamily:            batch.RecipeFamily,
-			Backend:                 state.Config.Backend,
-			BatchPath:               batch.BatchPath,
-			BatchDigest:             batch.BatchDigest,
-			PortableExportDir:       batch.PortableExportDir,
-			IntegrationBundlePath:   integrationBundlePath,
-			IntegrationBundleDigest: integrationBundleDigest,
-			CharterDigest:           charterDigest,
-			SnapshotDigest:          snapshotDigest,
-			InputBindings: []string{
-				boundInput("charter", state.Config.Outputs.CharterFreezePath, charterDigest),
-				boundInput("findings", batch.BatchPath, batch.BatchDigest),
-				boundInput("artifact", state.Config.SnapshotManifestPath, snapshotDigest),
-				boundInput("integration_bundle", integrationBundlePath, integrationBundleDigest),
-			},
-		}
+		return relayBatchAction(state, batch, preflightResult)
 	}
-	return nil
+	return nil, nil
+}
+
+func relayBatchAction(state *State, batch *RelayBatchRecord, preflightResult preflight.Result) (*RelayBatchAction, error) {
+	charterDigest := stageOutputDigest(state, "charter-freeze")
+	snapshotDigest := stageOutputDigest(state, "source-snapshot-manifest")
+	integrationBundlePath, err := retainedIntegrationBundlePath(state.Config)
+	if err != nil {
+		return nil, err
+	}
+	integrationBundleDigest := preflightResult.ContractDigests["integration_bundle"]
+	return &RelayBatchAction{
+		BatchID:                 batch.BatchID,
+		RecipeID:                batch.RecipeID,
+		RecipeFamily:            batch.RecipeFamily,
+		Backend:                 state.Config.Backend,
+		BatchPath:               batch.BatchPath,
+		BatchDigest:             batch.BatchDigest,
+		PortableExportDir:       batch.PortableExportDir,
+		IntegrationBundlePath:   integrationBundlePath,
+		IntegrationBundleDigest: integrationBundleDigest,
+		CharterDigest:           charterDigest,
+		SnapshotDigest:          snapshotDigest,
+		InputBindings: []string{
+			boundInput("charter", state.Config.Outputs.CharterFreezePath, charterDigest),
+			boundInput("findings", batch.BatchPath, batch.BatchDigest),
+			boundInput("artifact", state.Config.SnapshotManifestPath, snapshotDigest),
+			boundInput("integration_bundle", integrationBundlePath, integrationBundleDigest),
+		},
+	}, nil
 }
 
 func markRelayBatchesNotRequired(state *State) {
@@ -1682,8 +1729,10 @@ func manifestEvidenceRefs(config Config, consumerIdentity map[string]any) (plann
 	refs := planning.ManifestEvidenceRefs{ConsumerIdentity: cloneMap(consumerIdentity)}
 	compatibilityPath := filepath.Join(config.StateDir, "compatibility-manifest.json")
 	capabilitiesPath := filepath.Join(config.StateDir, "relay-capabilities.json")
-	integrationBundlePath := filepath.Join(config.StateDir, "integration-bundle.json")
-	var err error
+	integrationBundlePath, err := retainedIntegrationBundlePath(config)
+	if err != nil {
+		return refs, err
+	}
 	refs.CompatibilityManifest, err = artifactRefForFile("compatibility-manifest", compatibilityPath)
 	if err != nil {
 		return refs, err
