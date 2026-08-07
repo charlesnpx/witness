@@ -408,25 +408,30 @@ This runs the `plan` stage and writes `verification-plan.json`.
 If planning returns `next_action.type: "caller_relay_batch"`, the pass has
 planned a verification batch for a relay run to execute. The pass never
 launches relay itself. Set `BATCH_PATH` to
-`next_action.relay_batch.batch_path` and `BACKEND` to
-`next_action.relay_batch.backend`, then launch the retained batch:
+`next_action.relay_batch.batch_path`, then launch the retained batch:
 
 ```sh
 BATCH_PATH="<next_action.relay_batch.batch_path>"
-BACKEND="<next_action.relay_batch.backend>"
 
 witness verification assemble \
   -run-relay \
   -state-dir "$STATE" \
   -relay "$RELAY" \
-  -backend "$BACKEND" \
   -charter-freeze "$STATE/charter.freeze.json" \
   -plan "$STATE/verification-plan.json" \
   -batch "$BATCH_PATH" \
   -artifact "$STATE/source-snapshot/manifest.json" \
   -integration-bundle "$STATE/integration-bundle.body.json" \
-  -out "$STATE/verification/index.json"
+  -out "$WORK/relay-launch/index.json"
 ```
+
+`-out` must point outside the state directory: the state directory is a
+protected input of the assemble invocation, so an output path inside it is
+rejected with `output_path_conflict` (the pass writes its own
+`$STATE/verification/index.json` later, during its assemble stage). Pass
+`-backend` only when `next_action.relay_batch.recipe_id` carries a backend
+suffix; the flag suffixes the recipe id, so adding it when the plan pinned the
+bare recipe makes the run record fail plan validation on resume.
 
 The explicit inputs are the frozen Charter, plan, requested batch, and frozen
 source manifest. A normal batch path is
