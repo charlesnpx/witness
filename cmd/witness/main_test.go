@@ -97,7 +97,7 @@ func TestRoleOutputValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read initialized role output: %v", err)
 	}
-	if initialized.SchemaVersion != contracts.RoleOutputV3 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
+	if initialized.SchemaVersion != contracts.RoleOutputV4 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
 		t.Fatalf("initialized role output = %#v, want an empty valid defect document", initialized)
 	}
 	if err := contracts.RequireValidRoleOutput(initialized, nil); err != nil {
@@ -206,7 +206,7 @@ func TestRoleOutputValidate(t *testing.T) {
 			if result, err = strictjson.DecodeBytes[roleOutputValidationResult]([]byte(output), strictjson.DefaultMaxBytes); err != nil {
 				t.Fatalf("decode validation output: %v", err)
 			}
-			if !result.OK || result.SchemaVersion != contracts.RoleOutputV3 || result.RoleOutputDigest != test.wantDigest {
+			if !result.OK || result.SchemaVersion != contracts.RoleOutputV4 || result.RoleOutputDigest != test.wantDigest {
 				t.Fatalf("validation result = %#v, want ok result with schema version and digest", result)
 			}
 		})
@@ -980,8 +980,13 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	if result.SchemaVersion != adjudicate.ResultSchemaVersion || result.ResultDigest == "" {
 		t.Fatalf("adjudication result header = %#v", result)
 	}
-	if len(result.Findings) != 1 || result.Findings[0].Disposition != contracts.DispositionAdmitted {
-		t.Fatalf("adjudication findings = %#v", result.Findings)
+	if len(result.Findings) != 1 ||
+		result.Findings[0].Attribution != contracts.FindingAttributionUnattributed ||
+		result.Findings[0].Disposition != contracts.DispositionAdvisory ||
+		result.Findings[0].ApplicationClass != contracts.ApplicationClassCallerDecision ||
+		len(result.Findings[0].Reasons) != 1 ||
+		result.Findings[0].Reasons[0] != adjudicate.ReasonAttributionUnattributed {
+		t.Fatalf("adjudication findings = %#v, want v3 attribution advisory", result.Findings)
 	}
 }
 
@@ -1023,6 +1028,13 @@ func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
 		if _, ok := event.Finding["estimated_delta"]; !ok {
 			t.Fatalf("finding payload = %#v, missing estimated_delta", event.Finding)
 		}
+		if event.Finding["attribution"] != contracts.FindingAttributionUnattributed {
+			t.Fatalf("finding payload = %#v, want v3 unattributed attribution", event.Finding)
+		}
+		reasons, ok := event.Finding["reasons"].([]string)
+		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonAttributionUnattributed {
+			t.Fatalf("finding payload = %#v, want attribution gate reason", event.Finding)
+		}
 	}
 	events = append(events, ledger.EventToAppend{
 		Kind: ledger.EventKindMeasuredDelta,
@@ -1036,6 +1048,26 @@ func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	if _, err := ledger.AppendEvents(ledgerPath, events); err != nil {
 		t.Fatalf("append ledger events: %v", err)
+	}
+	records, err := ledger.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	for _, record := range records {
+		if record.EventKind != ledger.EventKindFinding {
+			continue
+		}
+		finding, err := strictjson.DecodeBytes[ledger.FindingEvent](record.Event, strictjson.DefaultMaxBytes)
+		if err != nil {
+			t.Fatalf("decode finding ledger record: %v", err)
+		}
+		if finding.Finding["attribution"] != contracts.FindingAttributionUnattributed {
+			t.Fatalf("serialized finding ledger record = %#v, want v3 unattributed attribution", finding)
+		}
+		reasons, ok := finding.Finding["reasons"].([]any)
+		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonAttributionUnattributed {
+			t.Fatalf("serialized finding ledger record = %#v, want attribution gate reason", finding)
+		}
 	}
 	document, err := metrics.Run(metrics.Options{LedgerPath: ledgerPath})
 	if err != nil {
@@ -1603,12 +1635,14 @@ func TestAdjudicateCLILedgerBackedPolicyAppendsLineageAndRefusesDuplicate(t *tes
 		ledger.EventKindAdjudicationRun,
 		ledger.EventKindVerdict,
 		ledger.EventKindQuestion,
-		ledger.EventKindPendingVerification,
 		ledger.EventKindPolicyDecision,
 	} {
 		if kinds[kind] == 0 {
 			t.Fatalf("ledger event kinds = %#v, missing %s", kinds, kind)
 		}
+	}
+	if kinds[ledger.EventKindPendingVerification] != 0 {
+		t.Fatalf("ledger event kinds = %#v, want no pending verification after v3 attribution gate", kinds)
 	}
 
 	err = route([]string{
@@ -1632,6 +1666,8 @@ func TestAdjudicateCLIAcceptsPriorLineage(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
 	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.SchemaVersion = contracts.RoleOutputV4
+	roleOutput.Findings[0].Attribution = contracts.FindingAttributionIntroduced
 	finding := roleOutput.Findings[0]
 	witnessDigest, err := contracts.WitnessDigest(finding.Witness)
 	if err != nil {
@@ -1782,6 +1818,8 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	frozen := validCLIFrozenCharter(t)
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.SchemaVersion = contracts.RoleOutputV4
+	roleOutput.Findings[0].Attribution = contracts.FindingAttributionIntroduced
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
 	manifestOut := filepath.Join(dir, "manifest-run-record.json")

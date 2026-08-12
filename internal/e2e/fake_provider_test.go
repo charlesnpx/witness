@@ -406,7 +406,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 	identity := map[string]any{"kind": "e2e", "id": "fake-provider"}
 	source := map[string]any{"kind": "source-snapshot", "id": "snapshot", "digest": artifactDigest}
 	defect := contracts.RoleOutputDocument{
-		SchemaVersion:    contracts.RoleOutputV3,
+		SchemaVersion:    contracts.RoleOutputV4,
 		Role:             contracts.RoleDefect,
 		CharterHash:      frozen.CharterHash,
 		ArtifactDigest:   artifactDigest,
@@ -418,6 +418,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 			Title:           "CLI executable witness reports accepted input",
 			CharterGoalIDs:  []string{"goal-cli"},
 			ClaimedSeverity: contracts.SeverityCritical,
+			Attribution:     contracts.FindingAttributionIntroduced,
 			ScopeAnchors: []contracts.ScopeAnchor{{
 				Dimension: "entry_points",
 				EntryID:   "cli",
@@ -457,7 +458,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 		}},
 	}
 	economy := contracts.RoleOutputDocument{
-		SchemaVersion:    contracts.RoleOutputV3,
+		SchemaVersion:    contracts.RoleOutputV4,
 		Role:             contracts.RoleEconomy,
 		CharterHash:      frozen.CharterHash,
 		ArtifactDigest:   artifactDigest,
@@ -469,6 +470,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 			Title:           "Remove duplicate accepted marker branch",
 			CharterGoalIDs:  []string{"goal-cli"},
 			ClaimedSeverity: contracts.SeverityHigh,
+			Attribution:     contracts.FindingAttributionIntroduced,
 			Witness: contracts.Witness{
 				Kind:     contracts.WitnessKindEquivalence,
 				Strength: contracts.WitnessStrengthConstructed,

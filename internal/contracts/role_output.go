@@ -23,6 +23,8 @@ type RoleOutputDocument struct {
 	ConsumerIdentity     map[string]any        `json:"consumer_identity"`
 	Findings             []Finding             `json:"findings"`
 	MissingGoalQuestions []MissingGoalQuestion `json:"missing_goal_questions,omitempty"`
+
+	legacyFindingAttribution string
 }
 
 type Finding struct {
@@ -31,6 +33,7 @@ type Finding struct {
 	Title                    string                   `json:"title"`
 	CharterGoalIDs           []string                 `json:"charter_goal_ids"`
 	ClaimedSeverity          string                   `json:"claimed_severity"`
+	Attribution              string                   `json:"attribution,omitempty"`
 	ScopeAnchors             []ScopeAnchor            `json:"scope_anchors,omitempty"`
 	Witness                  Witness                  `json:"witness"`
 	EstimatedDelta           SplitDeltaEstimate       `json:"estimated_delta"`
@@ -169,11 +172,41 @@ type RecurrenceRef struct {
 }
 
 func ReadRoleOutput(reader io.Reader) (RoleOutputDocument, error) {
-	return strictjson.Decode[RoleOutputDocument](reader, strictjson.DefaultMaxBytes)
+	document, err := strictjson.Decode[RoleOutputDocument](reader, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return RoleOutputDocument{}, err
+	}
+	return normalizeRoleOutputAttribution(document), nil
 }
 
 func ReadRoleOutputBytes(data []byte) (RoleOutputDocument, error) {
-	return strictjson.DecodeBytes[RoleOutputDocument](data, strictjson.DefaultMaxBytes)
+	document, err := strictjson.DecodeBytes[RoleOutputDocument](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return RoleOutputDocument{}, err
+	}
+	return normalizeRoleOutputAttribution(document), nil
+}
+
+// normalizeRoleOutputAttribution preserves the v3 wire representation while
+// making its compatibility behavior explicit after decode: v3 never supplied
+// finding attribution, so every v3 finding is treated as unattributed.
+func normalizeRoleOutputAttribution(document RoleOutputDocument) RoleOutputDocument {
+	if document.SchemaVersion == RoleOutputV3 {
+		document.legacyFindingAttribution = FindingAttributionUnattributed
+	}
+	return document
+}
+
+// EffectiveFindingAttribution returns the attribution used for adjudication.
+// v3 output remains readable, but its findings fail closed as unattributed.
+func (document RoleOutputDocument) EffectiveFindingAttribution(finding Finding) string {
+	if document.legacyFindingAttribution != "" {
+		return document.legacyFindingAttribution
+	}
+	if document.SchemaVersion == RoleOutputV3 {
+		return FindingAttributionUnattributed
+	}
+	return finding.Attribution
 }
 
 func RequireValidRoleOutput(document RoleOutputDocument, frozen *charter.FrozenCharter) error {
@@ -182,12 +215,12 @@ func RequireValidRoleOutput(document RoleOutputDocument, frozen *charter.FrozenC
 
 func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenCharter) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != RoleOutputV3 {
+	if document.SchemaVersion != RoleOutputV3 && document.SchemaVersion != RoleOutputV4 {
 		diagnostics = append(diagnostics, diagnostic(
 			CodeInvalidRoleOutput,
-			"role-output document schema_version must be review-role-output-v3.",
+			"role-output document schema_version must be review-role-output-v3 or review-role-output-v4.",
 			"/schema_version",
-			map[string]any{"expected": RoleOutputV3, "actual": document.SchemaVersion},
+			map[string]any{"expected": []string{RoleOutputV3, RoleOutputV4}, "actual": document.SchemaVersion},
 		))
 	}
 	requireEnum(&diagnostics, "/role", "role", document.Role, stringSet(RoleDefect, RoleEconomy, RoleGoalFit), CodeInvalidRoleOutput)
@@ -248,7 +281,7 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 			))
 		}
 		seenFindings[finding.ID] = index
-		diagnostics = append(diagnostics, validateFinding(document.Role, finding, path, frozen, goalIDs, questions, questionPaths)...)
+		diagnostics = append(diagnostics, validateFinding(document.SchemaVersion, document.Role, finding, path, frozen, goalIDs, questions, questionPaths)...)
 	}
 	return diagnostics
 }
@@ -329,11 +362,19 @@ func cachedDeltaEstimateValue(delta DeltaEstimate) map[string]any {
 	return value
 }
 
-func validateFinding(role string, finding Finding, path string, frozen *charter.FrozenCharter, goalIDs map[string]bool, questions map[string]MissingGoalQuestion, questionPaths map[string]string) []diag.Diagnostic {
+func validateFinding(schemaVersion string, role string, finding Finding, path string, frozen *charter.FrozenCharter, goalIDs map[string]bool, questions map[string]MissingGoalQuestion, questionPaths map[string]string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	requireStableID(&diagnostics, path+"/id", "finding ID", finding.ID)
 	requireString(&diagnostics, path+"/title", "finding title", finding.Title)
 	requireEnum(&diagnostics, path+"/claimed_severity", "claimed_severity", finding.ClaimedSeverity, stringSet(SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow), CodeInvalidRoleOutput)
+	switch schemaVersion {
+	case RoleOutputV4:
+		requireEnum(&diagnostics, path+"/attribution", "attribution", finding.Attribution, stringSet(FindingAttributionIntroduced, FindingAttributionWorsened, FindingAttributionPreExisting, FindingAttributionUnattributed), CodeInvalidRoleOutput)
+	case RoleOutputV3:
+		if finding.Attribution != "" {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "review-role-output-v3 findings must not carry attribution.", path+"/attribution", map[string]any{"value": finding.Attribution}))
+		}
+	}
 	if len(finding.CharterGoalIDs) == 0 {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "findings must name at least one Charter goal.", path+"/charter_goal_ids", nil))
 	}
