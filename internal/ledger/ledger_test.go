@@ -63,8 +63,64 @@ func TestAppendReplayRoundTripAndFilteredShow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Show: %v", err)
 	}
+	if show.SchemaVersion != ShowSchemaVersion {
+		t.Fatalf("show schema_version = %q, want %q", show.SchemaVersion, ShowSchemaVersion)
+	}
 	if len(show.Records) != 1 || show.Records[0].EventKind != EventKindPolicyDecision {
 		t.Fatalf("filtered show = %#v", show.Records)
+	}
+	if show.Records[0].SchemaVersion != RecordSchemaVersion {
+		t.Fatalf("shown record schema_version = %q, want %q", show.Records[0].SchemaVersion, RecordSchemaVersion)
+	}
+}
+
+func TestReadFileRejectsV1LedgerBeforeDecodingLegacyEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	legacy := Record{
+		SchemaVersion: "witness-ledger-record-v1",
+		Sequence:      1,
+		EventKind:     EventKindPolicyDecision,
+		Event: json.RawMessage(`{
+			"allow": false,
+			"reasons": ["legacy decision"],
+			"policy_id": "policy-1",
+			"policy_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			"rules_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			"cap_release_charter_mismatch": false,
+			"positive_cap_allowance_used": false,
+			"operational_envelope_present": false
+		}`),
+	}
+	var err error
+	legacy.Digest, err = recordDigest(legacy)
+	if err != nil {
+		t.Fatalf("recordDigest: %v", err)
+	}
+	encoded, err := marshalRecord(legacy)
+	if err != nil {
+		t.Fatalf("marshalRecord: %v", err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ReadFile(path)
+	if err == nil {
+		t.Fatal("ReadFile accepted a v1 ledger")
+	}
+	var validation *ValidationError
+	if !errors.As(err, &validation) || len(validation.Diagnostics) != 1 {
+		t.Fatalf("error = %#v, want one explicit version diagnostic", err)
+	}
+	diagnostic := validation.Diagnostics[0]
+	if diagnostic.Code != CodeInvalidLedger || diagnostic.Path != "/records/0/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported ledger version", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want version refusal rather than field decode error", diagnostic)
+	}
+	if diagnostic.Details["actual"] != "witness-ledger-record-v1" || diagnostic.Details["expected"] != RecordSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want v1 and %s", diagnostic.Details, RecordSchemaVersion)
 	}
 }
 

@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	StateSchemaVersion      = "witness-pass-state-v2"
+	StateSchemaVersion      = "witness-pass-state-v3"
 	InvocationSchemaVersion = "witness-pass-next-action-v2"
 
 	StateFileName = "pass-state.json"
@@ -1519,12 +1519,21 @@ func readState(path string) (*State, error) {
 	if err != nil {
 		return nil, fileError(err, path, "open pass state")
 	}
-	state, err := strictjson.DecodeBytes[State](data, strictjson.DefaultMaxBytes*8)
+	outer, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
 	if err != nil {
 		return nil, err
 	}
-	if state.SchemaVersion != StateSchemaVersion {
-		return nil, validationError(CodeStateUnsupported, "pass state schema_version is unsupported.", "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": state.SchemaVersion})
+	document, ok := outer.(map[string]any)
+	if !ok {
+		return nil, validationError(CodeStateUnsupported, "pass state schema_version is unsupported.", "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": ""})
+	}
+	schemaVersion, _ := document["schema_version"].(string)
+	if schemaVersion != StateSchemaVersion {
+		return nil, validationError(CodeStateUnsupported, fmt.Sprintf("pass state schema_version %q is unsupported; expected %q; this state predates the decision-rules change.", schemaVersion, StateSchemaVersion), "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": schemaVersion})
+	}
+	state, err := strictjson.DecodeBytes[State](data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return nil, err
 	}
 	if state.DigestProfile != digest.Profile {
 		return nil, validationError(CodeStateUnsupported, "pass state digest_profile is unsupported.", "/digest_profile", map[string]any{"expected": digest.Profile, "actual": state.DigestProfile})

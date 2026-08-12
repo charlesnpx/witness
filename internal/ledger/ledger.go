@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	RecordSchemaVersion = "witness-ledger-record-v1"
-	ShowSchemaVersion   = "witness-ledger-show-v1"
+	RecordSchemaVersion = "witness-ledger-record-v2"
+	ShowSchemaVersion   = "witness-ledger-show-v2"
 
 	UnitLines = "lines"
 	UnitFiles = "files"
@@ -386,12 +386,19 @@ func decodeLedgerRecords(data []byte) ([]Record, error) {
 
 func ValidateRecords(records []Record) error {
 	var diagnostics []diag.Diagnostic
+	for index, record := range records {
+		if record.SchemaVersion != RecordSchemaVersion {
+			return &ValidationError{Diagnostics: []diag.Diagnostic{diagnostic(
+				CodeInvalidLedger,
+				fmt.Sprintf("ledger schema_version %q is unsupported; expected %q after decision-rules identity changed.", record.SchemaVersion, RecordSchemaVersion),
+				fmt.Sprintf("/records/%d/schema_version", index),
+				map[string]any{"expected": RecordSchemaVersion, "actual": record.SchemaVersion},
+			)}}
+		}
+	}
 	previous := ""
 	for index, record := range records {
 		path := fmt.Sprintf("/records/%d", index)
-		if record.SchemaVersion != RecordSchemaVersion {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedger, "ledger record schema_version is unsupported.", path+"/schema_version", map[string]any{"expected": RecordSchemaVersion, "actual": record.SchemaVersion}))
-		}
 		expectedSequence := index + 1
 		if record.Sequence != expectedSequence {
 			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedger, "ledger record sequence must be contiguous.", path+"/sequence", map[string]any{"expected": expectedSequence, "actual": record.Sequence}))
