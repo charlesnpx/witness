@@ -5,6 +5,41 @@ new directory *outside* the repository being reviewed: the pass state must not
 live inside the reviewed source tree. The reviewed source must be a real Git
 checkout, and `BUNDLE` must name a valid relay integration bundle.
 
+## Review plan for large or moving stacks
+
+Before starting a pass over a large, multi-branch, or moving stack, write this
+short human-readable plan. The trigger is deliberately a judgment call, not a
+precise byte threshold: use it whenever source scope or relay input reduction
+will need deliberate choices. In particular, use it for an AMOT-sized stack.
+It takes about two minutes and is a manual operator record, not a Witness
+artifact or CLI feature.
+
+```text
+- Frozen refs: <branch name> at <SHA>; <branch name> at <SHA>.
+- Included branches: <ordered branch names included in this review>.
+- Movement policy: <may/may not move>; if a listed tip changes, <response>.
+- Relay source reduction: <the source slices/artifacts to fit relay verification's named-input budget>.
+- Stack attribution: <what is attributable relative to the named base and what is excluded>.
+```
+
+Each line prevents a distinct ambiguity that Witness does not resolve for the
+operator:
+
+- **Frozen refs** name the exact bytes under review; a later branch tip is not
+  part of that frozen scope.
+- **Included branches** make the stack boundary explicit, rather than leaving
+  it to an assumed range.
+- **Movement policy** says whether branches may continue moving and what to do
+  if they do. A practical response is to keep this pass on the recorded refs
+  and put any later-tail observation in the manual post-freeze report section,
+  or to stop and create a replacement plan for a new pass.
+- **Relay source reduction** identifies the bounded source slices or artifacts
+  that fit relay verification's named-input budget. If the author cannot answer
+  this question, the plan has already discovered that relay verification will
+  fail before the single pass is spent.
+- **Stack attribution** sets the comparison boundary. A defect that reproduces
+  at the named base is real but is not attributable to the reviewed stack.
+
 ## 1. Create a run directory and Charter
 
 Start in an empty directory and set the absolute paths for this run. Replace
@@ -516,6 +551,59 @@ document:
 The ledger still receives an `adjudication_run` record whose `finding_count` is
 `0`.
 
+## Human-readable review report
+
+Witness does not generate the human-readable markdown report. After the pass,
+the operator writes it from the frozen ledger and any separately labeled manual
+work. Its three finding sections are mandatory, and a finding appears in
+exactly one of them. State an empty section as empty rather than omitting it,
+so a reader can distinguish nothing found from not examined.
+
+### Witness ledger findings
+
+This section contains only findings in the frozen ledger. For each one, retain
+its Witness provenance and state both its disposition and relay verification
+state honestly; write `pending verification` when relay verification did not
+produce a verdict.
+
+### Manual post-freeze findings
+
+This section contains anything outside the frozen scope, including work against
+a post-freeze tail. State plainly that these items have no Witness provenance;
+never present them as ledger findings.
+
+### Pre-existing defects excluded from stack attribution
+
+This section contains real defects that reproduce at the named review base.
+State the base evidence and exclude them from attribution to the reviewed
+stack.
+
+Copy this skeleton and replace every placeholder:
+
+```md
+# <review title>
+
+## Witness ledger findings
+
+- `<ledger finding>` — Witness provenance: `<ledger record or retained evidence>`;
+  disposition: `<admitted|advisory|pending_verification|owner_override>`;
+  relay verification: `<retained relay status and verdict, or pending verification>`.
+
+## Manual post-freeze findings
+
+- `<manual finding>` — examined against `<post-freeze ref and SHA>`; Witness
+  provenance: none; manual review only.
+
+## Pre-existing defects excluded from stack attribution
+
+- `<defect>` — reproduces at base `<branch and SHA>`; excluded from stack
+  attribution.
+```
+
+For an empty section, write `None.` beneath its heading. Do not omit the
+heading, and do not move a manual post-freeze item into the ledger section or
+describe a pending-verification item as verified.
+
 ## Zero findings does not prove absence of defects
 
 A zero-findings result is only as meaningful as the Charter goals and finder
@@ -580,3 +668,7 @@ Dirty-source capture with `-allow-dirty-source` refuses sparse checkouts with
 `freeze_source_sparse_checkout`: tracked files absent from the working tree
 cannot be represented in a dirty snapshot. Use a full checkout before starting
 the pass.
+
+Witness is currently a provenance and adjudication layer. Operators must
+supervise source scoping, delta attribution, and current-tip drift; for large
+stacked PRs, it is not an unattended merge-blocking review.
