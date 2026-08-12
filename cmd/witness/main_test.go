@@ -21,7 +21,6 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
@@ -100,6 +99,66 @@ func TestPolicyCommandGroupIsAbsent(t *testing.T) {
 	}
 	if got := diag.FromError(err).Code; got != diag.CodeInvalidCommand {
 		t.Fatalf("policy route diagnostic = %s, want %s; err=%v", got, diag.CodeInvalidCommand, err)
+	}
+}
+
+func TestMetricsCommandIsAbsent(t *testing.T) {
+	output, err := captureRouteStdout(t, []string{"--help"})
+	if err != nil {
+		t.Fatalf("top-level help: %v", err)
+	}
+	if strings.Contains(output, "metrics") {
+		t.Fatalf("top-level help still advertises metrics: %q", output)
+	}
+
+	err = route([]string{"metrics"})
+	if err == nil {
+		t.Fatal("metrics command is still routed")
+	}
+	if got := diag.FromError(err).Code; got != diag.CodeInvalidCommand {
+		t.Fatalf("metrics route diagnostic = %s, want %s; err=%v", got, diag.CodeInvalidCommand, err)
+	}
+}
+
+func TestSkillLint(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "skill", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read skill: %v", err)
+	}
+	text := string(data)
+	required := []string{
+		"Finder roles are exactly: defect, economy, and optional goal-fit.",
+		"smallest sufficient remedy",
+		"at most one test per distinct reachable behavioral partition",
+		"unreachable states",
+		"runtime guarantees",
+		"repeated internal layers",
+		"unsupported Cartesian combinations",
+		"implementation-only details",
+		"unbounded fuzz/property work",
+		"role-output document",
+		"verification-batch documents",
+		"run-result document",
+		"Operational Envelope",
+		"existing code, tests, defenses, and review machinery create no goals",
+	}
+	for _, want := range required {
+		if !strings.Contains(text, want) {
+			t.Fatalf("skill missing %q", want)
+		}
+	}
+	forbidden := []string{
+		"arbiter role",
+		"judge role",
+		"approver role",
+		"approval gate",
+		"new model role",
+	}
+	lower := strings.ToLower(text)
+	for _, phrase := range forbidden {
+		if strings.Contains(lower, phrase) {
+			t.Fatalf("skill contains forbidden role/gate addition phrase %q", phrase)
+		}
 	}
 }
 
@@ -1153,27 +1212,6 @@ func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
 		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonAttributionUnattributed {
 			t.Fatalf("serialized finding ledger record = %#v, want attribution gate reason", finding)
 		}
-	}
-}
-
-func TestMetricsCLIWritesDocument(t *testing.T) {
-	outPath := filepath.Join(t.TempDir(), "metrics.json")
-	if err := route([]string{"metrics", "-out", outPath}); err != nil {
-		t.Fatalf("metrics: %v", err)
-	}
-	data, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	document, err := strictjson.DecodeBytes[metrics.Document](data, strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if document.SchemaVersion != metrics.SchemaVersion {
-		t.Fatalf("metrics schema_version = %s, want %s", document.SchemaVersion, metrics.SchemaVersion)
-	}
-	if len(document.PendingVerification.Strata) != 3 || document.PendingVerification.Strata[0].Reason != metrics.ReasonRunResultsMissing {
-		t.Fatalf("pending verification strata = %#v", document.PendingVerification.Strata)
 	}
 }
 

@@ -21,7 +21,6 @@ import (
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
@@ -73,7 +72,6 @@ var witnessCommands = map[string]map[string]bool{
 
 var singleCommands = map[string]bool{
 	"adjudicate": true,
-	"metrics":    true,
 }
 
 var verificationAssembleRelayRunner relayclient.Runner
@@ -107,9 +105,6 @@ func route(args []string) error {
 	if singleCommands[args[0]] {
 		if args[0] == "adjudicate" {
 			return runAdjudicate(args[1:])
-		}
-		if args[0] == "metrics" {
-			return runMetrics(args[1:])
 		}
 		return notImplemented(args[0])
 	}
@@ -884,35 +879,6 @@ func runAdjudicate(args []string) error {
 	return nil
 }
 
-func runMetrics(args []string) error {
-	flags := newFlagSet("witness metrics", "Generate Witness metrics.")
-	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
-	preflightPath := flags.String("preflight", "", "verification preflight result path")
-	out := flags.String("out", "", "metrics output path")
-	var runResultPaths repeatedStrings
-	flags.Var(&runResultPaths, "run-result", "adjudication run-result JSON path; may be repeated")
-	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return unexpectedArgs(flags.Args())
-	}
-	protected := []protectedInput{{role: "ledger", path: *ledgerPath}, {role: "preflight", path: *preflightPath}}
-	protected = append(protected, protectedInputsForPaths("run-result", runResultPaths)...)
-	if err := rejectOutputPathAliases(*out, protected...); err != nil {
-		return err
-	}
-	document, err := metrics.Run(metrics.Options{
-		LedgerPath:     *ledgerPath,
-		PreflightPath:  *preflightPath,
-		RunResultPaths: append([]string(nil), runResultPaths...),
-	})
-	if err != nil {
-		return err
-	}
-	return writeJSONOutput(*out, document)
-}
-
 func appendAdjudicationLineage(path string, result *adjudicate.Result, inputs []adjudicate.RoleOutputInput, frozen charter.FrozenCharter) ([]ledger.Record, error) {
 	return passdriver.AppendAdjudicationLineage(path, result, inputs, frozen)
 }
@@ -935,9 +901,8 @@ func findingPayloadForLedger(finding adjudicate.FindingVerdict) map[string]any {
 func deltaEstimatePayload(estimate contracts.DeltaEstimate) map[string]any {
 	payload := map[string]any{"status": estimate.Status}
 	// Emit based on presence, not non-zero: an explicit zero (status=known, lines:0)
-	// is a real value the metrics consumer must compare, distinct from an omitted
-	// component. Using != 0 here would drop explicit zeros and cause metrics to treat
-	// the finding as estimate-missing instead of a zero delta.
+	// is a real value downstream consumers must distinguish from an omitted
+	// component. Using != 0 here would drop explicit zeros.
 	if estimate.LinesPresent() {
 		payload["lines"] = estimate.Lines
 	}
@@ -2241,7 +2206,7 @@ func writeCanonical(path string, value any) error {
 	return diag.WriteCanonical(file, value)
 }
 
-// writeJSONOutput renders report documents (metrics, ledger show) as standard
+// writeJSONOutput renders ledger-show documents as standard
 // JSON with integer-valued counts intact. These are consumer-facing reports, not
 // digest inputs, so they must NOT go through canonical JSON: canonjson canonicalizes
 // integers >= 10 into exponent form (e.g. 11 -> "1.1e1"), which cannot be decoded
@@ -2588,10 +2553,6 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var ledgerValidation *ledger.ValidationError
 	if errors.As(err, &ledgerValidation) {
 		return ledgerValidation.Diagnostics
-	}
-	var metricsValidation *metrics.ValidationError
-	if errors.As(err, &metricsValidation) {
-		return metricsValidation.Diagnostics
 	}
 	var passValidation *passdriver.ValidationError
 	if errors.As(err, &passValidation) {

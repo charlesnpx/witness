@@ -1,9 +1,7 @@
 package pass
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,14 +18,13 @@ import (
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (
-	StateSchemaVersion      = "witness-pass-state-v4"
+	StateSchemaVersion      = "witness-pass-state-v5"
 	InvocationSchemaVersion = "witness-pass-next-action-v2"
 
 	StateFileName = "pass-state.json"
@@ -58,7 +55,6 @@ const (
 	stagePlan       = "plan"
 	stageAssemble   = "assemble"
 	stageAdjudicate = "adjudicate"
-	stageMetrics    = "metrics"
 
 	statusComplete    = "complete"
 	statusPending     = "pending"
@@ -82,7 +78,6 @@ var orderedStages = []string{
 	stagePlan,
 	stageAssemble,
 	stageAdjudicate,
-	stageMetrics,
 }
 
 type BeginOptions struct {
@@ -151,7 +146,6 @@ type Outputs struct {
 	AssembleResultPath          string `json:"assemble_result_path,omitempty"`
 	RoleOutputChangeSurfacePath string `json:"role_output_change_surface_path,omitempty"`
 	RunResultPath               string `json:"run_result_path"`
-	MetricsPath                 string `json:"metrics_path"`
 }
 
 type State struct {
@@ -409,12 +403,6 @@ func advance(ctx context.Context, state *State) (*Invocation, error) {
 			return nil, err
 		}
 		return saveAndReport(state, stageAdjudicate)
-	}
-	if !stageComplete(state, stageMetrics) {
-		if err := runMetrics(state); err != nil {
-			return nil, err
-		}
-		return saveAndReport(state, stageMetrics)
 	}
 	state.Complete = true
 	setCompleteAction(state)
@@ -871,41 +859,6 @@ func runAdjudicate(state *State) error {
 			"result_digest": result.ResultDigest,
 		},
 	})
-	return nil
-}
-
-func runMetrics(state *State) error {
-	config := state.Config
-	document, err := metrics.Run(metrics.Options{
-		LedgerPath:     config.LedgerPath,
-		PreflightPath:  config.Outputs.PreflightPath,
-		RunResultPaths: []string{config.Outputs.RunResultPath},
-	})
-	if err != nil {
-		return err
-	}
-	if err := writeJSONFile(config.Outputs.MetricsPath, document); err != nil {
-		return err
-	}
-	inputSpecs := []artifactInput{
-		{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes},
-		{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digest.ClassRawBytes},
-		{role: "ledger", path: config.LedgerPath, digestClass: digest.ClassRawBytes},
-	}
-	inputs, err := artifactRecordsForExistingFiles(inputSpecs)
-	if err != nil {
-		return err
-	}
-	outputs, err := artifactRecordsForExistingFiles([]artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digest.ClassRawBytes}})
-	if err != nil {
-		return err
-	}
-	markStageComplete(state, StageRecord{
-		Name:    stageMetrics,
-		Status:  statusComplete,
-		Inputs:  inputs,
-		Outputs: outputs,
-	})
 	state.Complete = true
 	return nil
 }
@@ -965,7 +918,6 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 			ManifestPath:       filepath.Join(stateDir, "verification", "index.json"),
 			AssembleResultPath: filepath.Join(stateDir, "verification", "assemble-result.json"),
 			RunResultPath:      filepath.Join(stateDir, "verdict.json"),
-			MetricsPath:        filepath.Join(stateDir, "metrics.json"),
 		},
 	}
 	for _, assign := range []struct {
@@ -1074,8 +1026,7 @@ func setNextAction(state *State) error {
 		!stageComplete(state, stagePreflight) ||
 		!stageComplete(state, stagePlan) ||
 		!stageComplete(state, stageAssemble) ||
-		!stageComplete(state, stageAdjudicate) ||
-		!stageComplete(state, stageMetrics) {
+		!stageComplete(state, stageAdjudicate) {
 		if missing := missingRoleOutputs(state); len(missing) > 0 && stageComplete(state, stagePreflight) {
 			return setRoleOutputAction(state, missing)
 		}
@@ -1512,7 +1463,7 @@ func readState(path string) (*State, error) {
 	}
 	schemaVersion, _ := document["schema_version"].(string)
 	if schemaVersion != StateSchemaVersion {
-		return nil, validationError(CodeStateUnsupported, fmt.Sprintf("pass state schema_version %q is unsupported; witness-pass-state-v3 is refused and %q is required after policy-path removal.", schemaVersion, StateSchemaVersion), "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": schemaVersion})
+		return nil, validationError(CodeStateUnsupported, fmt.Sprintf("pass state schema_version %q is unsupported; it predates the metrics-stage removal and %q is required.", schemaVersion, StateSchemaVersion), "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": schemaVersion})
 	}
 	state, err := strictjson.DecodeBytes[State](data, strictjson.DefaultMaxBytes*8)
 	if err != nil {
@@ -2112,22 +2063,6 @@ func writeCanonicalFile(path string, value any) error {
 		return fileError(err, filepath.Dir(path), "create output directory")
 	}
 	if err := atomicWriteFile(path, append(encoded, '\n'), 0o644); err != nil {
-		return fileError(err, path, "write output")
-	}
-	return nil
-}
-
-func writeJSONFile(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fileError(err, filepath.Dir(path), "create output directory")
-	}
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
-		return err
-	}
-	if err := atomicWriteFile(path, buffer.Bytes(), 0o644); err != nil {
 		return fileError(err, path, "write output")
 	}
 	return nil

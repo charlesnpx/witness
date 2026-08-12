@@ -20,7 +20,6 @@ import (
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/preflight"
 )
 
@@ -34,11 +33,9 @@ type passResult struct {
 	dir            string
 	preflightPath  string
 	runResultPath  string
-	metricsPath    string
 	ledgerShowPath string
 	runsIndexPath  string
 	result         adjudicate.Result
-	metrics        metrics.Document
 	ledgerShow     ledger.ShowDocument
 	runs           relayRunsDocument
 }
@@ -116,10 +113,6 @@ func TestFakeProviderEndToEndPasses(t *testing.T) {
 			"economy-equivalence-v2-codex",
 			"witness-falsify-v2-codex",
 		})
-		if pass.metrics.PendingVerification.Total != 2 {
-			t.Fatalf("pending metrics total = %d, want 2", pass.metrics.PendingVerification.Total)
-		}
-		assertPendingStratum(t, pass.metrics, "codex", metrics.BackendAuthStatusInstalledAuthUnknown, 2)
 		assertLedgerKinds(t, pass.ledgerShow, map[string]int{
 			ledger.EventKindAdjudicationRun:     1,
 			ledger.EventKindVerdict:             2,
@@ -156,9 +149,6 @@ func assertSuccessfulPass(t *testing.T, pass passResult, wantRelayBackend string
 	}
 	assertRelay(t, economy, "economy-equivalence-v2", wantRelayBackend)
 
-	if pass.metrics.Verdicts.Survived != 2 || pass.metrics.PendingVerification.Total != 0 {
-		t.Fatalf("metrics verdicts=%#v pending=%#v, want 2 survived and 0 pending", pass.metrics.Verdicts, pass.metrics.PendingVerification)
-	}
 	assertRunRecipeIDs(t, pass.runs, wantRecipeIDs)
 	assertLedgerKinds(t, pass.ledgerShow, map[string]int{
 		ledger.EventKindAdjudicationRun: 1,
@@ -297,14 +287,6 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		"-out", runResultPath,
 	)
 
-	metricsPath := filepath.Join(resultsDir, "metrics.json")
-	runOK(t, nil, bins.witness,
-		"metrics",
-		"-ledger", ledgerPath,
-		"-preflight", preflightPath,
-		"-run-result", runResultPath,
-		"-out", metricsPath,
-	)
 	ledgerShowPath := filepath.Join(resultsDir, "ledger-show.json")
 	runOK(t, nil, bins.witness, "ledger", "show", "-ledger", ledgerPath, "-out", ledgerShowPath)
 
@@ -312,11 +294,9 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		dir:            passDir,
 		preflightPath:  preflightPath,
 		runResultPath:  runResultPath,
-		metricsPath:    metricsPath,
 		ledgerShowPath: ledgerShowPath,
 		runsIndexPath:  filepath.Join(passDir, "verification", "runs", "index.json"),
 		result:         readJSON[adjudicate.Result](t, runResultPath),
-		metrics:        readJSON[metrics.Document](t, metricsPath),
 		ledgerShow:     readJSON[ledger.ShowDocument](t, ledgerShowPath),
 		runs:           readJSON[relayRunsDocument](t, filepath.Join(passDir, "verification", "runs", "index.json")),
 	}
@@ -625,19 +605,6 @@ func assertLedgerKinds(t *testing.T, show ledger.ShowDocument, want map[string]i
 			t.Fatalf("ledger kind %s count = %d, want %d; all counts %#v", kind, got[kind], count, got)
 		}
 	}
-}
-
-func assertPendingStratum(t *testing.T, document metrics.Document, backend string, status string, count int) {
-	t.Helper()
-	for _, stratum := range document.PendingVerification.Strata {
-		if stratum.Backend == backend && stratum.BackendAuthStatus == status {
-			if stratum.Count != count {
-				t.Fatalf("pending stratum %#v count = %d, want %d", stratum, stratum.Count, count)
-			}
-			return
-		}
-	}
-	t.Fatalf("missing pending stratum backend=%s status=%s in %#v", backend, status, document.PendingVerification.Strata)
 }
 
 func assertStringSliceContains(t *testing.T, values []string, want string) {
