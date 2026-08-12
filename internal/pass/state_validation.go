@@ -167,7 +167,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
 			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
-			{role: "policy", path: config.PolicyPath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
 			{role: "head-manifest", path: effectiveHeadManifestPathUnchecked(config), digestClass: digestClassFreezeManifest},
 		}
@@ -234,7 +233,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
 			{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digestClassRaw()},
-			{role: "policy", path: config.PolicyPath, digestClass: digestClassRaw()},
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
 			{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
@@ -1484,10 +1482,6 @@ func expectedPlanningResult(state *State) (*planning.Result, error) {
 	if err := validatePlanningPreflight(preflightResult); err != nil {
 		return nil, err
 	}
-	policyDocument, err := readReviewPolicy(config.PolicyPath)
-	if err != nil {
-		return nil, err
-	}
 	changeSurface, err := readDriverChangeSurfaceInput(config, config.BaselinePass)
 	if err != nil {
 		return nil, err
@@ -1508,7 +1502,6 @@ func expectedPlanningResult(state *State) (*planning.Result, error) {
 		FrozenCharter: &frozen,
 		CharterDigest: digest.RawBytes(frozenBytes),
 		RoleOutputs:   roleOutputs,
-		Policy:        policyDocument,
 		Preflight:     preflightBinding(preflightResult),
 		ChangeSurface: changeSurface,
 	})
@@ -1655,22 +1648,16 @@ func expectedAdjudicationResult(state *State) (*adjudicate.Result, error) {
 			return nil, err
 		}
 	}
-	effective, err := loadEffectivePolicy(config)
-	if err != nil {
-		return nil, err
-	}
 	result, runErr := adjudicate.Run(adjudicate.Options{
-		FrozenCharter:                &frozen,
-		RoleOutputs:                  roleOutputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurface.BaseManifest,
-		HeadManifest:                 changeSurface.HeadManifest,
-		ReceiptOutputDir:             config.ReceiptOutputDir,
-		ReceiptHMACKeyFile:           config.ReceiptHMACKeyFile,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
-		PriorLineage:                 priorLineage,
-		PriorLineageProvided:         priorProvided,
+		FrozenCharter:        &frozen,
+		RoleOutputs:          roleOutputs,
+		Manifest:             manifest,
+		BaseManifest:         changeSurface.BaseManifest,
+		HeadManifest:         changeSurface.HeadManifest,
+		ReceiptOutputDir:     config.ReceiptOutputDir,
+		ReceiptHMACKeyFile:   config.ReceiptHMACKeyFile,
+		PriorLineage:         priorLineage,
+		PriorLineageProvided: priorProvided,
 	})
 	if runErr != nil {
 		return nil, runErr
@@ -1686,12 +1673,9 @@ func validateMetricsOutput(state *State) error {
 	if err != nil {
 		return err
 	}
-	actual, err := strictjson.DecodeBytes[metrics.Document](data, strictjson.DefaultMaxBytes*8)
+	actual, err := metrics.ReadDocumentBytes(data)
 	if err != nil {
 		return err
-	}
-	if actual.SchemaVersion != metrics.SchemaVersion {
-		return diag.New(CodeStateInvalid, "metrics result schema_version is unsupported.", diag.WithDetail("actual", actual.SchemaVersion), diag.WithDetail("expected", metrics.SchemaVersion))
 	}
 	expected, err := metrics.Run(metrics.Options{
 		LedgerPath:     state.Config.LedgerPath,

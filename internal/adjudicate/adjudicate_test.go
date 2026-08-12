@@ -2,7 +2,6 @@ package adjudicate
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,8 +250,8 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertDisposition(t, got, contracts.DispositionPendingVerification)
 		assertSeverity(t, got, contracts.SeverityHigh)
 		assertHasReason(t, got, ReasonRelayVerificationUnavailable)
-		if result.Summary.PendingVerification != 1 || result.Summary.FixpointEligible {
-			t.Fatalf("summary = %#v, want pending_verification=1 and fixpoint_eligible=false", result.Summary)
+		if result.Summary.PendingVerification != 1 {
+			t.Fatalf("summary = %#v, want pending_verification=1", result.Summary)
 		}
 	})
 
@@ -497,12 +496,9 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
 	manifest.ChangeSurface = &surface
 	manifest.ChangeSurfaceDigest = surfaceDigest
-	policyDocument := contracts.DefaultReviewPolicy()
-	policyDocument.PolicyID = "delta-policy"
-	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
 
 	result := runAdjudication(t, runInput{
 		frozen:       frozen,
@@ -510,7 +506,6 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 		manifest:     manifest,
 		baseManifest: &baseManifest,
 		headManifest: &headManifest,
-		policy:       policyDocument,
 	})
 	byID := findingsByID(result)
 	assertDisposition(t, byID["in-delta"], contracts.DispositionAdmitted)
@@ -604,12 +599,9 @@ func TestAdjudicationV3FindingIsUnattributedAndAttributionPrecedesDeltaScope(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
 	manifest.ChangeSurface = &surface
 	manifest.ChangeSurfaceDigest = surfaceDigest
-	policyDocument := contracts.DefaultReviewPolicy()
-	policyDocument.PolicyID = "delta-policy"
-	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
 
 	result := runAdjudication(t, runInput{
 		frozen:       frozen,
@@ -617,7 +609,6 @@ func TestAdjudicationV3FindingIsUnattributedAndAttributionPrecedesDeltaScope(t *
 		manifest:     manifest,
 		baseManifest: &baseManifest,
 		headManifest: &headManifest,
-		policy:       policyDocument,
 	})
 	got := onlyFinding(t, result)
 	if got.Attribution != contracts.FindingAttributionUnattributed {
@@ -645,18 +636,14 @@ func TestAdjudicationRederivesDeclaredChangeSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
 	manifest.ChangeSurface = &surface
 	manifest.ChangeSurfaceDigest = surfaceDigest
-	policyDocument := contracts.DefaultReviewPolicy()
-	policyDocument.PolicyID = "delta-policy"
-	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
 
 	result, err := Run(Options{
 		FrozenCharter: &frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 		Manifest:      manifest,
-		Policy:        policyDocument,
 		BaseManifest:  &baseManifest,
 		HeadManifest:  &headManifest,
 	})
@@ -676,7 +663,7 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 		t.Fatal(err)
 	}
 	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil)
-	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
 	manifest.BaselinePass = &changesurface.BaselinePass{
 		Declared: true,
 		Reason:   changesurface.BaselinePassReasonExplicit,
@@ -696,15 +683,10 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 		Disposition:            contracts.DispositionAdvisory,
 		ApplicationClass:       contracts.ApplicationClassCallerDecision,
 	}}
-	policyDocument := contracts.DefaultReviewPolicy()
-	policyDocument.PolicyID = "delta-policy"
-	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
-
 	result, err := Run(Options{
 		FrozenCharter: &frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 		Manifest:      manifest,
-		Policy:        policyDocument,
 	})
 	if err == nil {
 		t.Fatalf("Run result=%#v err=nil, want baseline-pass exclusion rejection", result)
@@ -715,94 +697,17 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 	assertErrorHasDiagnostic(t, err, CodeInvalidManifest, "/manifest/excluded_findings/0")
 }
 
-func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
-	frozen := testFrozenCharter(t)
-	artifactDigest := testDigest("artifact")
-	productionCap := 5
-	testCap := 5
-	policyDocument := filesReleasePolicy(t, frozen, productionCap, testCap)
-
-	t.Run("line estimate does not satisfy files release", func(t *testing.T) {
-		finding := defectFinding("finding-files-release", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
-		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
-		finding.EstimatedDelta = contracts.SplitDeltaEstimate{
-			Production: contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 1},
-			Test:       contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 1},
-		}
-		roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
-
-		result := runAdjudication(t, runInput{
-			frozen:                       frozen,
-			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			policy:                       policyDocument,
-			policyCapReleaseLedgerBacked: true,
-		})
-		got := onlyFinding(t, result)
-		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
-	})
-
-	t.Run("omitted counts do not satisfy files release", func(t *testing.T) {
-		finding := defectFinding("finding-files-release-omitted", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
-		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
-		roleOutput := roleOutputWithEstimatedDelta(t,
-			roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding}),
-			map[string]any{
-				"production": map[string]any{"status": contracts.DeltaStatusKnown},
-				"test":       map[string]any{"status": contracts.DeltaStatusKnown},
-			},
-		)
-		finding = roleOutput.Findings[0]
-
-		result := runAdjudication(t, runInput{
-			frozen:                       frozen,
-			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			policy:                       policyDocument,
-			policyCapReleaseLedgerBacked: true,
-		})
-		got := onlyFinding(t, result)
-		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
-	})
-
-	t.Run("explicit files zero satisfies files release", func(t *testing.T) {
-		finding := defectFinding("finding-files-release-zero", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
-		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
-		roleOutput := roleOutputWithEstimatedDelta(t,
-			roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding}),
-			map[string]any{
-				"production": map[string]any{"status": contracts.DeltaStatusKnown, "files": 0},
-				"test":       map[string]any{"status": contracts.DeltaStatusKnown, "files": 0},
-			},
-		)
-		finding = roleOutput.Findings[0]
-
-		result := runAdjudication(t, runInput{
-			frozen:                       frozen,
-			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			policy:                       policyDocument,
-			policyCapReleaseLedgerBacked: true,
-		})
-		got := onlyFinding(t, result)
-		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassAutomaticCandidate)
-	})
-}
-
-func TestReadResultBytesRejectsPreV4WithExplicitDiagnostic(t *testing.T) {
-	_, err := ReadResultBytes([]byte(`{"schema_version":"witness-adjudication-run-result-v3"}`))
+func TestReadResultBytesRejectsV4WithExplicitDiagnostic(t *testing.T) {
+	_, err := ReadResultBytes([]byte(`{"schema_version":"witness-adjudication-run-result-v4","policy_version":"review-policy-v3"}`))
 	if err == nil {
-		t.Fatal("ReadResultBytes accepted a v3 result")
+		t.Fatal("ReadResultBytes accepted a v4 result")
 	}
 	diagnostic := diag.FromError(err)
 	if diagnostic.Code != CodeUnsupportedResultSchema || diagnostic.Path != "/schema_version" {
 		t.Fatalf("diagnostic = %#v, want explicit unsupported schema diagnostic", diagnostic)
 	}
-	if actual, _ := diagnostic.Details["actual"].(string); actual != "witness-adjudication-run-result-v3" {
-		t.Fatalf("actual = %#v, want v3", diagnostic.Details["actual"])
+	if actual, _ := diagnostic.Details["actual"].(string); actual != "witness-adjudication-run-result-v4" {
+		t.Fatalf("actual = %#v, want v4", diagnostic.Details["actual"])
 	}
 	if expected, _ := diagnostic.Details["expected"].(string); expected != ResultSchemaVersion {
 		t.Fatalf("expected = %#v, want %s", diagnostic.Details["expected"], ResultSchemaVersion)
@@ -826,33 +731,29 @@ func TestDecisionRulesSeverityCaps(t *testing.T) {
 }
 
 type runInput struct {
-	frozen                       charter.FrozenCharter
-	roleOutputs                  []RoleOutputInput
-	manifest                     contracts.VerificationManifest
-	baseManifest                 *freeze.Manifest
-	headManifest                 *freeze.Manifest
-	receiptDir                   string
-	receiptKey                   []byte
-	policy                       contracts.ReviewPolicy
-	policyCapReleaseLedgerBacked bool
-	priorLineage                 []PriorLineageRecord
-	priorLineageProvided         bool
+	frozen               charter.FrozenCharter
+	roleOutputs          []RoleOutputInput
+	manifest             contracts.VerificationManifest
+	baseManifest         *freeze.Manifest
+	headManifest         *freeze.Manifest
+	receiptDir           string
+	receiptKey           []byte
+	priorLineage         []PriorLineageRecord
+	priorLineageProvided bool
 }
 
 func runAdjudication(t *testing.T, input runInput) *Result {
 	t.Helper()
 	result, err := Run(Options{
-		FrozenCharter:                &input.frozen,
-		RoleOutputs:                  input.roleOutputs,
-		Manifest:                     input.manifest,
-		BaseManifest:                 input.baseManifest,
-		HeadManifest:                 input.headManifest,
-		ReceiptOutputDir:             input.receiptDir,
-		ReceiptHMACKey:               input.receiptKey,
-		Policy:                       input.policy,
-		PolicyCapReleaseLedgerBacked: input.policyCapReleaseLedgerBacked,
-		PriorLineage:                 input.priorLineage,
-		PriorLineageProvided:         input.priorLineageProvided,
+		FrozenCharter:        &input.frozen,
+		RoleOutputs:          input.roleOutputs,
+		Manifest:             input.manifest,
+		BaseManifest:         input.baseManifest,
+		HeadManifest:         input.headManifest,
+		ReceiptOutputDir:     input.receiptDir,
+		ReceiptHMACKey:       input.receiptKey,
+		PriorLineage:         input.priorLineage,
+		PriorLineageProvided: input.priorLineageProvided,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -864,66 +765,6 @@ func runAdjudication(t *testing.T, input runInput) *Result {
 		t.Fatalf("decision_rules_version = %s, want %s", result.DecisionRulesVersion, contracts.DecisionRulesVersion)
 	}
 	return result
-}
-
-func filesReleasePolicy(t *testing.T, frozen charter.FrozenCharter, productionCap int, testCap int) contracts.ReviewPolicy {
-	t.Helper()
-	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV3,
-		PolicyID:                       "policy-files-release",
-		ScopePolicy:                    contracts.ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-	}
-	policyDigest, err := contracts.ReviewPolicyDigest(policyDocument)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policyDocument.CapRelease = &contracts.CapReleaseRecord{
-		Unit:                 "files",
-		ProductionCap:        productionCap,
-		TestCap:              testCap,
-		Basis:                contracts.CapReleaseBasisOwnerJudgment,
-		Rationale:            "Owner accepted file caps.",
-		Actor:                "owner",
-		PolicyDigest:         policyDigest,
-		DecisionRulesVersion: contracts.DecisionRulesVersion,
-		CharterHash:          frozen.CharterHash,
-	}
-	return policyDocument
-}
-
-func roleOutputWithEstimatedDelta(t *testing.T, document contracts.RoleOutputDocument, estimatedDelta map[string]any) contracts.RoleOutputDocument {
-	t.Helper()
-	data, err := contracts.CanonicalBytes(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	var value map[string]any
-	if err := decoder.Decode(&value); err != nil {
-		t.Fatal(err)
-	}
-	findings, ok := value["findings"].([]any)
-	if !ok || len(findings) != 1 {
-		t.Fatalf("findings = %#v, want exactly one finding", value["findings"])
-	}
-	finding, ok := findings[0].(map[string]any)
-	if !ok {
-		t.Fatalf("finding = %#v, want object", findings[0])
-	}
-	finding["estimated_delta"] = estimatedDelta
-	mutated, err := contracts.CanonicalBytes(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := contracts.ReadRoleOutputBytes(mutated)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return decoded
 }
 
 func onlyFinding(t *testing.T, result *Result) FindingVerdict {

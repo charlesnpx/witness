@@ -309,8 +309,8 @@ func validRelayLaunchStatus(status string) bool {
 
 func validateManifestChangeSurface(document VerificationManifest) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	scopePolicy := EffectiveScopePolicy(ReviewPolicy{ScopePolicy: document.ScopePolicy})
-	if document.ScopePolicy != "" && document.ScopePolicy != ScopePolicyDeltaObligating && document.ScopePolicy != ScopePolicyWholeTree {
+	scopePolicy := changesurface.ScopePolicy(document.ScopePolicy)
+	if !changesurface.ValidateScopePolicy(document.ScopePolicy) {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "scope_policy must be delta_obligating or whole_tree when set.", "/scope_policy", map[string]any{"value": document.ScopePolicy}))
 	}
 	if document.ChangeSurface != nil {
@@ -342,7 +342,7 @@ func validateManifestChangeSurface(document VerificationManifest) []diag.Diagnos
 			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass and change_surface are mutually exclusive.", "/baseline_pass", nil))
 		}
 	}
-	if scopePolicy == ScopePolicyDeltaObligating && document.ChangeSurface == nil && document.BaselinePass == nil {
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && document.ChangeSurface == nil && document.BaselinePass == nil {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating manifests require a change_surface or explicit baseline_pass.", "/change_surface", map[string]any{"scope_policy": scopePolicy}))
 	}
 	return diagnostics

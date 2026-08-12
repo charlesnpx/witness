@@ -31,18 +31,16 @@ type binaries struct {
 }
 
 type passResult struct {
-	dir             string
-	preflightPath   string
-	runResultPath   string
-	metricsPath     string
-	ledgerShowPath  string
-	runsIndexPath   string
-	policyCheckPath string
-	result          adjudicate.Result
-	metrics         metrics.Document
-	ledgerShow      ledger.ShowDocument
-	runs            relayRunsDocument
-	policyCheck     map[string]any
+	dir            string
+	preflightPath  string
+	runResultPath  string
+	metricsPath    string
+	ledgerShowPath string
+	runsIndexPath  string
+	result         adjudicate.Result
+	metrics        metrics.Document
+	ledgerShow     ledger.ShowDocument
+	runs           relayRunsDocument
 }
 
 type relayRunsDocument struct {
@@ -126,8 +124,6 @@ func TestFakeProviderEndToEndPasses(t *testing.T) {
 			ledger.EventKindAdjudicationRun:     1,
 			ledger.EventKindVerdict:             2,
 			ledger.EventKindPendingVerification: 2,
-			ledger.EventKindPolicyDecision:      3,
-			ledger.EventKindMeasuredDelta:       1,
 		})
 	})
 }
@@ -170,12 +166,7 @@ func assertSuccessfulPass(t *testing.T, pass passResult, wantRelayBackend string
 	assertLedgerKinds(t, pass.ledgerShow, map[string]int{
 		ledger.EventKindAdjudicationRun: 1,
 		ledger.EventKindVerdict:         2,
-		ledger.EventKindPolicyDecision:  3,
-		ledger.EventKindMeasuredDelta:   1,
 	})
-	if allow, _ := pass.policyCheck["allow"].(bool); allow {
-		t.Fatalf("policy check allow = true, want false under caller-decision defect change")
-	}
 }
 
 func assertRelay(t *testing.T, finding adjudicate.FindingVerdict, recipeFamily string, backend string) {
@@ -309,24 +300,6 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		"-out", runResultPath,
 	)
 
-	policyCheckPath := filepath.Join(resultsDir, "policy-check.json")
-	runOK(t, nil, bins.witness,
-		"policy", "check-application",
-		"-ledger", ledgerPath,
-		"-charter-freeze", frozenPath,
-		"-role", contracts.RoleDefect,
-		"-remedy-direction", contracts.RemedyDirectionChange,
-		"-remedy-sign", "positive",
-		"-estimated-production-status", contracts.DeltaStatusKnown,
-		"-estimated-production-lines", "2",
-		"-estimated-test-status", contracts.DeltaStatusKnown,
-		"-estimated-test-lines", "4",
-		"-measured-production", "2",
-		"-measured-test", "4",
-		"-finding-id", "defect-exec",
-		"-out", policyCheckPath,
-	)
-
 	metricsPath := filepath.Join(resultsDir, "metrics.json")
 	runOK(t, nil, bins.witness,
 		"metrics",
@@ -339,18 +312,16 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 	runOK(t, nil, bins.witness, "ledger", "show", "-ledger", ledgerPath, "-out", ledgerShowPath)
 
 	return passResult{
-		dir:             passDir,
-		preflightPath:   preflightPath,
-		runResultPath:   runResultPath,
-		metricsPath:     metricsPath,
-		ledgerShowPath:  ledgerShowPath,
-		runsIndexPath:   filepath.Join(passDir, "verification", "runs", "index.json"),
-		policyCheckPath: policyCheckPath,
-		result:          readJSON[adjudicate.Result](t, runResultPath),
-		metrics:         readJSON[metrics.Document](t, metricsPath),
-		ledgerShow:      readJSON[ledger.ShowDocument](t, ledgerShowPath),
-		runs:            readJSON[relayRunsDocument](t, filepath.Join(passDir, "verification", "runs", "index.json")),
-		policyCheck:     readJSON[map[string]any](t, policyCheckPath),
+		dir:            passDir,
+		preflightPath:  preflightPath,
+		runResultPath:  runResultPath,
+		metricsPath:    metricsPath,
+		ledgerShowPath: ledgerShowPath,
+		runsIndexPath:  filepath.Join(passDir, "verification", "runs", "index.json"),
+		result:         readJSON[adjudicate.Result](t, runResultPath),
+		metrics:        readJSON[metrics.Document](t, metricsPath),
+		ledgerShow:     readJSON[ledger.ShowDocument](t, ledgerShowPath),
+		runs:           readJSON[relayRunsDocument](t, filepath.Join(passDir, "verification", "runs", "index.json")),
 	}
 }
 

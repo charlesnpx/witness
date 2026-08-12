@@ -838,7 +838,6 @@ func TestAssembleRederivesDeclaredChangeSurface(t *testing.T) {
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
@@ -885,7 +884,6 @@ func TestAssembleDeclaredChangeSurfaceRequiresDerivationManifests(t *testing.T) 
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
@@ -915,7 +913,6 @@ func TestAssembleRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *testi
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     planningTestPreflightBinding(t),
 		ChangeSurface: ChangeSurfaceInput{BaselinePass: true},
 	})
@@ -1011,7 +1008,6 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 			{Path: "role-a.json", RefID: "role-a", Document: outRoleOutput},
 			{Path: "role-b.json", RefID: "role-b", Document: inRoleOutput},
 		},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     preflight,
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
@@ -1044,7 +1040,6 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 		FrozenCharter: frozen,
 		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "role-b.json", Document: inRoleOutput}},
 		Manifest:      manifest,
-		Policy:        planningDeltaPolicy(),
 		BaseManifest:  &baseManifest,
 		HeadManifest:  &headManifest,
 	})
@@ -1062,7 +1057,6 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 			{Path: "role-b.json", Document: inRoleOutput},
 		},
 		Manifest:     manifest,
-		Policy:       planningDeltaPolicy(),
 		BaseManifest: &baseManifest,
 		HeadManifest: &headManifest,
 	})

@@ -318,23 +318,6 @@ func TestReducerSchemaSourceContainsNoCommentAndIsStrictJSON(t *testing.T) {
 	}
 }
 
-func TestPolicyEstimateOverCapDisqualifiesBeforeMeasuredDelta(t *testing.T) {
-	policy := validAutoApplyPolicy(10, 10)
-	decision := CheckApplication(policy, nil, ApplicationCheck{
-		Role:                       RoleDefect,
-		RemedyDirection:            RemedyDirectionAdd,
-		OperationalEnvelopePresent: true,
-		EstimatedDelta: SplitDeltaEstimate{
-			Production: DeltaEstimate{Status: DeltaStatusKnown, Lines: 11},
-			Test:       DeltaEstimate{Status: DeltaStatusKnown, Lines: 1},
-		},
-		MeasuredDelta: &MeasuredDelta{Production: 1, Test: 1},
-	})
-	if decision.Allow || decision.Reason != "estimated_delta_over_cap" {
-		t.Fatalf("decision = %#v, want estimated delta refusal", decision)
-	}
-}
-
 func TestRelayCompatibilityRequiresFullCapabilityClosure(t *testing.T) {
 	document := validRelayCompatibility()
 	if diagnostics := ValidateRelayCompatibility(document); len(diagnostics) > 0 {
@@ -497,16 +480,6 @@ func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {
 	if diagnostics := ValidateVerificationBatch(batch, &document); len(diagnostics) > 0 {
 		t.Fatalf("verification batch diagnostics = %#v", diagnostics)
 	}
-	decision := CheckApplication(validAutoApplyPolicy(10, 10), nil, ApplicationCheck{
-		Role:                       RoleDefect,
-		RemedyDirection:            RemedyDirectionAdd,
-		OperationalEnvelopePresent: true,
-		EstimatedDelta:             document.Findings[0].EstimatedDelta,
-		MeasuredDelta:              &MeasuredDelta{Production: 1, Test: 1},
-	})
-	if decision.Allow || decision.Reason != "unknown_estimated_delta" {
-		t.Fatalf("decision = %#v, want unknown delta refusal", decision)
-	}
 }
 
 func TestDeltaEstimateTracksExplicitZeroPresence(t *testing.T) {
@@ -592,28 +565,6 @@ func validCounterWitness() *CounterWitness {
 	return &CounterWitness{
 		Summary:  "The filed scenario does not reach the claimed branch.",
 		Evidence: "The declared entry point exits before the branch is evaluated.",
-	}
-}
-
-func validAutoApplyPolicy(productionCap int, testCap int) ReviewPolicy {
-	return ReviewPolicy{
-		SchemaVersion:                  ReviewPolicyV3,
-		PolicyID:                       "policy-1",
-		ScopePolicy:                    ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-		CapRelease: &CapReleaseRecord{
-			Unit:                 "lines",
-			ProductionCap:        productionCap,
-			TestCap:              testCap,
-			Basis:                CapReleaseBasisOwnerJudgment,
-			Rationale:            "Test policy cap release.",
-			Actor:                "owner",
-			PolicyDigest:         testDigest("policy"),
-			DecisionRulesVersion: DecisionRulesVersion,
-			CharterHash:          testDigest("charter"),
-		},
 	}
 }
 

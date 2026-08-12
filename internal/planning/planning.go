@@ -22,7 +22,6 @@ const (
 	MaxBatchFindings              = 8
 
 	CodeMissingFrozenCharter       = "planning_missing_frozen_charter"
-	CodeInvalidReviewPolicy        = "planning_invalid_review_policy"
 	CodeMixedCharter               = "planning_mixed_charter"
 	CodeMixedArtifact              = "planning_mixed_artifact"
 	CodeSnapshotArtifactMismatch   = "planning_snapshot_artifact_mismatch"
@@ -54,7 +53,6 @@ type Options struct {
 	RoleOutputs      []RoleOutputInput
 	StateDir         string
 	ConsumerIdentity map[string]any
-	Policy           contracts.ReviewPolicy
 	Preflight        PreflightBinding
 	ChangeSurface    ChangeSurfaceInput
 }
@@ -195,23 +193,9 @@ func Run(options Options) (*Result, error) {
 	if len(options.RoleOutputs) == 0 {
 		return nil, diag.New(CodeMissingRoleOutput, "planning requires at least one role-output document.")
 	}
-	policy := options.Policy
-	if policy.SchemaVersion == "" {
-		policy = contracts.DefaultReviewPolicy()
-	}
-	if diagnostics := contracts.ValidateReviewPolicy(policy, nil).Diagnostics; len(diagnostics) > 0 {
-		return nil, diag.New(CodeInvalidReviewPolicy, "planning review policy is invalid.", diag.WithDetails(firstDiagnosticDetails(diagnostics)))
-	}
-	scopePolicy := contracts.EffectiveScopePolicy(policy)
-	if scopePolicy == contracts.ScopePolicyDeltaObligating {
-		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
-			return nil, diag.New(CodeInvalidReviewPolicy, "delta_obligating scope policy requires review-policy-v3.", diag.WithDetail("actual", policy.SchemaVersion), diag.WithDetail("expected", contracts.ReviewPolicyV3))
-		}
-	}
-
 	result := &Result{}
 	preflightSnapshotDigest := strings.TrimSpace(options.Preflight.SnapshotDigest)
-	changeSurface, changeSurfaceDigest, baselinePass, err := planChangeSurface(options.ChangeSurface, scopePolicy, preflightSnapshotDigest)
+	changeSurface, changeSurfaceDigest, baselinePass, scopePolicy, err := planChangeSurface(options.ChangeSurface, preflightSnapshotDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +313,7 @@ func Run(options Options) (*Result, error) {
 				})
 				continue
 			}
-			if scopePolicy == contracts.ScopePolicyDeltaObligating && changeSurface != nil && !contracts.FindingInChangeSurface(finding, *changeSurface) {
+			if scopePolicy == changesurface.ScopePolicyDeltaObligating && changeSurface != nil && !contracts.FindingInChangeSurface(finding, *changeSurface) {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
 					Role:                   document.Role,
 					FindingID:              finding.ID,
@@ -426,11 +410,11 @@ func WriteState(stateDir string, result *Result) error {
 	return writeCanonicalFile(filepath.Join(stateDir, "verification", "index.skeleton.json"), result.ManifestSkeleton)
 }
 
-func planChangeSurface(input ChangeSurfaceInput, scopePolicy string, passArtifactDigest string) (*changesurface.Document, string, *changesurface.BaselinePass, error) {
+func planChangeSurface(input ChangeSurfaceInput, passArtifactDigest string) (*changesurface.Document, string, *changesurface.BaselinePass, string, error) {
 	hasBase := input.BaseManifest != nil
 	hasHead := input.HeadManifest != nil
 	if hasBase != hasHead {
-		return nil, "", nil, diag.New(
+		return nil, "", nil, "", diag.New(
 			CodeMissingChangeSurface,
 			"change surface derivation requires both -base-manifest and -head-manifest.",
 			diag.WithDetail("base_manifest", hasBase),
@@ -438,35 +422,22 @@ func planChangeSurface(input ChangeSurfaceInput, scopePolicy string, passArtifac
 		)
 	}
 	if input.BaselinePass && hasBase {
-		return nil, "", nil, diag.New(CodeBaselineSurfaceConflict, "baseline_pass cannot be combined with derived change surface manifests.")
+		return nil, "", nil, "", diag.New(CodeBaselineSurfaceConflict, "baseline_pass cannot be combined with derived change surface manifests.")
 	}
 	if hasBase && hasHead {
 		surface, surfaceDigest, err := changesurface.Derive(*input.BaseManifest, *input.HeadManifest, passArtifactDigest)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, "", err
 		}
-		return &surface, surfaceDigest, nil, nil
-	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating {
-		if input.BaselinePass {
-			return nil, "", &changesurface.BaselinePass{
-				Declared: true,
-				Reason:   changesurface.BaselinePassReasonExplicit,
-			}, nil
-		}
-		return nil, "", nil, diag.New(
-			CodeMissingChangeSurface,
-			"delta_obligating scope policy requires derived change surface manifests or an explicit baseline_pass marker.",
-			diag.WithDetail("scope_policy", scopePolicy),
-		)
+		return &surface, surfaceDigest, nil, changesurface.ScopePolicyDeltaObligating, nil
 	}
 	if input.BaselinePass {
 		return nil, "", &changesurface.BaselinePass{
 			Declared: true,
 			Reason:   changesurface.BaselinePassReasonExplicit,
-		}, nil
+		}, changesurface.ScopePolicyWholeTree, nil
 	}
-	return nil, "", nil, nil
+	return nil, "", nil, changesurface.ScopePolicyWholeTree, nil
 }
 
 func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contracts.Finding, frozen *charter.FrozenCharter) ([]diag.Diagnostic, string) {
