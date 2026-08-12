@@ -13,7 +13,9 @@ Use the shipped relay integration bundle at `skill/bundle/relay-integration-bund
 
 ## Finder Guidance
 
-All finder output is a `review-role-output-v3` role-output document. Findings must name Charter goals; existing code, tests, defenses, and review machinery create no goals.
+All new finder output is a `review-role-output-v4` role-output document. Findings must name Charter goals; existing code, tests, defenses, and review machinery create no goals.
+
+Every finding must carry base/head attribution: `introduced` when the stack created it, `worsened` when the stack made it worse, `pre-existing` when it was already present at base, or `unattributed` when the finder could not establish it. Only introduced and worsened findings can score the stack; pre-existing and unattributed findings remain visible as advisory caller decisions.
 
 Defect finders file defect findings with defect witnesses. When an Operational Envelope is present, include scope anchors. Constructed and executable defect witnesses must include an entry point and a non-empty reachability chain; argued defect witnesses are exempt from the chain.
 

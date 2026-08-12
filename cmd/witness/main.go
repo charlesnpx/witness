@@ -285,7 +285,7 @@ func runRoleOutputInit(args []string) error {
 		)
 	}
 	document := contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV3,
+		SchemaVersion:  contracts.RoleOutputV4,
 		Role:           *role,
 		CharterHash:    digest.RawBytes(nil),
 		ArtifactDigest: digest.RawBytes(nil),
@@ -949,6 +949,8 @@ func adjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 
 func findingPayloadForLedger(finding adjudicate.FindingVerdict) map[string]any {
 	return map[string]any{
+		"attribution": finding.Attribution,
+		"reasons":     append([]string(nil), finding.Reasons...),
 		"estimated_delta": map[string]any{
 			"production": deltaEstimatePayload(finding.EstimatedDelta.Production),
 			"test":       deltaEstimatePayload(finding.EstimatedDelta.Test),

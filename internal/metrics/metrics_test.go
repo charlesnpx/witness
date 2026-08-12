@@ -142,7 +142,7 @@ func TestMetricsRetainsAuthenticatedCodexPendingStratumAfterRelayStatusSanitizat
 	frozen := metricsPlanningTestFrozenCharter(t)
 	artifactDigest := testDigest("artifact")
 	roleOutput := contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV3,
+		SchemaVersion:  contracts.RoleOutputV4,
 		Role:           contracts.RoleDefect,
 		CharterHash:    frozen.CharterHash,
 		ArtifactDigest: artifactDigest,
@@ -542,6 +542,7 @@ func metricsPlanningTestFinding(id string) contracts.Finding {
 		Title:           "Finding " + id,
 		CharterGoalIDs:  []string{"goal-cli"},
 		ClaimedSeverity: contracts.SeverityHigh,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		ScopeAnchors:    []contracts.ScopeAnchor{{Dimension: charter.DimensionEntryPoints, EntryID: "cli"}},
 		Witness: contracts.Witness{
 			Kind:     contracts.WitnessKindDefect,

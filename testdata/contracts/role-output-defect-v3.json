@@ -1,5 +1,5 @@
 {
-  "schema_version": "review-role-output-v4",
+  "schema_version": "review-role-output-v3",
   "role": "defect",
   "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -19,7 +19,6 @@
       "title": "CLI rejects a declared valid input",
       "charter_goal_ids": ["goal-cli"],
       "claimed_severity": "high",
-      "attribution": "introduced",
       "scope_anchors": [
         {
           "dimension": "entry_points",

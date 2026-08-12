@@ -1,5 +1,5 @@
 {
-  "schema_version": "review-role-output-v3",
+  "schema_version": "review-role-output-v4",
   "role": "economy",
   "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -19,6 +19,7 @@
       "title": "Remove duplicate normalization branch",
       "charter_goal_ids": ["goal-cli"],
       "claimed_severity": "medium",
+      "attribution": "worsened",
       "witness": {
         "kind": "equivalence",
         "strength": "argued",

@@ -18,6 +18,7 @@ func TestRoleOutputValidFixtures(t *testing.T) {
 	frozen := validFrozenCharter(t)
 	for _, name := range []string{
 		"role-output-defect.json",
+		"role-output-defect-v3.json",
 		"role-output-economy.json",
 		"role-output-goal-fit.json",
 	} {
@@ -50,6 +51,55 @@ func TestRoleOutputDocumentLevelWiring(t *testing.T) {
 		diagnostics := ValidateRoleOutput(document, frozen)
 		assertDiagnosticCode(t, diagnostics, CodeMissingCharterTrace)
 	})
+}
+
+func TestRoleOutputV4RequiresKnownFindingAttribution(t *testing.T) {
+	frozen := validFrozenCharter(t)
+	for _, attribution := range []string{
+		FindingAttributionIntroduced,
+		FindingAttributionWorsened,
+		FindingAttributionPreExisting,
+		FindingAttributionUnattributed,
+	} {
+		t.Run(attribution, func(t *testing.T) {
+			document := readRoleFixture(t, "role-output-defect.json")
+			document.CharterHash = frozen.CharterHash
+			document.Findings[0].Attribution = attribution
+			if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
+				t.Fatalf("ValidateRoleOutput diagnostics = %#v", diagnostics)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name        string
+		attribution string
+	}{
+		{name: "missing", attribution: ""},
+		{name: "unknown", attribution: "unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := readRoleFixture(t, "role-output-defect.json")
+			document.CharterHash = frozen.CharterHash
+			document.Findings[0].Attribution = test.attribution
+			assertDiagnosticCode(t, ValidateRoleOutput(document, frozen), CodeInvalidRoleOutput)
+		})
+	}
+}
+
+func TestRoleOutputV3CompatibilityTreatsFindingsAsUnattributed(t *testing.T) {
+	frozen := validFrozenCharter(t)
+	document := readRoleFixture(t, "role-output-defect-v3.json")
+	if document.SchemaVersion != RoleOutputV3 {
+		t.Fatalf("schema_version = %q, want %q", document.SchemaVersion, RoleOutputV3)
+	}
+	document.CharterHash = frozen.CharterHash
+	if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
+		t.Fatalf("v3 ValidateRoleOutput diagnostics = %#v", diagnostics)
+	}
+	if got := document.EffectiveFindingAttribution(document.Findings[0]); got != FindingAttributionUnattributed {
+		t.Fatalf("v3 effective attribution = %q, want %q", got, FindingAttributionUnattributed)
+	}
 }
 
 func TestVerificationBatchRejectsNarrativeAndDigestMismatch(t *testing.T) {

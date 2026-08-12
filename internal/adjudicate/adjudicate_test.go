@@ -522,6 +522,112 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 	}
 }
 
+func TestAdjudicationFindingAttributionGate(t *testing.T) {
+	frozen := testFrozenCharter(t)
+	artifactDigest := testDigest("artifact")
+	introduced := defectFinding("introduced", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	introduced.Attribution = contracts.FindingAttributionIntroduced
+	worsened := defectFinding("worsened", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	worsened.Attribution = contracts.FindingAttributionWorsened
+	preExisting := defectExecutableFinding("pre-existing", contracts.SeverityCritical, executableCommand("stdout_contains=ok"))
+	preExisting.Attribution = contracts.FindingAttributionPreExisting
+	unattributed := defectFinding("unattributed", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	unattributed.Attribution = contracts.FindingAttributionUnattributed
+	roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{introduced, worsened, preExisting, unattributed})
+	roleOutput.SchemaVersion = contracts.RoleOutputV4
+	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{
+		survivedVerdict(t, introduced),
+		survivedVerdict(t, worsened),
+		survivedVerdict(t, preExisting),
+		survivedVerdict(t, unattributed),
+	}, nil)
+
+	result := runAdjudication(t, runInput{
+		frozen:      frozen,
+		roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		manifest:    manifest,
+	})
+	byID := findingsByID(result)
+	for _, id := range []string{"introduced", "worsened"} {
+		assertDisposition(t, byID[id], contracts.DispositionAdmitted)
+		if byID[id].Attribution != id {
+			t.Fatalf("%s attribution = %q, want %q", id, byID[id].Attribution, id)
+		}
+	}
+	assertDisposition(t, byID["pre-existing"], contracts.DispositionAdvisory)
+	assertApplicationClass(t, byID["pre-existing"], contracts.ApplicationClassCallerDecision)
+	assertHasReason(t, byID["pre-existing"], ReasonPreExisting)
+	assertSeverity(t, byID["pre-existing"], "")
+	if byID["pre-existing"].Execution != nil || byID["pre-existing"].Relay != nil {
+		t.Fatalf("pre-existing finding consumed verification: %#v", byID["pre-existing"])
+	}
+	assertDisposition(t, byID["unattributed"], contracts.DispositionAdvisory)
+	assertApplicationClass(t, byID["unattributed"], contracts.ApplicationClassCallerDecision)
+	assertHasReason(t, byID["unattributed"], ReasonAttributionUnattributed)
+	assertSeverity(t, byID["unattributed"], "")
+	if byID["unattributed"].Relay != nil {
+		t.Fatalf("unattributed finding consumed relay verification: %#v", byID["unattributed"])
+	}
+	if result.Summary.Admitted != 2 || result.Summary.Advisory != 2 || result.Summary.CallerDecision != 4 || result.Summary.AutomaticCandidate != 0 {
+		t.Fatalf("summary = %#v, want two admitted, two attribution advisories, and no automatic candidates", result.Summary)
+	}
+
+	canonical, err := contracts.CanonicalBytes(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again := runAdjudication(t, runInput{
+		frozen:      frozen,
+		roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		manifest:    manifest,
+	})
+	againCanonical, err := contracts.CanonicalBytes(again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(canonical, againCanonical) {
+		t.Fatalf("identical inputs produced different result bytes:\nfirst=%s\nsecond=%s", canonical, againCanonical)
+	}
+}
+
+func TestAdjudicationV3FindingIsUnattributedAndAttributionPrecedesDeltaScope(t *testing.T) {
+	frozen := testFrozenCharter(t)
+	baseManifest, headManifest, artifactDigest := adjudicationDeltaManifests(t)
+	finding := defectFinding("legacy", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/other.go"}}
+	roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
+	roleOutput.SchemaVersion = contracts.RoleOutputV3
+	roleOutput.Findings[0].Attribution = ""
+	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil)
+	surface, surfaceDigest, err := changesurface.Derive(baseManifest, headManifest, artifactDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ChangeSurface = &surface
+	manifest.ChangeSurfaceDigest = surfaceDigest
+	policyDocument := contracts.DefaultReviewPolicy()
+	policyDocument.PolicyID = "delta-policy"
+	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
+
+	result := runAdjudication(t, runInput{
+		frozen:       frozen,
+		roleOutputs:  []RoleOutputInput{{Path: "legacy.json", Document: roleOutput}},
+		manifest:     manifest,
+		baseManifest: &baseManifest,
+		headManifest: &headManifest,
+		policy:       policyDocument,
+	})
+	got := onlyFinding(t, result)
+	if got.Attribution != contracts.FindingAttributionUnattributed {
+		t.Fatalf("v3 attribution = %q, want %q", got.Attribution, contracts.FindingAttributionUnattributed)
+	}
+	assertDisposition(t, got, contracts.DispositionAdvisory)
+	assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
+	assertHasReason(t, got, ReasonAttributionUnattributed)
+	assertMissingReason(t, got, ReasonOutOfDelta)
+}
+
 func TestAdjudicationRederivesDeclaredChangeSurface(t *testing.T) {
 	frozen := testFrozenCharter(t)
 	baseManifest, headManifest, artifactDigest := adjudicationDeltaManifests(t)
@@ -861,7 +967,7 @@ func testFrozenCharter(t *testing.T) charter.FrozenCharter {
 
 func roleOutputFor(frozen charter.FrozenCharter, role string, artifactDigest string, findings []contracts.Finding) contracts.RoleOutputDocument {
 	return contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV3,
+		SchemaVersion:  contracts.RoleOutputV4,
 		Role:           role,
 		CharterHash:    frozen.CharterHash,
 		ArtifactDigest: artifactDigest,
@@ -918,6 +1024,7 @@ func defectFinding(id string, strength string, severity string) contracts.Findin
 		Title:           "Defect " + id,
 		CharterGoalIDs:  []string{"goal-1"},
 		ClaimedSeverity: severity,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		ScopeAnchors:    []contracts.ScopeAnchor{{Dimension: charter.DimensionEntryPoints, EntryID: "cli"}},
 		Witness: contracts.Witness{
 			Kind:     contracts.WitnessKindDefect,
@@ -965,6 +1072,7 @@ func economyFinding(id string, severity string) contracts.Finding {
 		Title:           "Economy " + id,
 		CharterGoalIDs:  []string{"goal-1"},
 		ClaimedSeverity: severity,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		Witness: contracts.Witness{
 			Kind:     contracts.WitnessKindEquivalence,
 			Strength: contracts.WitnessStrengthConstructed,

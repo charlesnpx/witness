@@ -15,6 +15,7 @@ import (
 
 const (
 	RoleOutputV3                       = "review-role-output-v3"
+	RoleOutputV4                       = "review-role-output-v4"
 	VerificationBatchV2                = "review-verification-batch-v2"
 	RelayWitnessVerdictsV2             = "relay-witness-verdicts-v2"
 	VerificationManifestV3             = "review-verification-manifest-v3"
@@ -77,6 +78,12 @@ const (
 	ScopePolicyDeltaObligating         = "delta_obligating"
 	ScopePolicyWholeTree               = "whole_tree"
 	ReasonOutOfDelta                   = "out_of_delta"
+	FindingAttributionIntroduced       = "introduced"
+	FindingAttributionWorsened         = "worsened"
+	FindingAttributionPreExisting      = "pre-existing"
+	FindingAttributionUnattributed     = "unattributed"
+	ReasonPreExisting                  = "pre_existing"
+	ReasonAttributionUnattributed      = "attribution_unattributed"
 )
 
 const (

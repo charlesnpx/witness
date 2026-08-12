@@ -20,7 +20,8 @@ import (
 
 const (
 	ResultSchemaVersionV1 = "witness-adjudication-run-result-v1"
-	ResultSchemaVersion   = "witness-adjudication-run-result-v2"
+	ResultSchemaVersionV2 = "witness-adjudication-run-result-v2"
+	ResultSchemaVersion   = "witness-adjudication-run-result-v3"
 
 	CodeInvalidInput              = "adjudicate_invalid_input"
 	CodeInvalidFrozenCharter      = "adjudicate_invalid_frozen_charter"
@@ -49,6 +50,8 @@ const (
 	ReasonRelayBroken                  = "relay_broken"
 	ReasonWitnessWeakenedBelowFloor    = "witness_weakened_below_floor"
 	ReasonOutOfDelta                   = contracts.ReasonOutOfDelta
+	ReasonPreExisting                  = contracts.ReasonPreExisting
+	ReasonAttributionUnattributed      = contracts.ReasonAttributionUnattributed
 )
 
 type Options struct {
@@ -152,16 +155,15 @@ func (summary *Summary) UnmarshalJSON(data []byte) error {
 type FindingVerdict struct {
 	FindingID string `json:"finding_id"`
 	// FindingKey and EstimatedDelta are in-memory transport only (populated in
-	// adjudicateFinding, consumed by cmd/witness when emitting `finding` ledger
-	// events). They are json:"-" so they do NOT enter the witness-adjudication-run-
-	// result-v1 wire schema or the result SemanticDigest: adding them would break
-	// strict decoding by older binaries and change the run digest (ContainsRunDigest
-	// duplicate detection). finding_digest already binds the source finding (incl.
-	// recurrence and estimated delta).
+	// adjudicateFinding and consumed by ledger emission). Attribution is persisted
+	// in v3 results because it is required to explain whether stack scoring was
+	// blocked. finding_digest already binds the source finding, including its
+	// attribution, recurrence, and estimated delta.
 	FindingKey         string                       `json:"-"`
 	Role               string                       `json:"role"`
 	Kind               string                       `json:"kind"`
 	Title              string                       `json:"title"`
+	Attribution        string                       `json:"attribution"`
 	SourceRoleOutput   string                       `json:"source_role_output,omitempty"`
 	FindingDigest      string                       `json:"finding_digest,omitempty"`
 	WitnessDigest      string                       `json:"witness_digest,omitempty"`
@@ -850,6 +852,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		Role:             item.role,
 		Kind:             finding.Kind,
 		Title:            finding.Title,
+		Attribution:      item.document.EffectiveFindingAttribution(finding),
 		SourceRoleOutput: item.sourceRoleOutput,
 		FindingDigest:    item.findingDigest,
 		WitnessDigest:    item.witnessDigest,
@@ -872,6 +875,23 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		verdict.Disposition = excluded.Disposition
 		verdict.ApplicationClass = excluded.ApplicationClass
 		verdict.Reasons = appendReason(verdict.Reasons, excluded.Reason)
+		return verdict
+	}
+
+	// Attribution is evaluated after a manifest exclusion (which is already a
+	// verified, explicit operator decision) and before change-surface scope. This
+	// gives a finding one deterministic advisory reason and avoids consuming
+	// receipt or relay verification for a finding that cannot score the stack.
+	switch verdict.Attribution {
+	case contracts.FindingAttributionPreExisting:
+		verdict.Disposition = contracts.DispositionAdvisory
+		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
+		verdict.Reasons = appendReason(verdict.Reasons, ReasonPreExisting)
+		return verdict
+	case contracts.FindingAttributionUnattributed:
+		verdict.Disposition = contracts.DispositionAdvisory
+		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
+		verdict.Reasons = appendReason(verdict.Reasons, ReasonAttributionUnattributed)
 		return verdict
 	}
 

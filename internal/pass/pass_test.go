@@ -3194,6 +3194,7 @@ func economyFindingForTest() contracts.Finding {
 		Title:           "Remove redundant verification branch",
 		CharterGoalIDs:  []string{"goal-1"},
 		ClaimedSeverity: contracts.SeverityMedium,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		Witness: contracts.Witness{
 			Kind:     contracts.WitnessKindEquivalence,
 			Strength: contracts.WitnessStrengthArgued,
@@ -3307,7 +3308,7 @@ func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {
 	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
 	for _, request := range state.Config.RoleOutputs {
 		document := contracts.RoleOutputDocument{
-			SchemaVersion:    contracts.RoleOutputV3,
+			SchemaVersion:    contracts.RoleOutputV4,
 			Role:             request.Role,
 			CharterHash:      frozen.CharterHash,
 			ArtifactDigest:   preflightResult.SnapshotDigest,
@@ -3322,6 +3323,7 @@ func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {
 				Title:           "Defect survives only with relay verification",
 				CharterGoalIDs:  []string{"goal-1"},
 				ClaimedSeverity: contracts.SeverityMedium,
+				Attribution:     contracts.FindingAttributionIntroduced,
 				Witness: contracts.Witness{
 					Kind:     contracts.WitnessKindDefect,
 					Strength: contracts.WitnessStrengthArgued,
@@ -3349,7 +3351,7 @@ func writeRoleOutputsForStateWithScopeAnchor(t *testing.T, stateDir string, path
 	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
 	for _, request := range state.Config.RoleOutputs {
 		document := contracts.RoleOutputDocument{
-			SchemaVersion:    contracts.RoleOutputV3,
+			SchemaVersion:    contracts.RoleOutputV4,
 			Role:             request.Role,
 			CharterHash:      frozen.CharterHash,
 			ArtifactDigest:   preflightResult.SnapshotDigest,
@@ -3364,6 +3366,7 @@ func writeRoleOutputsForStateWithScopeAnchor(t *testing.T, stateDir string, path
 				Title:           "Defect in changed file",
 				CharterGoalIDs:  []string{"goal-1"},
 				ClaimedSeverity: contracts.SeverityMedium,
+				Attribution:     contracts.FindingAttributionIntroduced,
 				ScopeAnchors: []contracts.ScopeAnchor{{
 					Dimension: charter.DimensionInputSurface,
 					Value:     path,
