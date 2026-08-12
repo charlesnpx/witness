@@ -2,6 +2,7 @@ package relayrun
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -30,14 +31,20 @@ const (
 	CodePortableInvalid   = "relayrun_portable_invalid"
 	CodeOutputFailed      = "relayrun_output_failed"
 	CodeInvalidBatchInput = "relayrun_invalid_batch_input"
-	CodeInvalidRunRecord  = "relayrun_invalid_run_record"
+	// CodeNamedInputBudgetExceeded identifies relay named inputs whose raw
+	// bytes exceed the selected integration contract's effective input budget.
+	CodeNamedInputBudgetExceeded = "relayrun_named_input_budget_exceeded"
+	// CodeNamedInputBudgetInvalid identifies a failed prerequisite for deriving
+	// a relay named-input budget before launch.
+	CodeNamedInputBudgetInvalid = "relayrun_named_input_budget_invalid"
+	CodeInvalidRunRecord        = "relayrun_invalid_run_record"
 	// CodeInvalidRunRecordStreamSummary identifies claimed launch stream
 	// summaries that do not match retained launch bytes.
 	CodeInvalidRunRecordStreamSummary = "relayrun_invalid_run_record_stream_summary"
 
-	// RunStatusLaunchFailed marks a relay command that failed before its
-	// process could start. It is the only status that does not consume the
-	// batch's single verification run.
+	// RunStatusLaunchFailed marks a batch rejected before relay launch or a
+	// relay command whose process did not start. It is the only status that
+	// does not consume the batch's single verification run.
 	RunStatusLaunchFailed = "launch_failed"
 
 	ProviderInvokedTrue    = "true"
@@ -52,6 +59,10 @@ type Options struct {
 	IntegrationBundlePath string
 	CharterPath           string
 	ArtifactPaths         []string
+	// NamedInputBudgetBytes overrides every raw named-input limit before relay
+	// launch. A zero value derives each input's limit from the selected
+	// integration-bundle contract.
+	NamedInputBudgetBytes int64
 	// ArtifactDigests aligns with ArtifactPaths and retains one digest for
 	// every artifact supplied to relay. ArtifactDigest remains the legacy
 	// single-artifact planned snapshot digest.
@@ -112,10 +123,11 @@ type RunRecord struct {
 	InputBindings []string      `json:"input_bindings"`
 	RelayLaunch   *LaunchRecord `json:"relay_launch,omitempty"`
 	// ProviderInvoked is one of true, false, or unknown. False is assigned
-	// only when the relay process failed to start before a child ran.
+	// only when no relay process started, including local pre-launch rejection.
 	ProviderInvoked string `json:"provider_invoked"`
 	// ConsumesBatch is false only for provider_invoked=false launch_failed
-	// records; true and unknown remain fail-closed and consume the batch.
+	// records, including local pre-launch rejection; true and unknown remain
+	// fail-closed and consume the batch.
 	ConsumesBatch        bool                                    `json:"consumes_batch"`
 	SessionDir           string                                  `json:"session_dir,omitempty"`
 	PortableExportDir    string                                  `json:"portable_export_dir,omitempty"`
@@ -142,12 +154,12 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 		}
 		record.InputBindings = recordedInputBindings(options, batch)
 		if strings.TrimSpace(batch.Path) == "" {
-			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeMissingBatchPath, "relay verification requires a persisted verification-batch path.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
+			rejectBeforeLaunch(&record, launchCWD, diag.FromError(diag.New(CodeMissingBatchPath, "relay verification requires a persisted verification-batch path.", diag.WithDetail("batch_id", batch.Plan.BatchID))))
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		if diagnostics := validatePreLaunchBatchInput(batch, options); len(diagnostics) > 0 {
-			record.Diagnostics = append(record.Diagnostics, diagnostics...)
+		if diagnostics := validatePreLaunchBatchInput(batch, options, record.RecipeID); len(diagnostics) > 0 {
+			rejectBeforeLaunch(&record, launchCWD, diagnostics...)
 			result.Runs = append(result.Runs, record)
 			continue
 		}
@@ -228,6 +240,23 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 		}
 	}
 	return result, nil
+}
+
+// rejectBeforeLaunch records a local rejection without invoking relay. The
+// empty launch marker means no process started; downstream consumers use the
+// existing launch_failed tuple to keep the batch available for a corrected
+// later launch.
+func rejectBeforeLaunch(record *RunRecord, workingDirectory string, diagnostics ...diag.Diagnostic) {
+	record.Status = RunStatusLaunchFailed
+	record.ProviderInvoked = ProviderInvokedFalse
+	record.ConsumesBatch = false
+	record.RelayLaunch = &LaunchRecord{
+		Argv:             []string{},
+		WorkingDirectory: workingDirectory,
+		ExitCode:         -1,
+		StartFailed:      true,
+	}
+	record.Diagnostics = append(record.Diagnostics, diagnostics...)
 }
 
 // ReadRunRecordsBytes accepts one v2 run record or a v2 runs index. The
@@ -567,7 +596,7 @@ func nonEmptyRelayArtifact(value any) bool {
 	}
 }
 
-func validatePreLaunchBatchInput(batch BatchInput, options Options) []diag.Diagnostic {
+func validatePreLaunchBatchInput(batch BatchInput, options Options, recipeID string) []diag.Diagnostic {
 	data, err := os.ReadFile(batch.Path)
 	if err != nil {
 		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification batch input could not be read before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", batch.Path)))}
@@ -608,8 +637,121 @@ func validatePreLaunchBatchInput(batch BatchInput, options Options) []diag.Diagn
 	diagnostics = append(diagnostics, validatePreLaunchBatchDocument(batch)...)
 	diagnostics = append(diagnostics, validatePreLaunchCharter(batch, options.CharterPath)...)
 	diagnostics = append(diagnostics, validatePreLaunchArtifacts(batch, options.ArtifactPaths)...)
-	diagnostics = append(diagnostics, validatePreLaunchIntegrationBundle(batch, options.IntegrationBundlePath)...)
+	if len(diagnostics) > 0 {
+		return diagnostics
+	}
+	bundle, bundleDiagnostics := validatePreLaunchIntegrationBundle(batch, options.IntegrationBundlePath)
+	if len(bundleDiagnostics) > 0 {
+		return bundleDiagnostics
+	}
+	return validateNamedInputBudget(batch, options, recipeID, bundle)
+}
+
+type namedInput struct {
+	role string
+	path string
+}
+
+// namedInputsForLaunch returns the actual relay named inputs in fixed launch
+// order: charter, findings, then artifacts in caller order. The integration
+// bundle is supplied to a separate relay flag, not through --input.
+func namedInputsForLaunch(batch BatchInput, options Options) []namedInput {
+	inputs := make([]namedInput, 0, 2+len(options.ArtifactPaths))
+	if path := strings.TrimSpace(options.CharterPath); path != "" {
+		inputs = append(inputs, namedInput{role: "charter", path: path})
+	}
+	inputs = append(inputs, namedInput{role: "findings", path: batch.Path})
+	for _, path := range options.ArtifactPaths {
+		if path = strings.TrimSpace(path); path != "" {
+			inputs = append(inputs, namedInput{role: "artifact", path: path})
+		}
+	}
+	return inputs
+}
+
+type integrationBundle struct {
+	Contracts map[string]integrationContract
+}
+
+type integrationContract struct {
+	Inputs map[string]integrationInput
+}
+
+type integrationInput struct {
+	MaxBytes int64
+}
+
+func validateNamedInputBudget(batch BatchInput, options Options, recipeID string, bundle integrationBundle) []diag.Diagnostic {
+	contractID, ok := integrationContractID(recipeID)
+	if !ok {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeNamedInputBudgetInvalid,
+			"relay verification recipe does not select an integration-bundle contract for named-input budgets.",
+			diag.WithDetail("recipe_id", recipeID),
+		))}
+	}
+	contract, ok := bundle.Contracts[contractID]
+	if !ok {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeNamedInputBudgetInvalid,
+			"relay verification integration bundle is missing the contract required for named-input budgets.",
+			diag.WithDetail("recipe_id", recipeID),
+			diag.WithDetail("contract_id", contractID),
+			diag.WithDetail("path", options.IntegrationBundlePath),
+		))}
+	}
+	inputs := namedInputsForLaunch(batch, options)
+	var diagnostics []diag.Diagnostic
+	for _, input := range inputs {
+		limit, limitDiagnostics := namedInputLimit(contractID, input.role, options, contract)
+		if len(limitDiagnostics) > 0 {
+			diagnostics = append(diagnostics, limitDiagnostics...)
+			continue
+		}
+		info, err := os.Stat(input.path)
+		if err != nil {
+			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(
+				err,
+				CodeNamedInputBudgetInvalid,
+				"relay named input could not be statted before budget validation.",
+				diag.WithDetail("role", input.role),
+				diag.WithDetail("path", input.path),
+				diag.WithDetail("contract_id", contractID),
+			)))
+			continue
+		}
+		actual := info.Size()
+		if actual <= limit {
+			continue
+		}
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeNamedInputBudgetExceeded,
+			"relay named input exceeds the raw-byte budget before launch.",
+			diag.WithDetail("role", input.role),
+			diag.WithDetail("path", input.path),
+			diag.WithDetail("actual_bytes", actual),
+			diag.WithDetail("limit_bytes", limit),
+			diag.WithDetail("contract_id", contractID),
+		)))
+	}
 	return diagnostics
+}
+
+func namedInputLimit(contractID string, role string, options Options, contract integrationContract) (int64, []diag.Diagnostic) {
+	if options.NamedInputBudgetBytes > 0 {
+		return options.NamedInputBudgetBytes, nil
+	}
+	input, ok := contract.Inputs[role]
+	if !ok || input.MaxBytes <= 0 {
+		return 0, []diag.Diagnostic{diag.FromError(diag.New(
+			CodeNamedInputBudgetInvalid,
+			"relay verification integration bundle is missing a positive named-input max_bytes budget.",
+			diag.WithDetail("role", role),
+			diag.WithDetail("contract_id", contractID),
+			diag.WithDetail("path", options.IntegrationBundlePath),
+		))}
+	}
+	return input.MaxBytes, nil
 }
 
 func validatePreLaunchBatchDocument(batch BatchInput) []diag.Diagnostic {
@@ -822,41 +964,117 @@ func frozenSnapshotManifestDigest(data []byte) (string, bool) {
 	return manifestDigest, true
 }
 
-func validatePreLaunchIntegrationBundle(batch BatchInput, bundlePath string) []diag.Diagnostic {
+func validatePreLaunchIntegrationBundle(batch BatchInput, bundlePath string) (integrationBundle, []diag.Diagnostic) {
 	expected := strings.TrimSpace(batch.Plan.IntegrationBundleDigest)
-	if expected == "" {
-		return nil
-	}
 	if strings.TrimSpace(bundlePath) == "" {
-		return []diag.Diagnostic{diag.FromError(diag.New(
+		return integrationBundle{}, []diag.Diagnostic{diag.FromError(diag.New(
 			CodeInvalidBatchInput,
-			"relay verification requires the planned integration bundle before launch.",
+			"relay verification requires an integration bundle before launch.",
 			diag.WithDetail("batch_id", batch.Plan.BatchID),
 		))}
 	}
 	data, err := os.ReadFile(bundlePath)
 	if err != nil {
-		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle could not be read before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
+		return integrationBundle{}, []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle could not be read before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
 	}
 	payload, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
 	if err != nil {
-		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle is not strict JSON.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
+		return integrationBundle{}, []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle is not strict JSON.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
 	}
-	actual, err := digest.SemanticJSON(payload)
-	if err != nil {
-		return []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle digest could not be computed.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
+	if expected != "" {
+		actual, err := digest.SemanticJSON(payload)
+		if err != nil {
+			return integrationBundle{}, []diag.Diagnostic{diag.FromError(diag.Wrap(err, CodeInvalidBatchInput, "relay verification integration bundle digest could not be computed.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("path", bundlePath)))}
+		}
+		if actual != expected {
+			return integrationBundle{}, []diag.Diagnostic{diag.FromError(diag.New(
+				CodeInvalidBatchInput,
+				"relay verification integration bundle does not match the planned bundle digest.",
+				diag.WithDetail("batch_id", batch.Plan.BatchID),
+				diag.WithDetail("path", bundlePath),
+				diag.WithDetail("actual_digest", actual),
+				diag.WithDetail("expected_digest", expected),
+			))}
+		}
 	}
-	if actual != expected {
-		return []diag.Diagnostic{diag.FromError(diag.New(
-			CodeInvalidBatchInput,
-			"relay verification integration bundle does not match the planned bundle digest.",
-			diag.WithDetail("batch_id", batch.Plan.BatchID),
-			diag.WithDetail("path", bundlePath),
-			diag.WithDetail("actual_digest", actual),
-			diag.WithDetail("expected_digest", expected),
-		))}
+	bundle, diagnostics := decodeIntegrationBundle(payload)
+	return bundle, prefixNamedInputBudgetDiagnostics(diagnostics, batch.Plan.BatchID, bundlePath)
+}
+
+func decodeIntegrationBundle(payload any) (integrationBundle, []diag.Diagnostic) {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return integrationBundle{}, []diag.Diagnostic{namedInputBudgetInvalid("integration bundle must be a JSON object.")}
 	}
-	return nil
+	contractsValue, ok := object["contracts"]
+	if !ok {
+		return integrationBundle{}, []diag.Diagnostic{namedInputBudgetInvalid("integration bundle must declare contracts.")}
+	}
+	contractsObject, ok := contractsValue.(map[string]any)
+	if !ok {
+		return integrationBundle{}, []diag.Diagnostic{namedInputBudgetInvalid("integration bundle contracts must be a JSON object.")}
+	}
+	bundle := integrationBundle{Contracts: make(map[string]integrationContract, len(contractsObject))}
+	for contractID, contractValue := range contractsObject {
+		contractObject, ok := contractValue.(map[string]any)
+		if !ok {
+			return integrationBundle{}, []diag.Diagnostic{namedInputBudgetInvalid("integration bundle contract must be a JSON object.", diag.WithDetail("contract_id", contractID))}
+		}
+		inputsValue, ok := contractObject["inputs"]
+		if !ok {
+			bundle.Contracts[contractID] = integrationContract{}
+			continue
+		}
+		inputsObject, ok := inputsValue.(map[string]any)
+		if !ok {
+			return integrationBundle{}, []diag.Diagnostic{namedInputBudgetInvalid("integration bundle contract inputs must be a JSON object.", diag.WithDetail("contract_id", contractID))}
+		}
+		contract := integrationContract{Inputs: make(map[string]integrationInput, len(inputsObject))}
+		for role, inputValue := range inputsObject {
+			inputObject, ok := inputValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			maxBytes, err := integrationInputMaxBytes(inputObject["max_bytes"])
+			if err == nil {
+				contract.Inputs[role] = integrationInput{MaxBytes: maxBytes}
+			}
+		}
+		bundle.Contracts[contractID] = contract
+	}
+	return bundle, nil
+}
+
+func integrationInputMaxBytes(value any) (int64, error) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, errors.New("max_bytes must be a JSON number")
+	}
+	return strictjson.ParseInt64JSON([]byte(number.String()))
+}
+
+func namedInputBudgetInvalid(message string, options ...diag.Option) diag.Diagnostic {
+	return diag.FromError(diag.New(CodeNamedInputBudgetInvalid, message, options...))
+}
+
+func prefixNamedInputBudgetDiagnostics(diagnostics []diag.Diagnostic, batchID string, path string) []diag.Diagnostic {
+	for index := range diagnostics {
+		if diagnostics[index].Details == nil {
+			diagnostics[index].Details = map[string]any{}
+		}
+		diagnostics[index].Details["batch_id"] = batchID
+		diagnostics[index].Details["path"] = path
+	}
+	return diagnostics
+}
+
+func integrationContractID(recipeID string) (string, bool) {
+	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
+		if requirement.RecipeID == recipeID {
+			return requirement.ContractID, true
+		}
+	}
+	return "", false
 }
 
 func RecipeID(taskShape string, backend string) string {

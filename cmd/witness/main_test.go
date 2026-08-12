@@ -3351,6 +3351,9 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 			"retention_scope": "test",
 		}
 	}
+	if strings.HasPrefix(name, "bundle") {
+		value = validCLIIntegrationBundle()
+	}
 	if err := writeCanonical(path, value); err != nil {
 		t.Fatal(err)
 	}
@@ -3447,7 +3450,6 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 	t.Helper()
 	suffix := strings.TrimPrefix(compatibilityName, "compatibility")
 	capabilitiesName := "capabilities" + suffix
-	bundleName := "bundle" + suffix
 	capabilities := map[string]bool{}
 	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
 		capabilities[requirement.Key] = true
@@ -3489,7 +3491,7 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 		DigestProfile:           digest.Profile,
 		Capabilities:            capabilities,
 		CapabilitiesDigest:      cliWrittenCanonicalDigest(t, map[string]any{"name": capabilitiesName}),
-		IntegrationBundleDigest: cliSemanticDigest(t, map[string]any{"name": bundleName}),
+		IntegrationBundleDigest: cliSemanticDigest(t, validCLIIntegrationBundle()),
 		SelectedContracts:       selectedContracts,
 		RecipePlans:             recipePlans,
 		CompileReports:          compileReports,
@@ -3498,6 +3500,57 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 			{Backend: "claude", Status: "available"},
 		},
 		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
+	}
+}
+
+func validCLIIntegrationBundle() map[string]any {
+	return map[string]any{
+		"schema_version": "relay-integration-bundle-v2",
+		"id":             "witness/cli-fixture-v1",
+		"contracts": map[string]any{
+			"witnessed-review/witness-falsification-v2": validCLIIntegrationContract(),
+			"witnessed-review/economy-equivalence-v2":   validCLIIntegrationContract(),
+		},
+	}
+}
+
+func validCLIIntegrationContract() map[string]any {
+	return map[string]any{
+		"turns": []any{
+			map[string]any{"participant_turn": 1, "slot": "slot_0", "instructions": "Present the filed witness using only bound inputs."},
+			map[string]any{"participant_turn": 2, "slot": "slot_1", "instructions": "Challenge the filed witness without introducing new evidence."},
+			map[string]any{"participant_turn": 3, "slot": "slot_0", "instructions": "Answer the challenge using only bound inputs."},
+			map[string]any{"participant_turn": 4, "slot": "slot_1", "instructions": "State remaining objections to the filed witness."},
+		},
+		"reducer": map[string]any{
+			"instructions": "Return one JSON object that conforms to the result schema.",
+		},
+		"prompt_context": map[string]any{
+			"participant_transcript": "complete",
+			"facilitator_ledger":     "trace_only",
+		},
+		"inputs": map[string]any{
+			"artifact": map[string]any{"required": false, "cardinality": "many", "max_bytes": 1048576},
+			"charter": map[string]any{
+				"required":    true,
+				"cardinality": "one",
+				"media_type":  "application/json",
+				"max_bytes":   262144,
+				"schema":      map[string]any{"type": "object"},
+			},
+			"findings": map[string]any{
+				"required":    true,
+				"cardinality": "one",
+				"media_type":  "application/json",
+				"max_bytes":   262144,
+				"schema":      map[string]any{"type": "object"},
+			},
+		},
+		"result": map[string]any{
+			"transport":  "json",
+			"schema":     map[string]any{"type": "object"},
+			"assertions": []any{},
+		},
 	}
 }
 
