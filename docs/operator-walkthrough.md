@@ -109,6 +109,8 @@ state-directory-relative artifacts:
 - `charter.freeze.json`
 - `source-snapshot/manifest.json`
 - `source-snapshot/blobs/sha256/<content-digest>` for each captured file
+- `ref-observation.json`, a retained `witness-ref-observation-v1` record of
+  the frozen local Git head and branch refs (or an explicit unavailable reason)
 
 Run the next action verbatim:
 
@@ -469,6 +471,15 @@ witness pass resume -state-dir "$STATE"
 This runs the `adjudicate` stage, writes `verdict.json`, and appends the
 adjudication lineage to `$RUN/ledger.jsonl`.
 
+Before adjudication and again before metrics, Witness compares the retained
+local-ref observation with the live local repository. It records each result in
+the corresponding retained `ref-drift-adjudicate.json` or
+`ref-drift-metrics.json` fact and in the stage details, with `classification`
+(`fresh`, `drifted`, or `unavailable`), `stale`, and frozen/live observations.
+Both `drifted` and `unavailable` have `stale: true`. Drift is additive: Witness
+still writes both outputs so an operator can read the completed result and
+decide whether the post-freeze delta needs a separate review.
+
 ```sh
 witness pass resume -state-dir "$STATE"
 ```
@@ -561,12 +572,12 @@ The complete run layout is:
 
 | Writer | State-directory-relative artifact |
 | --- | --- |
-| Pass freeze | `pass-state.json`, `charter.freeze.json`, `source-snapshot/manifest.json`, `source-snapshot/blobs/sha256/<content-digest>` |
-| Preflight | `preflight.json`, `relay-capabilities.json`, `backend-status.json`, `recipes-list.json`, `integration-bundle.json` (authenticated envelope), `integration-bundle.body.json` (directly bindable authored bundle), `contract-digests.json`, `compatibility-manifest.json` |
+| Pass freeze | `pass-state.json`, `charter.freeze.json`, `source-snapshot/manifest.json`, `source-snapshot/blobs/sha256/<content-digest>`, `ref-observation.json` |
+| Preflight | `preflight.json`, `relay-capabilities.json`, `backend-status.json`, `recipes-list.json`, `integration-bundle.json` (authenticated envelope), `integration-bundle.body.json` (directly bindable authored bundle), `contract-digests.json`, `compatibility-manifest.json`, `ref-observation.json` |
 | Preflight compilation | `compile-reports/witness-falsify-v2.json`, `compile-reports/witness-falsify-v2-codex.json`, `compile-reports/witness-falsify-v2-claude.json`, `compile-reports/economy-equivalence-v2.json`, `compile-reports/economy-equivalence-v2-codex.json`, `compile-reports/economy-equivalence-v2-claude.json`; a relay that emits plans also retains `recipe-plans/<recipe-id>.json` |
 | Finders | `role-outputs/defect-output.json`, `role-outputs/economy-output.json` |
 | Plan and assembly | `verification-plan.json`, `verification/index.skeleton.json`, `verification/index.json`, and, when applicable, `verification/assemble-result.json` |
-| Adjudication and metrics | `verdict.json`, `metrics.json` (the ledger is `$RUN/ledger.jsonl`) |
+| Adjudication and metrics | `verdict.json`, `metrics.json`, `ref-drift-adjudicate.json`, `ref-drift-metrics.json` (the ledger is `$RUN/ledger.jsonl`) |
 
 ## Intentional boundaries
 

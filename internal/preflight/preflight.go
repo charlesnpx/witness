@@ -207,6 +207,15 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 	if err := os.MkdirAll(options.StateDir, 0o755); err != nil {
 		return result, err
 	}
+	if observation, err := ReadRefObservation(RefObservationPath(options.StateDir)); err == nil {
+		observationDigest, err := RefObservationDigest(observation)
+		if err != nil {
+			return result, err
+		}
+		result.ArtifactDigests[RefObservationFile] = observationDigest
+	} else if !os.IsNotExist(err) {
+		return result, err
+	}
 
 	if options.SnapshotManifestPath != "" {
 		manifest, snapshotDigest, err := existingSnapshotDigest(options.SnapshotManifestPath, options.ExpectedSnapshotDigest)
@@ -238,7 +247,6 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 			}
 		}
 	}
-
 	client := relayclient.Client{
 		Executable: options.RelayPath,
 		Runner:     options.Runner,
@@ -2016,6 +2024,7 @@ func RetainedArtifacts(stateDir string, snapshotManifestPath string, artifactDig
 		{role: "compatibility_manifest", path: "compatibility-manifest.json"},
 		{role: "relay_capabilities", path: "relay-capabilities.json"},
 		{role: "integration_bundle", path: RetainedIntegrationBundleBodyFile},
+		{role: "ref_observation", path: RefObservationFile},
 	} {
 		if strings.TrimSpace(artifactDigests[item.path]) != "" {
 			artifacts[item.role] = item.path

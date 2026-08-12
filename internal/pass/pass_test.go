@@ -102,6 +102,73 @@ func TestBeginWithSameOptionsResumesExistingPass(t *testing.T) {
 	}
 }
 
+func TestPassMarksRefDriftAtAdjudicationAndMetrics(t *testing.T) {
+	options := newBeginOptions(t)
+	options.AllowNonGitSource = false
+	runPassGit(t, options.SourceDir, "init")
+	runPassGit(t, options.SourceDir, "config", "user.email", "witness-test@example.com")
+	runPassGit(t, options.SourceDir, "config", "user.name", "Witness Test")
+	runPassGit(t, options.SourceDir, "add", "app.txt")
+	runPassGit(t, options.SourceDir, "commit", "-m", "initial")
+	runPassGit(t, options.SourceDir, "branch", "watched")
+
+	if _, err := Begin(context.Background(), options); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if _, err := preflight.ReadRefObservation(preflight.RefObservationPath(options.StateDir)); err != nil {
+		t.Fatalf("frozen ref observation: %v", err)
+	}
+
+	if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	writeRoleOutputsForState(t, options.StateDir, false)
+	for _, stage := range []string{stagePlan, stageAssemble} {
+		if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+			t.Fatalf("resume %s: %v", stage, err)
+		}
+	}
+	runPassGit(t, options.SourceDir, "checkout", "watched")
+	runPassGit(t, options.SourceDir, "commit", "--allow-empty", "-m", "advance watched ref")
+	runPassGit(t, options.SourceDir, "checkout", "-")
+	for _, stage := range []string{stageAdjudicate, stageMetrics} {
+		if _, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir}); err != nil {
+			t.Fatalf("resume %s: %v", stage, err)
+		}
+	}
+	state := readPassStateForTest(t, options.StateDir)
+	assertRefDriftCheckpoint(t, state, stageAdjudicate, preflight.RefDriftCheckpointAdjudicate)
+	assertRefDriftCheckpoint(t, state, stageMetrics, preflight.RefDriftCheckpointMetrics)
+	if !state.Complete {
+		t.Fatal("drifted pass did not complete")
+	}
+}
+
+func assertRefDriftCheckpoint(t *testing.T, state *State, stageName string, checkpoint preflight.RefDriftCheckpoint) {
+	t.Helper()
+	path, err := preflight.RefDriftPath(state.Config.StateDir, checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := preflight.ReadRefDrift(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Classification != freeze.RefDriftDrifted || !status.Stale {
+		t.Fatalf("ref drift checkpoint = %#v", status)
+	}
+	for _, stage := range state.Stages {
+		if stage.Name != stageName {
+			continue
+		}
+		if stage.Details["ref_drift_classification"] != freeze.RefDriftDrifted || stage.Details["stale"] != true {
+			t.Fatalf("%s stage details = %#v", stageName, stage.Details)
+		}
+		return
+	}
+	t.Fatalf("missing %s stage", stageName)
+}
+
 func TestBeginAllowsDirtyGitSnapshotAndReportsRetainedArtifacts(t *testing.T) {
 	options := newBeginOptions(t)
 	options.AllowNonGitSource = false
@@ -816,6 +883,9 @@ func TestResumeAcceptsLegacyPreflightResultWithoutRetainedArtifacts(t *testing.T
 		t.Fatalf("begin: %v", err)
 	}
 	state := readPassStateForTest(t, options.StateDir)
+	if err := os.Remove(preflight.RefObservationPath(options.StateDir)); err != nil {
+		t.Fatal(err)
+	}
 	result := writeReadyPreflightForTest(t, state.Config)
 	result.SnapshotDigest = result.ArtifactDigests["source-snapshot-manifest"]
 
@@ -3471,6 +3541,15 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 	}
 	for _, key := range sortedStringMapKeys(selectedDigests) {
 		result.ContractDigests[key] = selectedDigests[key]
+	}
+	if observation, err := preflight.ReadRefObservation(preflight.RefObservationPath(config.StateDir)); err == nil {
+		observationDigest, err := preflight.RefObservationDigest(observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result.ArtifactDigests[preflight.RefObservationFile] = observationDigest
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
 	result.ArtifactDigests["relay-capabilities.json"] = retainPreflightPayloadForTest(t, config.StateDir, "relay-capabilities.json", readyCapabilitiesPayloadForTest())
 	result.ArtifactDigests["backend-status.json"] = retainPreflightPayloadForTest(t, config.StateDir, "backend-status.json", map[string]any{

@@ -504,6 +504,13 @@ func runFreeze(ctx context.Context, state *State) error {
 	if err != nil {
 		return err
 	}
+	observation, observationErr := freeze.CaptureRefObservation(ctx, config.SourceDir)
+	if observationErr != nil {
+		observation = freeze.UnavailableRefObservation(config.SourceDir, "source_path_unavailable")
+	}
+	if _, err := preflight.RetainRefObservation(config.StateDir, observation); err != nil {
+		return err
+	}
 	state.SourceDirty = snapshot.Manifest.Source.GitDirty
 	state.SourceDirtyStatus = snapshot.Manifest.Source.GitDirtyStatus
 	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
@@ -794,6 +801,15 @@ func runAssemble(state *State) error {
 
 func runAdjudicate(state *State) error {
 	config := state.Config
+	refDrift := preflight.CheckRefDrift(context.Background(), preflight.RefObservationPath(config.StateDir))
+	refDriftDigest, err := preflight.RetainRefDrift(config.StateDir, preflight.RefDriftCheckpointAdjudicate, refDrift)
+	if err != nil {
+		return err
+	}
+	refDriftPath, err := preflight.RefDriftPath(config.StateDir, preflight.RefDriftCheckpointAdjudicate)
+	if err != nil {
+		return err
+	}
 	frozen, _, err := readFrozenCharter(config.Outputs.CharterFreezePath)
 	if err != nil {
 		return err
@@ -878,7 +894,10 @@ func runAdjudicate(state *State) error {
 	if err != nil {
 		return err
 	}
-	outputs, err := artifactRecordsForExistingFiles([]artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digest.ClassRawBytes}})
+	outputs, err := artifactRecordsForExistingFiles([]artifactInput{
+		{role: "ref-drift-adjudicate", path: refDriftPath, digestClass: digest.ClassRawBytes},
+		{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digest.ClassRawBytes},
+	})
 	if err != nil {
 		return err
 	}
@@ -888,7 +907,11 @@ func runAdjudicate(state *State) error {
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"result_digest": result.ResultDigest,
+			"result_digest":            result.ResultDigest,
+			"ref_drift_classification": refDrift.Classification,
+			"stale":                    refDrift.Stale,
+			"ref_drift_digest":         refDriftDigest,
+			"ref_drift_path":           refDriftPath,
 		},
 	})
 	return nil
@@ -896,6 +919,15 @@ func runAdjudicate(state *State) error {
 
 func runMetrics(state *State) error {
 	config := state.Config
+	refDrift := preflight.CheckRefDrift(context.Background(), preflight.RefObservationPath(config.StateDir))
+	refDriftDigest, err := preflight.RetainRefDrift(config.StateDir, preflight.RefDriftCheckpointMetrics, refDrift)
+	if err != nil {
+		return err
+	}
+	refDriftPath, err := preflight.RefDriftPath(config.StateDir, preflight.RefDriftCheckpointMetrics)
+	if err != nil {
+		return err
+	}
 	document, err := metrics.Run(metrics.Options{
 		LedgerPath:     config.LedgerPath,
 		PreflightPath:  config.Outputs.PreflightPath,
@@ -916,7 +948,10 @@ func runMetrics(state *State) error {
 	if err != nil {
 		return err
 	}
-	outputs, err := artifactRecordsForExistingFiles([]artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digest.ClassRawBytes}})
+	outputs, err := artifactRecordsForExistingFiles([]artifactInput{
+		{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digest.ClassRawBytes},
+		{role: "ref-drift-metrics", path: refDriftPath, digestClass: digest.ClassRawBytes},
+	})
 	if err != nil {
 		return err
 	}
@@ -925,6 +960,12 @@ func runMetrics(state *State) error {
 		Status:  statusComplete,
 		Inputs:  inputs,
 		Outputs: outputs,
+		Details: map[string]any{
+			"ref_drift_classification": refDrift.Classification,
+			"stale":                    refDrift.Stale,
+			"ref_drift_digest":         refDriftDigest,
+			"ref_drift_path":           refDriftPath,
+		},
 	})
 	state.Complete = true
 	return nil

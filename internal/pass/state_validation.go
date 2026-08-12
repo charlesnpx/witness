@@ -244,13 +244,29 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		for _, item := range config.RoleOutputs {
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
 		}
-		return inputs, []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}, nil
+		outputs := []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}
+		if refObservationRecorded(config) {
+			refDriftPath, err := preflight.RefDriftPath(config.StateDir, preflight.RefDriftCheckpointAdjudicate)
+			if err != nil {
+				return nil, nil, err
+			}
+			outputs = append(outputs, artifactInput{role: "ref-drift-adjudicate", path: refDriftPath, digestClass: digestClassRaw()})
+		}
+		return inputs, outputs, nil
 	case stageMetrics:
+		outputs := []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}
+		if refObservationRecorded(config) {
+			refDriftPath, err := preflight.RefDriftPath(config.StateDir, preflight.RefDriftCheckpointMetrics)
+			if err != nil {
+				return nil, nil, err
+			}
+			outputs = append(outputs, artifactInput{role: "ref-drift-metrics", path: refDriftPath, digestClass: digestClassRaw()})
+		}
 		return []artifactInput{
 			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
 			{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()},
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
-		}, []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}, nil
+		}, outputs, nil
 	default:
 		return nil, nil, nil
 	}
@@ -378,8 +394,12 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 		err = validateAssembleStageOutputs(state, artifact.Role)
 	case artifact.Role == "run-result":
 		err = validateAdjudicateOutput(state)
+	case artifact.Role == "ref-drift-adjudicate":
+		err = validateRefDriftOutput(state, stage, artifact, preflight.RefDriftCheckpointAdjudicate)
 	case artifact.Role == "metrics":
 		err = validateMetricsOutput(state)
+	case artifact.Role == "ref-drift-metrics":
+		err = validateRefDriftOutput(state, stage, artifact, preflight.RefDriftCheckpointMetrics)
 	default:
 		err = diag.New(CodeStateInvalid, "recorded pass stage output has no authoritative validator.", diag.WithDetail("role", artifact.Role))
 	}
@@ -654,6 +674,15 @@ func expectedPreflightResult(config Config) (preflight.Result, error) {
 	result.ArtifactDigests["source-snapshot-manifest"] = snapshotDigest
 	result.SourceDirty = manifest.Source.GitDirty
 	result.SourceDirtyStatus = manifest.Source.GitDirtyStatus
+	if observation, observationErr := preflight.ReadRefObservation(preflight.RefObservationPath(config.StateDir)); observationErr == nil {
+		observationDigest, err := preflight.RefObservationDigest(observation)
+		if err != nil {
+			return result, err
+		}
+		result.ArtifactDigests[preflight.RefObservationFile] = observationDigest
+	} else if !os.IsNotExist(observationErr) {
+		return result, observationErr
+	}
 
 	capabilities, capabilitiesDigest, err := readRetainedPreflightArtifact(config, "relay-capabilities.json")
 	if err != nil {
@@ -842,7 +871,7 @@ func requiredWitnessContractID(contractID string) bool {
 
 func isPreflightRetainedOutputRole(role string) bool {
 	switch role {
-	case "compatibility-manifest", "relay-capabilities", "integration-bundle-retained", "integration-bundle-body", "backend-status", "recipes-list", "contract-digests":
+	case "ref-observation", "compatibility-manifest", "relay-capabilities", "integration-bundle-retained", "integration-bundle-body", "backend-status", "recipes-list", "contract-digests":
 		return true
 	default:
 		return strings.HasPrefix(role, "compile-report:") ||
@@ -1707,6 +1736,70 @@ func validateMetricsOutput(state *State) error {
 		return err
 	}
 	return requireSemanticMatch("metrics", actual, expected)
+}
+
+func validateRefDriftOutput(state *State, stage StageRecord, artifact ArtifactRecord, checkpoint preflight.RefDriftCheckpoint) error {
+	expectedPath, err := preflight.RefDriftPath(state.Config.StateDir, checkpoint)
+	if err != nil {
+		return err
+	}
+	if !recordedPathsEqual(artifact.Path, expectedPath) {
+		return diag.New(
+			CodeStateInvalid,
+			"ref drift output path does not match the checkpoint path.",
+			diag.WithDetail("actual_path", artifact.Path),
+			diag.WithDetail("expected_path", expectedPath),
+		)
+	}
+	actual, err := preflight.ReadRefDrift(artifact.Path)
+	if err != nil {
+		return err
+	}
+	if err := freeze.ValidateRefDrift(actual); err != nil {
+		return err
+	}
+	actualDigest, err := preflight.RefDriftDigest(actual)
+	if err != nil {
+		return err
+	}
+	if expectedDigest, _ := stage.Details["ref_drift_digest"].(string); strings.TrimSpace(expectedDigest) != actualDigest {
+		return diag.New(
+			CodeStateInvalid,
+			"ref drift output digest does not match the recorded stage detail.",
+			diag.WithDetail("actual_digest", actualDigest),
+			diag.WithDetail("expected_digest", expectedDigest),
+		)
+	}
+	if expectedPath, _ := stage.Details["ref_drift_path"].(string); !recordedPathsEqual(expectedPath, artifact.Path) {
+		return diag.New(
+			CodeStateInvalid,
+			"ref drift output path does not match the recorded stage detail.",
+			diag.WithDetail("actual_path", artifact.Path),
+			diag.WithDetail("expected_path", expectedPath),
+		)
+	}
+	if expectedClassification, _ := stage.Details["ref_drift_classification"].(string); expectedClassification != actual.Classification {
+		return diag.New(
+			CodeStateInvalid,
+			"ref drift classification does not match the recorded stage detail.",
+			diag.WithDetail("actual", actual.Classification),
+			diag.WithDetail("expected", expectedClassification),
+		)
+	}
+	if expectedStale, ok := stage.Details["stale"].(bool); !ok || expectedStale != actual.Stale {
+		return diag.New(
+			CodeStateInvalid,
+			"ref drift stale flag does not match the recorded stage detail.",
+			diag.WithDetail("actual", actual.Stale),
+			diag.WithDetail("expected", stage.Details["stale"]),
+		)
+	}
+	return nil
+}
+
+func refObservationRecorded(config Config) bool {
+	_, err := preflight.ReadRefObservation(preflight.RefObservationPath(config.StateDir))
+	return err == nil
 }
 
 func adjudicationResultDigest(result adjudicate.Result) (string, error) {

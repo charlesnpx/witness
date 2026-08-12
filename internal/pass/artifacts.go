@@ -303,6 +303,8 @@ func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInp
 
 func preflightRetainedArtifactRole(relativePath string) string {
 	switch relativePath {
+	case preflight.RefObservationFile:
+		return "ref-observation"
 	case "compatibility-manifest.json":
 		return "compatibility-manifest"
 	case "relay-capabilities.json":
