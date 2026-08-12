@@ -1500,7 +1500,6 @@ func TestDriverLedgerAppendsSameLineageKindsAsSharedAdjudicationService(t *testi
 		BaseManifest:                 changeSurface.BaseManifest,
 		HeadManifest:                 changeSurface.HeadManifest,
 		LedgerPath:                   serviceLedgerPath,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 	})
@@ -3714,7 +3713,6 @@ func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath strin
 		BaseManifest:                 changeSurface.BaseManifest,
 		HeadManifest:                 changeSurface.HeadManifest,
 		LedgerPath:                   ledgerPath,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 	})

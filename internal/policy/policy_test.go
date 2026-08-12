@@ -9,10 +9,9 @@ import (
 )
 
 func TestPolicyLoadAndApplicationBranches(t *testing.T) {
-	rules := contracts.DefaultReviewRules()
 	charterHash := pd("charter")
 	validPolicy := autoPolicy(5, 5)
-	validRelease := releaseFor(t, validPolicy, rules, charterHash)
+	validRelease := releaseFor(t, validPolicy, charterHash)
 	filesRelease := validRelease
 	filesRelease.Unit = UnitFiles
 
@@ -130,7 +129,6 @@ func TestPolicyLoadAndApplicationBranches(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			effective, err := Load(LoadOptions{
 				Policy:      test.policy,
-				Rules:       rules,
 				CharterHash: test.charterHash,
 				CapReleases: test.releases,
 			})
@@ -168,15 +166,13 @@ func TestPolicyLoadAndApplicationBranches(t *testing.T) {
 }
 
 func TestPolicyLoadMatchesReleaseUnitWhenSpecified(t *testing.T) {
-	rules := contracts.DefaultReviewRules()
 	charterHash := pd("charter")
 	document := autoPolicy(5, 5)
-	release := releaseFor(t, document, rules, charterHash)
+	release := releaseFor(t, document, charterHash)
 	release.Unit = UnitFiles
 
 	if _, err := Load(LoadOptions{
 		Policy:      document,
-		Rules:       rules,
 		CharterHash: charterHash,
 		Unit:        UnitLines,
 		CapReleases: []contracts.CapReleaseRecord{release},
@@ -186,7 +182,6 @@ func TestPolicyLoadMatchesReleaseUnitWhenSpecified(t *testing.T) {
 
 	effective, err := Load(LoadOptions{
 		Policy:      document,
-		Rules:       rules,
 		CharterHash: charterHash,
 		Unit:        UnitFiles,
 		CapReleases: []contracts.CapReleaseRecord{release},
@@ -203,12 +198,10 @@ func TestPolicyLoadMatchesReleaseUnitWhenSpecified(t *testing.T) {
 	}
 }
 
-func TestBuildCapReleaseValidatesDigestsAndPolicyMatch(t *testing.T) {
-	rules := contracts.DefaultReviewRules()
+func TestBuildCapReleaseValidatesPolicyDigestAndPolicyMatch(t *testing.T) {
 	policy := autoPolicy(5, 5)
 	_, err := BuildCapRelease(ReleaseInput{
 		Policy:        policy,
-		Rules:         rules,
 		Unit:          "lines",
 		ProductionCap: 5,
 		TestCap:       5,
@@ -230,11 +223,10 @@ func TestBuildCapReleaseValidatesDigestsAndPolicyMatch(t *testing.T) {
 	}
 }
 
-func releaseFor(t *testing.T, document contracts.ReviewPolicy, rules contracts.ReviewRules, charterHash string) contracts.CapReleaseRecord {
+func releaseFor(t *testing.T, document contracts.ReviewPolicy, charterHash string) contracts.CapReleaseRecord {
 	t.Helper()
 	release, err := BuildCapRelease(ReleaseInput{
 		Policy:        document,
-		Rules:         rules,
 		Unit:          "lines",
 		ProductionCap: *document.ProductionCap,
 		TestCap:       *document.TestCap,

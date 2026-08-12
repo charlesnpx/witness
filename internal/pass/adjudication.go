@@ -25,7 +25,6 @@ type AdjudicationOptions struct {
 	LedgerPath                   string
 	ReceiptOutputDir             string
 	ReceiptHMACKeyFile           string
-	Rules                        contracts.ReviewRules
 	Policy                       contracts.ReviewPolicy
 	PolicyCapReleaseLedgerBacked bool
 	PriorLineage                 []adjudicate.PriorLineageRecord
@@ -48,7 +47,6 @@ func RunAdjudicationService(options AdjudicationOptions) (AdjudicationServiceRes
 		HeadManifest:                 options.HeadManifest,
 		ReceiptOutputDir:             options.ReceiptOutputDir,
 		ReceiptHMACKeyFile:           options.ReceiptHMACKeyFile,
-		Rules:                        options.Rules,
 		Policy:                       options.Policy,
 		PolicyCapReleaseLedgerBacked: options.PolicyCapReleaseLedgerBacked,
 		PriorLineage:                 options.PriorLineage,
@@ -253,7 +251,7 @@ func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 			ResultSchemaVersion:       result.SchemaVersion,
 			PolicyID:                  result.PolicyID,
 			PolicyDigest:              result.PolicyDigest,
-			RulesDigest:               result.RulesDigest,
+			DecisionRulesVersion:      result.DecisionRulesVersion,
 			CharterHash:               result.CharterHash,
 			ArtifactDigest:            result.ArtifactDigest,
 			ManifestDigest:            result.ManifestDigest,
@@ -339,7 +337,7 @@ func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 				Reasons:                    policyDecisionReasons(finding),
 				PolicyID:                   result.PolicyID,
 				PolicyDigest:               result.PolicyDigest,
-				RulesDigest:                result.RulesDigest,
+				DecisionRulesVersion:       result.DecisionRulesVersion,
 				CharterHash:                result.CharterHash,
 				CapReleaseCharterMismatch:  result.CapReleaseCharterMismatch,
 				CapReleaseUnit:             result.CapReleaseUnit,

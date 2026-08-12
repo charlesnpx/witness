@@ -235,7 +235,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
 			{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digestClassRaw()},
 			{role: "policy", path: config.PolicyPath, digestClass: digestClassRaw()},
-			{role: "rules", path: config.RulesPath, digestClass: digestClassRaw()},
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
 			{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
@@ -1608,12 +1607,9 @@ func validateAdjudicateOutput(state *State) error {
 	if err != nil {
 		return err
 	}
-	actual, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes*4)
+	actual, err := adjudicate.ReadResultBytes(data)
 	if err != nil {
 		return err
-	}
-	if actual.SchemaVersion != adjudicate.ResultSchemaVersion {
-		return diag.New(CodeStateInvalid, "adjudication result schema_version is unsupported.", diag.WithDetail("actual", actual.SchemaVersion), diag.WithDetail("expected", adjudicate.ResultSchemaVersion))
 	}
 	actualDigest, err := adjudicationResultDigest(actual)
 	if err != nil {
@@ -1671,7 +1667,6 @@ func expectedAdjudicationResult(state *State) (*adjudicate.Result, error) {
 		HeadManifest:                 changeSurface.HeadManifest,
 		ReceiptOutputDir:             config.ReceiptOutputDir,
 		ReceiptHMACKeyFile:           config.ReceiptHMACKeyFile,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 		PriorLineage:                 priorLineage,

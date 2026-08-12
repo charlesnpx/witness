@@ -99,7 +99,6 @@ type BeginOptions struct {
 	IntegrationBundlePath string
 	Backend               string
 	PolicyPath            string
-	RulesPath             string
 	LedgerPath            string
 	BaseManifestPath      string
 	HeadManifestPath      string
@@ -134,7 +133,6 @@ type Config struct {
 	IntegrationBundlePath string           `json:"integration_bundle_path"`
 	Backend               string           `json:"backend,omitempty"`
 	PolicyPath            string           `json:"policy_path,omitempty"`
-	RulesPath             string           `json:"rules_path,omitempty"`
 	LedgerPath            string           `json:"ledger_path,omitempty"`
 	BaseManifestPath      string           `json:"base_manifest_path,omitempty"`
 	HeadManifestPath      string           `json:"head_manifest_path,omitempty"`
@@ -839,7 +837,6 @@ func runAdjudicate(state *State) error {
 		LedgerPath:                   config.LedgerPath,
 		ReceiptOutputDir:             config.ReceiptOutputDir,
 		ReceiptHMACKeyFile:           config.ReceiptHMACKeyFile,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 		PriorLineage:                 priorLineage,
@@ -865,7 +862,6 @@ func runAdjudicate(state *State) error {
 		{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digest.ClassRawBytes},
 		{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digest.ClassRawBytes},
 		{role: "policy", path: config.PolicyPath, digestClass: digest.ClassRawBytes},
-		{role: "rules", path: config.RulesPath, digestClass: digest.ClassRawBytes},
 		{role: "ledger", path: config.LedgerPath, digestClass: digest.ClassRawBytes},
 		{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
@@ -997,7 +993,6 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		{&config.RelayPath, options.RelayPath},
 		{&config.IntegrationBundlePath, options.IntegrationBundlePath},
 		{&config.PolicyPath, options.PolicyPath},
-		{&config.RulesPath, options.RulesPath},
 		{&config.LedgerPath, options.LedgerPath},
 		{&config.BaseManifestPath, options.BaseManifestPath},
 		{&config.HeadManifestPath, options.HeadManifestPath},
@@ -1882,10 +1877,6 @@ func loadEffectivePolicy(config Config) (policy.Effective, error) {
 	if err != nil {
 		return policy.Effective{}, err
 	}
-	rules, err := readReviewRules(config.RulesPath)
-	if err != nil {
-		return policy.Effective{}, err
-	}
 	records, err := ledger.ReadFile(config.LedgerPath)
 	if config.LedgerPath == "" {
 		records = nil
@@ -1904,7 +1895,6 @@ func loadEffectivePolicy(config Config) (policy.Effective, error) {
 	}
 	return policy.Load(policy.LoadOptions{
 		Policy:      policyDocument,
-		Rules:       rules,
 		CharterHash: frozen.CharterHash,
 		CapReleases: releases,
 	})
@@ -1963,17 +1953,6 @@ func readReviewPolicy(path string) (contracts.ReviewPolicy, error) {
 		return contracts.ReviewPolicy{}, fileError(err, path, "open review policy")
 	}
 	return contracts.ReadReviewPolicyBytes(data)
-}
-
-func readReviewRules(path string) (contracts.ReviewRules, error) {
-	if strings.TrimSpace(path) == "" {
-		return contracts.DefaultReviewRules(), nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.ReviewRules{}, fileError(err, path, "open review rules")
-	}
-	return contracts.ReadReviewRulesBytes(data)
 }
 
 func nextActionScopePolicy(config Config) (string, error) {

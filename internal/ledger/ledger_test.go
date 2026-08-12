@@ -221,17 +221,17 @@ func TestEventKindRequiredFields(t *testing.T) {
 		{name: "pending verification", kind: EventKindPendingVerification, payload: PendingVerificationEvent{FindingID: "finding-1", Status: "unavailable"}},
 		{name: "owner override", kind: EventKindOwnerOverride, payload: OwnerOverrideEvent{FindingID: "finding-1", Actor: "owner"}},
 		{name: "cap release", kind: EventKindCapRelease, payload: CapReleaseEvent{Release: contracts.CapReleaseRecord{
-			Unit:          "lines",
-			ProductionCap: 1,
-			TestCap:       1,
-			Basis:         contracts.CapReleaseBasisOwnerJudgment,
-			Rationale:     "Owner accepted caps.",
-			PolicyDigest:  td("policy"),
-			RulesDigest:   td("rules"),
-			CharterHash:   td("charter"),
+			Unit:                 "lines",
+			ProductionCap:        1,
+			TestCap:              1,
+			Basis:                contracts.CapReleaseBasisOwnerJudgment,
+			Rationale:            "Owner accepted caps.",
+			PolicyDigest:         td("policy"),
+			DecisionRulesVersion: contracts.DecisionRulesVersion,
+			CharterHash:          td("charter"),
 		}}},
 		{name: "measured delta", kind: EventKindMeasuredDelta, payload: MeasuredDeltaEvent{Test: IntPtr(1), Unit: "lines"}},
-		{name: "policy decision", kind: EventKindPolicyDecision, payload: PolicyDecisionEvent{Allow: BoolPtr(false), PolicyID: "policy-1", PolicyDigest: td("policy"), RulesDigest: td("rules")}},
+		{name: "policy decision", kind: EventKindPolicyDecision, payload: PolicyDecisionEvent{Allow: BoolPtr(false), PolicyID: "policy-1", PolicyDigest: td("policy"), DecisionRulesVersion: contracts.DecisionRulesVersion}},
 		{name: "promotion", kind: EventKindPromotion, payload: PromotionEvent{QuestionID: "question-1", Actor: "owner", Rationale: "Promote to goal."}},
 		{name: "accept unverified", kind: EventKindAcceptUnverified, payload: AcceptUnverifiedEvent{FindingID: "finding-1", Actor: "owner", Rationale: "Risk accepted."}},
 	}
@@ -255,10 +255,10 @@ func TestEventKindRequiredFields(t *testing.T) {
 func validAdjudicationRunEvent() AdjudicationRunEvent {
 	return AdjudicationRunEvent{
 		RunDigest:                 td("run"),
-		ResultSchemaVersion:       "witness-adjudication-run-result-v1",
+		ResultSchemaVersion:       "witness-adjudication-run-result-v4",
 		PolicyID:                  "policy-1",
 		PolicyDigest:              td("policy"),
-		RulesDigest:               td("rules"),
+		DecisionRulesVersion:      contracts.DecisionRulesVersion,
 		CharterHash:               td("charter"),
 		ArtifactDigest:            td("artifact"),
 		ManifestDigest:            td("manifest"),
@@ -324,15 +324,15 @@ func validOwnerOverrideEvent() OwnerOverrideEvent {
 
 func validCapRelease() contracts.CapReleaseRecord {
 	return contracts.CapReleaseRecord{
-		Unit:          "lines",
-		ProductionCap: 5,
-		TestCap:       5,
-		Basis:         contracts.CapReleaseBasisOwnerJudgment,
-		Rationale:     "Owner accepted conservative caps.",
-		Actor:         "owner",
-		PolicyDigest:  td("policy"),
-		RulesDigest:   td("rules"),
-		CharterHash:   td("charter"),
+		Unit:                 "lines",
+		ProductionCap:        5,
+		TestCap:              5,
+		Basis:                contracts.CapReleaseBasisOwnerJudgment,
+		Rationale:            "Owner accepted conservative caps.",
+		Actor:                "owner",
+		PolicyDigest:         td("policy"),
+		DecisionRulesVersion: contracts.DecisionRulesVersion,
+		CharterHash:          td("charter"),
 	}
 }
 
@@ -352,7 +352,7 @@ func validPolicyDecisionEvent() PolicyDecisionEvent {
 		Reasons:                    []string{"allowed"},
 		PolicyID:                   "policy-1",
 		PolicyDigest:               td("policy"),
-		RulesDigest:                td("rules"),
+		DecisionRulesVersion:       contracts.DecisionRulesVersion,
 		CharterHash:                td("charter"),
 		CapReleaseUnit:             UnitLines,
 		Unit:                       UnitLines,

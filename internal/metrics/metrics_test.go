@@ -93,7 +93,7 @@ func TestMetricsGolden(t *testing.T) {
 	}
 }
 
-func TestMetricsAcceptsV2RunResult(t *testing.T) {
+func TestMetricsRejectsPreV4RunResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run-result-v2.json")
 	const runResult = `{
 		"schema_version": "witness-adjudication-run-result-v2",
@@ -108,26 +108,14 @@ func TestMetricsAcceptsV2RunResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	document, err := Run(Options{RunResultPaths: []string{path}})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if document.PendingVerification.Total != 1 {
-		t.Fatalf("pending total = %d, want 1", document.PendingVerification.Total)
-	}
-
-	unsupportedRunResult := strings.Replace(runResult, adjudicate.ResultSchemaVersionV2, "witness-adjudication-run-result-v0", 1)
-	if err := os.WriteFile(path, []byte(unsupportedRunResult), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = Run(Options{RunResultPaths: []string{path}})
+	_, err := Run(Options{RunResultPaths: []string{path}})
 	validation, ok := err.(*ValidationError)
 	if !ok || len(validation.Diagnostics) != 1 {
 		t.Fatalf("Run error = %#v, want one validation diagnostic", err)
 	}
-	expected, ok := validation.Diagnostics[0].Details["expected"].([]string)
-	if !ok || len(expected) != 3 || expected[0] != adjudicate.ResultSchemaVersion || expected[1] != adjudicate.ResultSchemaVersionV2 || expected[2] != adjudicate.ResultSchemaVersionV1 {
-		t.Fatalf("unsupported-version expected = %#v, want current, v2, v1", validation.Diagnostics[0].Details["expected"])
+	expected, ok := validation.Diagnostics[0].Details["expected"].(string)
+	if !ok || expected != adjudicate.ResultSchemaVersion {
+		t.Fatalf("unsupported-version expected = %#v, want %s", validation.Diagnostics[0].Details["expected"], adjudicate.ResultSchemaVersion)
 	}
 }
 
@@ -142,7 +130,8 @@ func TestPendingVerificationMetricsStratifyRelayAbsent(t *testing.T) {
 		},
 	})
 	runResultPath := writeMetricsJSON(t, dir, "run-result.json", adjudicate.Result{
-		SchemaVersion: adjudicate.ResultSchemaVersion,
+		SchemaVersion:        adjudicate.ResultSchemaVersion,
+		DecisionRulesVersion: contracts.DecisionRulesVersion,
 		Summary: adjudicate.Summary{
 			PendingVerification: 1,
 		},
