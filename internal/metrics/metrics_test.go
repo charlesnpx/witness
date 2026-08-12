@@ -90,8 +90,7 @@ func TestMetricsRejectsPreV5RunResult(t *testing.T) {
 		"summary": {"pending_verification": 1},
 		"findings": [{
 			"finding_id": "legacy-pending",
-			"disposition": "pending_verification",
-			"application_class": "caller_decision"
+			"disposition": "pending_verification"
 		}]
 	}`
 	if err := os.WriteFile(path, []byte(runResult), 0o644); err != nil {

@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	RecordSchemaVersion = "witness-ledger-record-v3"
-	ShowSchemaVersion   = "witness-ledger-show-v3"
+	RecordSchemaVersion = "witness-ledger-record-v4"
+	ShowSchemaVersion   = "witness-ledger-show-v4"
 
 	EventKindAdjudicationRun     = "adjudication_run"
 	EventKindFinding             = "finding"
@@ -63,8 +63,6 @@ type AdjudicationRunEvent struct {
 	ManifestDigest           string `json:"manifest_digest"`
 	FindingCount             int    `json:"finding_count"`
 	PendingVerificationCount int    `json:"pending_verification_count"`
-	AutomaticCandidateCount  int    `json:"automatic_candidate_count"`
-	CallerDecisionCount      int    `json:"caller_decision_count"`
 	MissingGoalQuestionCount int    `json:"missing_goal_question_count"`
 }
 
@@ -83,7 +81,6 @@ type VerdictEvent struct {
 	Role              string   `json:"role"`
 	Kind              string   `json:"kind"`
 	Disposition       string   `json:"disposition"`
-	ApplicationClass  string   `json:"application_class"`
 	ClaimedSeverity   string   `json:"claimed_severity"`
 	EffectiveSeverity string   `json:"effective_severity,omitempty"`
 	SeverityCap       string   `json:"severity_cap,omitempty"`
@@ -144,8 +141,6 @@ type adjudicationRunEventJSON struct {
 	ManifestDigest           string         `json:"manifest_digest"`
 	FindingCount             strictjson.Int `json:"finding_count"`
 	PendingVerificationCount strictjson.Int `json:"pending_verification_count"`
-	AutomaticCandidateCount  strictjson.Int `json:"automatic_candidate_count"`
-	CallerDecisionCount      strictjson.Int `json:"caller_decision_count"`
 	MissingGoalQuestionCount strictjson.Int `json:"missing_goal_question_count"`
 }
 
@@ -176,8 +171,6 @@ func (event *AdjudicationRunEvent) UnmarshalJSON(data []byte) error {
 		ManifestDigest:           decoded.ManifestDigest,
 		FindingCount:             int(decoded.FindingCount),
 		PendingVerificationCount: int(decoded.PendingVerificationCount),
-		AutomaticCandidateCount:  int(decoded.AutomaticCandidateCount),
-		CallerDecisionCount:      int(decoded.CallerDecisionCount),
 		MissingGoalQuestionCount: int(decoded.MissingGoalQuestionCount),
 	}
 	return nil
@@ -283,7 +276,7 @@ func ValidateRecords(records []Record) error {
 		if record.SchemaVersion != RecordSchemaVersion {
 			return &ValidationError{Diagnostics: []diag.Diagnostic{diagnostic(
 				CodeInvalidLedger,
-				fmt.Sprintf("ledger schema_version %q is unsupported; witness-ledger-record-v2 is refused and %q is required after policy-engine event fields were removed.", record.SchemaVersion, RecordSchemaVersion),
+				fmt.Sprintf("ledger schema_version %q is unsupported; witness-ledger-record-v3 is refused and %q is required after application_class fields were removed.", record.SchemaVersion, RecordSchemaVersion),
 				fmt.Sprintf("/records/%d/schema_version", index),
 				map[string]any{"expected": RecordSchemaVersion, "actual": record.SchemaVersion},
 			)}}
@@ -669,7 +662,6 @@ func validateEvent(kind string, raw json.RawMessage, path string) []diag.Diagnos
 		requireString(&diagnostics, path+"/role", "role", event.Role)
 		requireString(&diagnostics, path+"/kind", "kind", event.Kind)
 		requireString(&diagnostics, path+"/disposition", "disposition", event.Disposition)
-		requireString(&diagnostics, path+"/application_class", "application_class", event.ApplicationClass)
 		requireString(&diagnostics, path+"/claimed_severity", "claimed_severity", event.ClaimedSeverity)
 		if event.FindingDigest != "" {
 			requireDigest(&diagnostics, path+"/finding_digest", "finding_digest", event.FindingDigest)

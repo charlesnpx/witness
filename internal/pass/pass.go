@@ -1889,7 +1889,7 @@ func readPlan(path string) (planning.PlanDocument, error) {
 	if err != nil {
 		return planning.PlanDocument{}, fileError(err, path, "open verification plan")
 	}
-	return strictjson.DecodeBytes[planning.PlanDocument](data, strictjson.DefaultMaxBytes*4)
+	return planning.ReadPlanDocumentBytes(data)
 }
 
 func readVerificationManifest(path string) (contracts.VerificationManifest, error) {

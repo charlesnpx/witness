@@ -267,8 +267,8 @@ func TestPlanningDeltaChangeSurfacePartitionsFindings(t *testing.T) {
 		t.Fatalf("excluded findings = %#v, want one out-of-delta", result.Plan.ExcludedFindings)
 	}
 	excluded := result.Plan.ExcludedFindings[0]
-	if excluded.FindingID != "out-of-delta" || excluded.Disposition != DispositionAdvisory || excluded.ApplicationClass != contracts.ApplicationClassCallerDecision || excluded.Reason != contracts.ReasonOutOfDelta {
-		t.Fatalf("excluded finding = %#v, want out_of_delta advisory caller decision", excluded)
+	if excluded.FindingID != "out-of-delta" || excluded.Disposition != DispositionAdvisory || excluded.Reason != contracts.ReasonOutOfDelta {
+		t.Fatalf("excluded finding = %#v, want out_of_delta advisory", excluded)
 	}
 	if result.ManifestSkeleton.ChangeSurfaceDigest != result.Plan.ChangeSurfaceDigest || len(result.ManifestSkeleton.ExcludedFindings) != 1 {
 		t.Fatalf("manifest skeleton = %#v, want change surface digest and excluded finding", result.ManifestSkeleton)
@@ -370,8 +370,8 @@ func TestVersionStampsForPlanManifestAndChangeSurface(t *testing.T) {
 	if result.Plan.SchemaVersion != SchemaVersion {
 		t.Fatalf("plan schema_version = %s, want %s", result.Plan.SchemaVersion, SchemaVersion)
 	}
-	if SchemaVersion != "witness-verification-plan-v2" {
-		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v2", SchemaVersion)
+	if SchemaVersion != "witness-verification-plan-v3" {
+		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v3", SchemaVersion)
 	}
 	if contracts.DecisionRulesVersion != "witness-decision-rules-v1" {
 		t.Fatalf("decision rules version = %s, want witness-decision-rules-v1", contracts.DecisionRulesVersion)
@@ -387,8 +387,45 @@ func TestVersionStampsForPlanManifestAndChangeSurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if assembled.Manifest.SchemaVersion != contracts.VerificationManifestV4 {
-		t.Fatalf("manifest schema_version = %s, want %s", assembled.Manifest.SchemaVersion, contracts.VerificationManifestV4)
+	if assembled.Manifest.SchemaVersion != contracts.VerificationManifestV5 {
+		t.Fatalf("manifest schema_version = %s, want %s", assembled.Manifest.SchemaVersion, contracts.VerificationManifestV5)
+	}
+	if result.ManifestSkeleton.SchemaVersion != ManifestSkeletonSchemaVersion {
+		t.Fatalf("manifest skeleton schema_version = %s, want %s", result.ManifestSkeleton.SchemaVersion, ManifestSkeletonSchemaVersion)
+	}
+}
+
+func TestReadPlanDocumentBytesRejectsV2BeforeStrictDecode(t *testing.T) {
+	_, err := ReadPlanDocumentBytes([]byte(`{"schema_version":"witness-verification-plan-v2","legacy_shape_field":true}`))
+	if err == nil {
+		t.Fatal("ReadPlanDocumentBytes accepted a v2 plan")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeInvalidPlanDigest || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported plan schema diagnostic", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+	}
+	if diagnostic.Details["actual"] != "witness-verification-plan-v2" || diagnostic.Details["expected"] != SchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want v2 and %s", diagnostic.Details, SchemaVersion)
+	}
+}
+
+func TestReadManifestSkeletonBytesRejectsV1BeforeStrictDecode(t *testing.T) {
+	_, err := ReadManifestSkeletonBytes([]byte(`{"schema_version":"witness-verification-manifest-skeleton-v1","legacy_shape_field":true}`))
+	if err == nil {
+		t.Fatal("ReadManifestSkeletonBytes accepted a v1 manifest skeleton")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeUnsupportedManifestSkeletonSchema || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported manifest skeleton schema diagnostic", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+	}
+	if diagnostic.Details["actual"] != "witness-verification-manifest-skeleton-v1" || diagnostic.Details["expected"] != ManifestSkeletonSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want v1 and %s", diagnostic.Details, ManifestSkeletonSchemaVersion)
 	}
 }
 

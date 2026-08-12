@@ -105,18 +105,12 @@ type Summary struct {
 	Admitted            int `json:"admitted"`
 	Advisory            int `json:"advisory"`
 	PendingVerification int `json:"pending_verification"`
-	AutomaticCandidate  int `json:"automatic_candidate"`
-	CallerDecision      int `json:"caller_decision"`
-	None                int `json:"none"`
 }
 
 type summaryJSON struct {
 	Admitted            strictjson.Int `json:"admitted"`
 	Advisory            strictjson.Int `json:"advisory"`
 	PendingVerification strictjson.Int `json:"pending_verification"`
-	AutomaticCandidate  strictjson.Int `json:"automatic_candidate"`
-	CallerDecision      strictjson.Int `json:"caller_decision"`
-	None                strictjson.Int `json:"none"`
 }
 
 func (summary *Summary) UnmarshalJSON(data []byte) error {
@@ -128,9 +122,6 @@ func (summary *Summary) UnmarshalJSON(data []byte) error {
 		Admitted:            int(decoded.Admitted),
 		Advisory:            int(decoded.Advisory),
 		PendingVerification: int(decoded.PendingVerification),
-		AutomaticCandidate:  int(decoded.AutomaticCandidate),
-		CallerDecision:      int(decoded.CallerDecision),
-		None:                int(decoded.None),
 	}
 	return nil
 }
@@ -155,7 +146,6 @@ type FindingVerdict struct {
 	EffectiveSeverity  string                       `json:"effective_severity,omitempty"`
 	SeverityCap        string                       `json:"severity_cap,omitempty"`
 	Disposition        string                       `json:"disposition"`
-	ApplicationClass   string                       `json:"application_class"`
 	Reasons            []string                     `json:"reasons,omitempty"`
 	StrengthTrajectory []StrengthStep               `json:"strength_trajectory,omitempty"`
 	Execution          *ExecutionMetadata           `json:"execution,omitempty"`
@@ -177,7 +167,16 @@ func ReadResultBytes(data []byte) (Result, error) {
 	if actual != ResultSchemaVersion {
 		return Result{}, diag.New(
 			CodeUnsupportedResultSchema,
-			"adjudication result schema_version is unsupported; witness-adjudication-run-result-v4 is refused and witness-adjudication-run-result-v5 is required after policy-engine fields were removed.",
+			"adjudication result schema_version is unsupported; witness-adjudication-run-result-v4 is refused and witness-adjudication-run-result-v5 is required after application_class fields were removed.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", ResultSchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	if resultCarriesRemovedFields(document) {
+		return Result{}, diag.New(
+			CodeUnsupportedResultSchema,
+			"adjudication result carries removed application_class fields; legacy witness-adjudication-run-result-v5 payloads are refused and a current v5 result is required.",
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", ResultSchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -194,6 +193,41 @@ func ReadResultBytes(data []byte) (Result, error) {
 		)
 	}
 	return strictjson.DecodeBytes[Result](data, strictjson.DefaultMaxBytes*8)
+}
+
+func resultCarriesRemovedFields(document map[string]any) bool {
+	if _, found := document["automatic_candidate"]; found {
+		return true
+	}
+	if _, found := document["caller_decision"]; found {
+		return true
+	}
+	if _, found := document["none"]; found {
+		return true
+	}
+	summary, _ := document["summary"].(map[string]any)
+	if summary != nil {
+		if _, found := summary["automatic_candidate"]; found {
+			return true
+		}
+		if _, found := summary["caller_decision"]; found {
+			return true
+		}
+		if _, found := summary["none"]; found {
+			return true
+		}
+	}
+	findings, _ := document["findings"].([]any)
+	for _, value := range findings {
+		finding, _ := value.(map[string]any)
+		if finding == nil {
+			continue
+		}
+		if _, found := finding["application_class"]; found {
+			return true
+		}
+	}
+	return false
 }
 
 type StrengthStep struct {
@@ -827,14 +861,12 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 
 	if len(item.diagnostics) > 0 {
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassNone
 		verdict.Reasons = appendValidationReasons(verdict.Reasons, item.diagnostics)
 		return verdict
 	}
 
 	if excluded, ok := manifestExcludedFinding(options.Manifest, item); ok {
 		verdict.Disposition = excluded.Disposition
-		verdict.ApplicationClass = excluded.ApplicationClass
 		verdict.Reasons = appendReason(verdict.Reasons, excluded.Reason)
 		return verdict
 	}
@@ -846,19 +878,16 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 	switch verdict.Attribution {
 	case contracts.FindingAttributionPreExisting:
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
 		verdict.Reasons = appendReason(verdict.Reasons, ReasonPreExisting)
 		return verdict
 	case contracts.FindingAttributionUnattributed:
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
 		verdict.Reasons = appendReason(verdict.Reasons, ReasonAttributionUnattributed)
 		return verdict
 	}
 
 	if scopePolicy == changesurface.ScopePolicyDeltaObligating && options.Manifest.ChangeSurface != nil && !contracts.FindingInChangeSurface(finding, *options.Manifest.ChangeSurface) {
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
 		verdict.Reasons = appendReason(verdict.Reasons, ReasonOutOfDelta)
 		return verdict
 	}
@@ -871,7 +900,6 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		case "contradicted":
 			verdict.StrengthTrajectory = append(verdict.StrengthTrajectory, StrengthStep{Step: "execution_receipt", Reason: ReasonExecutionReceiptContradicted})
 			verdict.Disposition = contracts.DispositionAdvisory
-			verdict.ApplicationClass = contracts.ApplicationClassNone
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonExecutionReceiptContradicted)
 			verdict.Diagnostics = append(verdict.Diagnostics, execution.metadata.Diagnostics...)
 			return verdict
@@ -886,7 +914,6 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 	effective, capSeverity, capped := applySeverityCap(finding.ClaimedSeverity, currentStrength)
 	if capSeverity == "" {
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassNone
 		verdict.Reasons = appendReason(verdict.Reasons, ReasonValidationFailed)
 		return verdict
 	}
@@ -901,7 +928,6 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 	verdict.Diagnostics = append(verdict.Diagnostics, relayResult.diagnostics...)
 	if relayResult.pending {
 		verdict.Disposition = contracts.DispositionPendingVerification
-		verdict.ApplicationClass = classifyApplication(finding, verdict.Disposition, verdict.EffectiveSeverity)
 		verdict.Reasons = appendReason(verdict.Reasons, relayResult.reason)
 		return verdict
 	}
@@ -915,7 +941,6 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 			if currentStrength == "" {
 				verdict.StrengthTrajectory = append(verdict.StrengthTrajectory, StrengthStep{Step: "relay_result", Reason: ReasonWitnessWeakenedBelowFloor})
 				verdict.Disposition = contracts.DispositionAdvisory
-				verdict.ApplicationClass = contracts.ApplicationClassNone
 				verdict.EffectiveSeverity = ""
 				verdict.SeverityCap = ""
 				verdict.Reasons = appendReason(verdict.Reasons, ReasonWitnessWeakenedBelowFloor)
@@ -932,21 +957,18 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		case contracts.VerdictBroken:
 			verdict.VerdictClass = relayResult.verdict.VerdictClass
 			verdict.Disposition = contracts.DispositionAdvisory
-			verdict.ApplicationClass = contracts.ApplicationClassNone
 			verdict.EffectiveSeverity = ""
 			verdict.SeverityCap = ""
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonRelayBroken)
 			return verdict
 		default:
 			verdict.Disposition = contracts.DispositionPendingVerification
-			verdict.ApplicationClass = classifyApplication(finding, verdict.Disposition, verdict.EffectiveSeverity)
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonRelayVerificationInvalid)
 			return verdict
 		}
 	}
 
 	verdict.Disposition = contracts.DispositionAdmitted
-	verdict.ApplicationClass = classifyApplication(finding, verdict.Disposition, verdict.EffectiveSeverity)
 	return verdict
 }
 
@@ -1215,38 +1237,6 @@ func downgradeStrength(strength string) string {
 	}
 }
 
-func classifyApplication(finding contracts.Finding, disposition string, severity string) string {
-	if disposition == contracts.DispositionAdvisory {
-		return contracts.ApplicationClassNone
-	}
-	if disposition == contracts.DispositionPendingVerification {
-		return contracts.ApplicationClassCallerDecision
-	}
-	if severity == "" {
-		return contracts.ApplicationClassNone
-	}
-	if severity == contracts.SeverityMedium || severity == contracts.SeverityLow {
-		return contracts.ApplicationClassCallerDecision
-	}
-	// Additive changes are never automatic candidates. The deleted cap-release
-	// mechanism once permitted them; its permissiveness is deliberately not preserved.
-	if finding.SmallestSufficientRemedy.Direction == contracts.RemedyDirectionAdd {
-		return contracts.ApplicationClassCallerDecision
-	}
-	if nonPositiveDelta(finding.EstimatedDelta) {
-		return contracts.ApplicationClassAutomaticCandidate
-	}
-	return contracts.ApplicationClassCallerDecision
-}
-
-func deltaKnown(delta contracts.SplitDeltaEstimate) bool {
-	return delta.Production.Status == contracts.DeltaStatusKnown && delta.Test.Status == contracts.DeltaStatusKnown
-}
-
-func nonPositiveDelta(delta contracts.SplitDeltaEstimate) bool {
-	return deltaKnown(delta) && delta.Production.Lines <= 0 && delta.Test.Lines <= 0
-}
-
 func summarize(findings []FindingVerdict) Summary {
 	var summary Summary
 	for _, finding := range findings {
@@ -1257,14 +1247,6 @@ func summarize(findings []FindingVerdict) Summary {
 			summary.Advisory++
 		case contracts.DispositionPendingVerification:
 			summary.PendingVerification++
-		}
-		switch finding.ApplicationClass {
-		case contracts.ApplicationClassAutomaticCandidate:
-			summary.AutomaticCandidate++
-		case contracts.ApplicationClassCallerDecision:
-			summary.CallerDecision++
-		case contracts.ApplicationClassNone:
-			summary.None++
 		}
 	}
 	return summary

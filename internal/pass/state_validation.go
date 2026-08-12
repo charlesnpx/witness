@@ -1535,7 +1535,7 @@ func validateAssembleStageOutputs(state *State, role string) error {
 		if err != nil {
 			return err
 		}
-		actual, err := strictjson.DecodeBytes[planning.AssembleResult](data, strictjson.DefaultMaxBytes*8)
+		actual, err := planning.ReadAssembleResultBytes(data)
 		if err != nil {
 			return err
 		}

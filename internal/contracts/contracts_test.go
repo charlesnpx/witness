@@ -452,6 +452,23 @@ func TestVerificationManifestRejectsInvalidRelayLaunchStatusMarkers(t *testing.T
 	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
 }
 
+func TestReadVerificationManifestBytesRejectsV4BeforeStrictDecode(t *testing.T) {
+	_, err := ReadVerificationManifestBytes([]byte(`{"schema_version":"review-verification-manifest-v4","legacy_shape_field":true}`))
+	if err == nil {
+		t.Fatal("ReadVerificationManifestBytes accepted a v4 manifest")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeInvalidManifest || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported manifest schema diagnostic", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+	}
+	if diagnostic.Details["actual"] != VerificationManifestV4 || diagnostic.Details["expected"] != VerificationManifestV5 {
+		t.Fatalf("schema diagnostic details = %#v, want v4 and %s", diagnostic.Details, VerificationManifestV5)
+	}
+}
+
 func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {
 	frozen := validFrozenCharter(t)
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "role-output-defect.json"))
@@ -624,7 +641,7 @@ func validVerificationManifest(t *testing.T, batch VerificationBatchDocument, ve
 	portableExportDigest := testDigest("portable-export")
 	portableExportRef := testArtifactRef("portable-export", "portable-export-1", portableExportDigest)
 	return VerificationManifest{
-		SchemaVersion:         VerificationManifestV4,
+		SchemaVersion:         VerificationManifestV5,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           batch.CharterHash,
 		ArtifactDigest:        batch.ArtifactDigest,

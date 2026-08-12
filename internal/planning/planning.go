@@ -17,28 +17,29 @@ import (
 )
 
 const (
-	SchemaVersion                 = "witness-verification-plan-v2"
-	ManifestSkeletonSchemaVersion = "witness-verification-manifest-skeleton-v1"
+	SchemaVersion                 = "witness-verification-plan-v3"
+	ManifestSkeletonSchemaVersion = "witness-verification-manifest-skeleton-v2"
 	MaxBatchFindings              = 8
 
-	CodeMissingFrozenCharter       = "planning_missing_frozen_charter"
-	CodeMixedCharter               = "planning_mixed_charter"
-	CodeMixedArtifact              = "planning_mixed_artifact"
-	CodeSnapshotArtifactMismatch   = "planning_snapshot_artifact_mismatch"
-	CodeMissingChangeSurface       = "planning_missing_change_surface"
-	CodeInvalidChangeSurface       = "planning_invalid_change_surface"
-	CodeBaselineSurfaceConflict    = "planning_baseline_change_surface_conflict"
-	CodeInvalidRoleOutput          = "planning_invalid_role_output"
-	CodeScopeAdvisory              = "planning_scope_advisory"
-	CodeInvalidReachability        = "planning_invalid_reachability"
-	CodeSeverityExceedsCap         = "planning_severity_exceeds_strength_cap"
-	CodeRecursiveRecurrence        = "planning_recursive_recurrence"
-	CodeInvalidBatch               = "planning_invalid_batch"
-	CodeOutputWriteFailed          = "planning_output_write_failed"
-	CodeMissingRoleOutput          = "planning_missing_role_output"
-	CodeUnsupportedRole            = "planning_unsupported_role"
-	DispositionAdvisory            = "advisory"
-	DispositionPendingVerification = "pending_verification"
+	CodeMissingFrozenCharter              = "planning_missing_frozen_charter"
+	CodeMixedCharter                      = "planning_mixed_charter"
+	CodeMixedArtifact                     = "planning_mixed_artifact"
+	CodeSnapshotArtifactMismatch          = "planning_snapshot_artifact_mismatch"
+	CodeMissingChangeSurface              = "planning_missing_change_surface"
+	CodeInvalidChangeSurface              = "planning_invalid_change_surface"
+	CodeBaselineSurfaceConflict           = "planning_baseline_change_surface_conflict"
+	CodeInvalidRoleOutput                 = "planning_invalid_role_output"
+	CodeScopeAdvisory                     = "planning_scope_advisory"
+	CodeInvalidReachability               = "planning_invalid_reachability"
+	CodeSeverityExceedsCap                = "planning_severity_exceeds_strength_cap"
+	CodeRecursiveRecurrence               = "planning_recursive_recurrence"
+	CodeInvalidBatch                      = "planning_invalid_batch"
+	CodeOutputWriteFailed                 = "planning_output_write_failed"
+	CodeMissingRoleOutput                 = "planning_missing_role_output"
+	CodeUnsupportedRole                   = "planning_unsupported_role"
+	CodeUnsupportedManifestSkeletonSchema = "planning_unsupported_manifest_skeleton_schema"
+	DispositionAdvisory                   = "advisory"
+	DispositionPendingVerification        = "pending_verification"
 )
 
 type RoleOutputInput struct {
@@ -137,7 +138,6 @@ type ExcludedFinding struct {
 	SourceRoleOutputRef    contracts.ArtifactRef `json:"source_role_output_ref"`
 	SourceRoleOutputDigest string                `json:"source_role_output_digest"`
 	Disposition            string                `json:"disposition"`
-	ApplicationClass       string                `json:"application_class,omitempty"`
 	Reason                 string                `json:"reason"`
 	Diagnostics            []diag.Diagnostic     `json:"diagnostics,omitempty"`
 }
@@ -320,7 +320,6 @@ func Run(options Options) (*Result, error) {
 					SourceRoleOutputRef:    roleOutputRef,
 					SourceRoleOutputDigest: roleDigest,
 					Disposition:            DispositionAdvisory,
-					ApplicationClass:       contracts.ApplicationClassCallerDecision,
 					Reason:                 contracts.ReasonOutOfDelta,
 				})
 				continue
@@ -385,6 +384,50 @@ func Run(options Options) (*Result, error) {
 		}
 	}
 	return result, nil
+}
+
+func ReadPlanDocumentBytes(data []byte) (PlanDocument, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return PlanDocument{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return PlanDocument{}, diag.New(CodeInvalidPlanDigest, "verification plan must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != SchemaVersion {
+		return PlanDocument{}, diag.New(
+			CodeInvalidPlanDigest,
+			"verification plan schema_version is unsupported; witness-verification-plan-v2 is refused and witness-verification-plan-v3 is required after application_class was removed from excluded findings.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", SchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	return strictjson.DecodeBytes[PlanDocument](data, strictjson.DefaultMaxBytes*4)
+}
+
+func ReadManifestSkeletonBytes(data []byte) (ManifestSkeleton, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return ManifestSkeleton{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return ManifestSkeleton{}, diag.New(CodeUnsupportedManifestSkeletonSchema, "verification manifest skeleton must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != ManifestSkeletonSchemaVersion {
+		return ManifestSkeleton{}, diag.New(
+			CodeUnsupportedManifestSkeletonSchema,
+			"verification manifest skeleton schema_version is unsupported; witness-verification-manifest-skeleton-v1 is refused and witness-verification-manifest-skeleton-v2 is required after application_class was removed from excluded findings.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", ManifestSkeletonSchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	return strictjson.DecodeBytes[ManifestSkeleton](data, strictjson.DefaultMaxBytes*4)
 }
 
 func WriteState(stateDir string, result *Result) error {

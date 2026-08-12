@@ -20,15 +20,17 @@ import (
 )
 
 const (
-	CodeMissingEvidenceRef    = "assemble_missing_evidence_ref"
-	CodeMissingBatch          = "assemble_missing_batch"
-	CodeInvalidAssembleBatch  = "assemble_invalid_batch"
-	CodeInvalidRelay          = "assemble_invalid_relay_verification"
-	CodeInvalidReceipt        = "assemble_invalid_execution_receipt"
-	CodeInvalidManifest       = "assemble_invalid_manifest"
-	CodeInvalidCompatibility  = "assemble_invalid_relay_compatibility"
-	CodeInvalidPlanDigest     = "assemble_invalid_plan_digest"
-	CodeInvalidRelayRunRecord = "assemble_invalid_relay_run_record"
+	AssembleResultSchemaVersion         = "witness-verification-assemble-result-v1"
+	CodeMissingEvidenceRef              = "assemble_missing_evidence_ref"
+	CodeMissingBatch                    = "assemble_missing_batch"
+	CodeInvalidAssembleBatch            = "assemble_invalid_batch"
+	CodeInvalidRelay                    = "assemble_invalid_relay_verification"
+	CodeInvalidReceipt                  = "assemble_invalid_execution_receipt"
+	CodeInvalidManifest                 = "assemble_invalid_manifest"
+	CodeInvalidCompatibility            = "assemble_invalid_relay_compatibility"
+	CodeInvalidPlanDigest               = "assemble_invalid_plan_digest"
+	CodeInvalidRelayRunRecord           = "assemble_invalid_relay_run_record"
+	CodeUnsupportedAssembleResultSchema = "assemble_unsupported_result_schema"
 )
 
 type AssembleOptions struct {
@@ -73,6 +75,7 @@ type ManifestEvidenceRefs struct {
 }
 
 type AssembleResult struct {
+	SchemaVersion           string                           `json:"schema_version"`
 	Manifest                contracts.VerificationManifest   `json:"manifest"`
 	PendingVerification     []string                         `json:"pending_verification,omitempty"`
 	ReceiptContradictions   []string                         `json:"receipt_contradictions,omitempty"`
@@ -88,6 +91,28 @@ type ManifestUnverifiedRelationship struct {
 	Reason         string `json:"reason"`
 }
 
+func ReadAssembleResultBytes(data []byte) (AssembleResult, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return AssembleResult{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return AssembleResult{}, diag.New(CodeUnsupportedAssembleResultSchema, "verification assemble result must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != AssembleResultSchemaVersion {
+		return AssembleResult{}, diag.New(
+			CodeUnsupportedAssembleResultSchema,
+			"verification assemble result schema_version is unsupported; unversioned results are refused and witness-verification-assemble-result-v1 is required after application_class was removed from the embedded verification manifest.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", AssembleResultSchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	return strictjson.DecodeBytes[AssembleResult](data, strictjson.DefaultMaxBytes*8)
+}
+
 func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	if diagnostics := validatePlanDigest(options.Plan); len(diagnostics) > 0 {
 		return nil, &ValidationError{Diagnostics: diagnostics}
@@ -98,10 +123,10 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	if diagnostics := validatePlanExclusionChangeSurface(options.Plan); len(diagnostics) > 0 {
 		return nil, &ValidationError{Diagnostics: diagnostics}
 	}
-	result := &AssembleResult{}
+	result := &AssembleResult{SchemaVersion: AssembleResultSchemaVersion}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV5,
 		PlanDigest:            options.Plan.PlanDigest,
 		CharterHash:           options.Plan.CharterHash,
 		ArtifactDigest:        options.Plan.ArtifactDigest,
@@ -948,7 +973,6 @@ func manifestExcludedFindings(excluded []ExcludedFinding) []contracts.ExcludedFi
 			SourceRoleOutputDigest: item.SourceRoleOutputDigest,
 			Reason:                 item.Reason,
 			Disposition:            item.Disposition,
-			ApplicationClass:       item.ApplicationClass,
 		})
 	}
 	return records

@@ -245,8 +245,6 @@ func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 			ManifestDigest:           result.ManifestDigest,
 			FindingCount:             len(result.Findings),
 			PendingVerificationCount: result.Summary.PendingVerification,
-			AutomaticCandidateCount:  result.Summary.AutomaticCandidate,
-			CallerDecisionCount:      result.Summary.CallerDecision,
 			MissingGoalQuestionCount: len(questions),
 		},
 	}}
@@ -270,7 +268,6 @@ func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 				Role:              finding.Role,
 				Kind:              finding.Kind,
 				Disposition:       finding.Disposition,
-				ApplicationClass:  finding.ApplicationClass,
 				ClaimedSeverity:   finding.ClaimedSeverity,
 				EffectiveSeverity: finding.EffectiveSeverity,
 				SeverityCap:       finding.SeverityCap,
