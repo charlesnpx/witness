@@ -62,7 +62,6 @@ type ExcludedFindingRecord struct {
 	SourceRoleOutputDigest string      `json:"source_role_output_digest"`
 	Reason                 string      `json:"reason"`
 	Disposition            string      `json:"disposition"`
-	ApplicationClass       string      `json:"application_class"`
 }
 
 type ExecutionReceipt struct {
@@ -124,10 +123,32 @@ type ExecutionCaptures struct {
 }
 
 func ReadVerificationManifest(reader io.Reader) (VerificationManifest, error) {
-	return strictjson.Decode[VerificationManifest](reader, strictjson.DefaultMaxBytes)
+	data, err := io.ReadAll(io.LimitReader(reader, strictjson.DefaultMaxBytes+1))
+	if err != nil {
+		return VerificationManifest{}, err
+	}
+	return ReadVerificationManifestBytes(data)
 }
 
 func ReadVerificationManifestBytes(data []byte) (VerificationManifest, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return VerificationManifest{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return VerificationManifest{}, diag.New(CodeInvalidManifest, "verification manifest must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != VerificationManifestV5 {
+		return VerificationManifest{}, diag.New(
+			CodeInvalidManifest,
+			"verification manifest schema_version is unsupported; review-verification-manifest-v4 is refused and review-verification-manifest-v5 is required after application_class was removed from excluded findings.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", VerificationManifestV5),
+			diag.WithDetail("actual", actual),
+		)
+	}
 	return strictjson.DecodeBytes[VerificationManifest](data, strictjson.DefaultMaxBytes)
 }
 
@@ -145,8 +166,8 @@ func RequireValidVerificationManifest(document VerificationManifest) error {
 
 func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != VerificationManifestV4 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v4.", "/schema_version", map[string]any{"expected": VerificationManifestV4, "actual": document.SchemaVersion}))
+	if document.SchemaVersion != VerificationManifestV5 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v5.", "/schema_version", map[string]any{"expected": VerificationManifestV5, "actual": document.SchemaVersion}))
 	}
 	requireDigest(&diagnostics, "/plan_digest", "plan_digest", document.PlanDigest)
 	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
@@ -415,9 +436,6 @@ func validateExcludedFindingRecord(record ExcludedFindingRecord, path string) []
 	}
 	if record.Disposition != DispositionAdvisory {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding disposition must be advisory.", path+"/disposition", map[string]any{"actual": record.Disposition, "expected": DispositionAdvisory}))
-	}
-	if record.ApplicationClass != ApplicationClassCallerDecision {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding application_class must be caller_decision.", path+"/application_class", map[string]any{"actual": record.ApplicationClass, "expected": ApplicationClassCallerDecision}))
 	}
 	return diagnostics
 }

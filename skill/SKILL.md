@@ -15,7 +15,7 @@ Use the shipped relay integration bundle at `skill/bundle/relay-integration-bund
 
 All new finder output is a `review-role-output-v4` role-output document. Findings must name Charter goals; existing code, tests, defenses, and review machinery create no goals.
 
-Every finding must carry base/head attribution: `introduced` when the stack created it, `worsened` when the stack made it worse, `pre-existing` when it was already present at base, or `unattributed` when the finder could not establish it. Only introduced and worsened findings can score the stack; pre-existing and unattributed findings remain visible as advisory caller decisions.
+Every finding must carry base/head attribution: `introduced` when the stack created it, `worsened` when the stack made it worse, `pre-existing` when it was already present at base, or `unattributed` when the finder could not establish it. Only introduced and worsened findings can score the stack; pre-existing and unattributed findings remain visible as advisory findings.
 
 Defect finders file defect findings with defect witnesses. When an Operational Envelope is present, include scope anchors. Constructed and executable defect witnesses must include an entry point and a non-empty reachability chain; argued defect witnesses are exempt from the chain.
 
@@ -35,9 +35,8 @@ Every finding must state the smallest sufficient remedy. Propose at most one tes
 6. Run each required relay verification batch once with the selected Witness recipe. Preserve the run-result document, portable export, provider/result refs, transcript, and retained artifacts.
 7. Assemble verification with `witness verification assemble`.
 8. Adjudicate with `witness adjudicate`.
-9. Inspect the run-result document, ledger records, policy decisions, pending verification, and Operational Envelope questions. Use `witness ledger promote` or `witness ledger accept-unverified` only for explicit owner decisions.
-10. Run policy checks for caller-measured deltas with `witness policy check-application` before any external automation applies an automatic candidate.
-11. Emit metrics with `witness metrics`.
+9. Inspect the run-result document, ledger records, pending verification, and Operational Envelope questions. Use `witness ledger promote` or `witness ledger accept-unverified` only for explicit owner decisions.
+10. Emit metrics with `witness metrics`.
 
 The pass ends after adjudication and metrics emission. Any decision to apply, override, accept risk, promote a question, or run another pass belongs to the caller or owner outside Witness.
 

@@ -64,10 +64,10 @@ func TestAppendReplayRoundTripAndFilteredShow(t *testing.T) {
 	}
 }
 
-func TestReadFileRejectsV2LedgerBeforeDecodingLegacyEvent(t *testing.T) {
+func TestReadFileRejectsV3LedgerBeforeDecodingLegacyEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
 	legacy := Record{
-		SchemaVersion: "witness-ledger-record-v2",
+		SchemaVersion: "witness-ledger-record-v3",
 		Sequence:      1,
 		EventKind:     "removed_legacy_event",
 		Event: json.RawMessage(`{
@@ -102,8 +102,8 @@ func TestReadFileRejectsV2LedgerBeforeDecodingLegacyEvent(t *testing.T) {
 	if strings.Contains(diagnostic.Message, "unknown_json_field") {
 		t.Fatalf("diagnostic = %#v, want version refusal rather than field decode error", diagnostic)
 	}
-	if diagnostic.Details["actual"] != "witness-ledger-record-v2" || diagnostic.Details["expected"] != RecordSchemaVersion {
-		t.Fatalf("schema diagnostic details = %#v, want v2 and %s", diagnostic.Details, RecordSchemaVersion)
+	if diagnostic.Details["actual"] != "witness-ledger-record-v3" || diagnostic.Details["expected"] != RecordSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want v3 and %s", diagnostic.Details, RecordSchemaVersion)
 	}
 }
 
@@ -309,7 +309,6 @@ func validVerdictEvent() VerdictEvent {
 		Role:              contracts.RoleDefect,
 		Kind:              contracts.FindingKindDefect,
 		Disposition:       contracts.DispositionAdmitted,
-		ApplicationClass:  contracts.ApplicationClassCallerDecision,
 		ClaimedSeverity:   contracts.SeverityHigh,
 		EffectiveSeverity: contracts.SeverityHigh,
 		SeverityCap:       contracts.SeverityHigh,

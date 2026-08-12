@@ -1145,7 +1145,6 @@ func TestResumeRejectsSelfConsistentTamperedAdjudicationResult(t *testing.T) {
 		t.Fatal("test pass produced no adjudication findings")
 	}
 	result.Findings[0].Disposition = contracts.DispositionAdvisory
-	result.Findings[0].ApplicationClass = contracts.ApplicationClassCallerDecision
 	result.Findings[0].Reasons = []string{"tampered"}
 	result.Summary = adjudicationSummaryForTest(result.Findings)
 	result.ResultDigest = ""
@@ -1648,8 +1647,9 @@ func TestAssembleSupplementaryRelationshipsPersistFullResultOutput(t *testing.T)
 	config := Config{StateDir: stateDir}
 	applyOutputDefaults(&config)
 	result := &planning.AssembleResult{
+		SchemaVersion: planning.AssembleResultSchemaVersion,
 		Manifest: contracts.VerificationManifest{
-			SchemaVersion: contracts.VerificationManifestV4,
+			SchemaVersion: contracts.VerificationManifestV5,
 			ConsumerIdentity: map[string]any{
 				"kind": "test",
 				"id":   "pass-test",
@@ -1673,7 +1673,14 @@ func TestAssembleSupplementaryRelationshipsPersistFullResultOutput(t *testing.T)
 	if _, ok := findArtifactRecord(outputs, "assemble-result", assembleResultPath(config)); !ok {
 		t.Fatalf("assemble-result output missing from records: %#v", outputs)
 	}
-	persisted := readJSONForTest[planning.AssembleResult](t, assembleResultPath(config))
+	persistedBytes, err := os.ReadFile(assembleResultPath(config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := planning.ReadAssembleResultBytes(persistedBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(persisted.UnverifiedRelationships) != 1 {
 		t.Fatalf("unverified relationships = %#v, want persisted relationship", persisted.UnverifiedRelationships)
 	}
@@ -1769,14 +1776,25 @@ func TestRelayBatchActionCarriesBoundDigestsAndRetainedBundle(t *testing.T) {
 			{Name: stagePlan, Status: statusComplete},
 		},
 	}
-	writeCanonicalForTest(t, config.Outputs.PlanPath, planning.PlanDocument{
+	plan := planning.PlanDocument{
+		SchemaVersion:  planning.SchemaVersion,
+		DigestProfile:  digest.Profile,
+		CharterHash:    digest.RawBytes([]byte("charter-hash")),
+		ArtifactDigest: snapshotDigest,
 		Batches: []planning.BatchPlan{{
 			BatchID:      "batch-1",
 			TaskShape:    contracts.BatchTaskDefect,
 			RecipeFamily: "witness-falsify-v2",
 			BatchDigest:  batchDigest,
 		}},
-	})
+	}
+	unstampedPlan := plan
+	planDigest, err := contracts.SemanticDigest(unstampedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = planDigest
+	writeCanonicalForTest(t, config.Outputs.PlanPath, plan)
 	action, err := nextRelayBatchAction(state)
 	if err != nil {
 		t.Fatalf("nextRelayBatchAction: %v", err)
@@ -3594,14 +3612,6 @@ func adjudicationSummaryForTest(findings []adjudicate.FindingVerdict) adjudicate
 			summary.Advisory++
 		case contracts.DispositionPendingVerification:
 			summary.PendingVerification++
-		}
-		switch finding.ApplicationClass {
-		case contracts.ApplicationClassAutomaticCandidate:
-			summary.AutomaticCandidate++
-		case contracts.ApplicationClassCallerDecision:
-			summary.CallerDecision++
-		case contracts.ApplicationClassNone:
-			summary.None++
 		}
 	}
 	return summary

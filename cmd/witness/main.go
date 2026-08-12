@@ -1068,7 +1068,7 @@ func runLedgerPromote(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-promote-v1", record))
+	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-promote-v2", record))
 }
 
 func runLedgerAcceptUnverified(args []string) error {
@@ -1100,7 +1100,7 @@ func runLedgerAcceptUnverified(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-accept-unverified-v1", record))
+	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-accept-unverified-v2", record))
 }
 
 type ledgerAppendDocument struct {
@@ -1159,7 +1159,7 @@ func readPlanFile(path string) (planning.PlanDocument, error) {
 	if err != nil {
 		return planning.PlanDocument{}, fileReadError(err, path, "open verification plan")
 	}
-	return strictjson.DecodeBytes[planning.PlanDocument](data, strictjson.DefaultMaxBytes*4)
+	return planning.ReadPlanDocumentBytes(data)
 }
 
 func readVerificationManifestFile(path string) (contracts.VerificationManifest, error) {

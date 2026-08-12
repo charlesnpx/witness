@@ -15,6 +15,7 @@ import (
 	"github.com/charlesnpx/witness/internal/changesurface"
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
@@ -930,7 +931,6 @@ func TestAssembleRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *testi
 		SourceRoleOutputRef:    batch.Plan.SourceRoleOutputRef,
 		SourceRoleOutputDigest: batch.Plan.SourceRoleOutputDigest,
 		Disposition:            contracts.DispositionAdvisory,
-		ApplicationClass:       contracts.ApplicationClassCallerDecision,
 		Reason:                 contracts.ReasonOutOfDelta,
 	}}
 	if err := stampPlanDigest(&tamperedPlan); err != nil {
@@ -986,6 +986,23 @@ func TestAssembleRejectsV1PlanBeforeDigestAcceptance(t *testing.T) {
 	}
 	if planningErrorCode(err) != CodeInvalidPlanDigest {
 		t.Fatalf("err = %v, want %s", err, CodeInvalidPlanDigest)
+	}
+}
+
+func TestReadAssembleResultBytesRejectsUnversionedResultBeforeStrictDecode(t *testing.T) {
+	_, err := ReadAssembleResultBytes([]byte(`{"manifest":{},"legacy_shape_field":true}`))
+	if err == nil {
+		t.Fatal("ReadAssembleResultBytes accepted an unversioned result")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeUnsupportedAssembleResultSchema || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported assemble-result schema diagnostic", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+	}
+	if diagnostic.Details["actual"] != "" || diagnostic.Details["expected"] != AssembleResultSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want empty actual and %s", diagnostic.Details, AssembleResultSchemaVersion)
 	}
 }
 
@@ -1068,8 +1085,8 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 		byID[finding.FindingID] = finding
 	}
 	excluded := byID[outOfDelta.ID]
-	if excluded.Disposition != contracts.DispositionAdvisory || excluded.ApplicationClass != contracts.ApplicationClassCallerDecision {
-		t.Fatalf("excluded verdict = %#v, want advisory caller_decision", excluded)
+	if excluded.Disposition != contracts.DispositionAdvisory {
+		t.Fatalf("excluded verdict = %#v, want advisory", excluded)
 	}
 	if !stringSliceContains(excluded.Reasons, contracts.ReasonOutOfDelta) {
 		t.Fatalf("excluded reasons = %#v, want out_of_delta", excluded.Reasons)

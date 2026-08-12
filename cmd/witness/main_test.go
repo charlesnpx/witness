@@ -103,6 +103,81 @@ func TestPolicyCommandGroupIsAbsent(t *testing.T) {
 	}
 }
 
+func TestLedgerAppendOutputsUseV2Envelopes(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantSchema    string
+		ledgerEvent   ledger.EventToAppend
+		additionalArg []string
+	}{
+		{
+			name:       "promote",
+			wantSchema: "witness-ledger-promote-v2",
+			ledgerEvent: ledger.EventToAppend{
+				Kind: ledger.EventKindQuestion,
+				Payload: ledger.QuestionEvent{
+					QuestionID:  "question-1",
+					CharterHash: digest.RawBytes([]byte("charter")),
+					Statement:   "Should this become a goal?",
+				},
+			},
+			additionalArg: []string{"-question-id", "question-1", "-goal-ref", "goal-1"},
+		},
+		{
+			name:       "accept unverified",
+			wantSchema: "witness-ledger-accept-unverified-v2",
+			ledgerEvent: ledger.EventToAppend{
+				Kind: ledger.EventKindPendingVerification,
+				Payload: ledger.PendingVerificationEvent{
+					FindingID:      "finding-1",
+					VerificationID: "pending-1",
+					Status:         contracts.DispositionPendingVerification,
+				},
+			},
+			additionalArg: []string{"-finding-id", "finding-1", "-pending-verification-id", "pending-1"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ledgerPath := filepath.Join(dir, "ledger.jsonl")
+			if _, err := ledger.AppendEvent(ledgerPath, test.ledgerEvent.Kind, test.ledgerEvent.Payload); err != nil {
+				t.Fatalf("seed ledger: %v", err)
+			}
+			out := filepath.Join(dir, "out.json")
+			args := append([]string{"ledger"}, "")
+			if test.name == "promote" {
+				args[1] = "promote"
+			} else {
+				args[1] = "accept-unverified"
+			}
+			args = append(args, "-ledger", ledgerPath)
+			args = append(args, test.additionalArg...)
+			args = append(args, "-actor", "owner", "-rationale", "explicit owner decision", "-out", out)
+			if err := route(args); err != nil {
+				t.Fatalf("route(%v): %v", args, err)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			document, ok := value.(map[string]any)
+			if !ok || document["schema_version"] != test.wantSchema {
+				t.Fatalf("output = %#v, want schema_version %q", value, test.wantSchema)
+			}
+			record, ok := document["record"].(map[string]any)
+			if !ok || record["schema_version"] != ledger.RecordSchemaVersion {
+				t.Fatalf("output record = %#v, want schema_version %q", document["record"], ledger.RecordSchemaVersion)
+			}
+		})
+	}
+}
+
 func TestRoleOutputValidate(t *testing.T) {
 	dir := t.TempDir()
 	initializedPath := filepath.Join(dir, "role-outputs", "initialized.json")
@@ -1003,7 +1078,6 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	if len(result.Findings) != 1 ||
 		result.Findings[0].Attribution != contracts.FindingAttributionUnattributed ||
 		result.Findings[0].Disposition != contracts.DispositionAdvisory ||
-		result.Findings[0].ApplicationClass != contracts.ApplicationClassCallerDecision ||
 		len(result.Findings[0].Reasons) != 1 ||
 		result.Findings[0].Reasons[0] != adjudicate.ReasonAttributionUnattributed {
 		t.Fatalf("adjudication findings = %#v, want v3 attribution advisory", result.Findings)
@@ -2090,7 +2164,7 @@ func TestVerificationAssembleOutputContainsUnverifiedRelationships(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := strictjson.DecodeBytes[planning.AssembleResult](data, strictjson.DefaultMaxBytes*4)
+	result, err := planning.ReadAssembleResultBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2987,7 +3061,7 @@ func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, ro
 	batchRef := artifactRef("verification-batch", "batch-1", digest.RawBytes([]byte("batch")))
 	exportRef := artifactRef("relay-root-portable-export", "batch-1", digest.RawBytes([]byte("export")))
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV5,
 		PlanDigest:            digest.RawBytes([]byte("plan")),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        roleOutput.ArtifactDigest,

@@ -76,7 +76,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonRecurrenceLineageUnavailable)
 	})
 
@@ -183,7 +182,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonExecutionReceiptContradicted)
 	})
 
@@ -208,7 +206,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonExecutionReceiptContradicted)
 		if got.Execution == nil || got.Execution.Reason != ReasonExecutionReceiptContradicted || got.Execution.VerificationClassification != harness.ClassificationContradictory {
 			t.Fatalf("execution metadata = %#v, want sticky contradicted classification", got.Execution)
@@ -234,7 +231,7 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonSeverityCapped)
 	})
 
-	t.Run("introduced constructed high additive zero deltas survived relay requires caller decision", func(t *testing.T) {
+	t.Run("introduced constructed high additive zero deltas survived relay remains admitted", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
 		finding := defectFinding("finding-additive-zero-delta", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
@@ -251,7 +248,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
 	})
 
 	t.Run("relay absent high severity cannot forge a clean pass", func(t *testing.T) {
@@ -322,7 +318,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonWitnessWeakenedBelowFloor)
 	})
 
@@ -360,7 +355,7 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertResultHasDiagnostic(t, result, CodeDuplicateRelayBatch, "/manifest/batches")
 	})
 
-	t.Run("executable missing receipt weakened chain ends argued medium caller decision", func(t *testing.T) {
+	t.Run("executable missing receipt weakened chain ends argued medium", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
 		finding := defectExecutableFinding("finding-chain", contracts.SeverityCritical, executableCommand("stdout_contains=ok"))
@@ -372,7 +367,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
 		assertStrengthStep(t, got, "execution_receipt", contracts.WitnessStrengthConstructed)
 		assertStrengthStep(t, got, "relay_result", contracts.WitnessStrengthArgued)
 		assertSeverity(t, got, contracts.SeverityMedium)
@@ -469,7 +463,7 @@ func TestAdjudicationEmptyInvalidRoleOutputReturnsResultAndError(t *testing.T) {
 	assertErrorHasDiagnostic(t, err, contracts.CodeInvalidRoleOutput, "/role_outputs/0/schema_version")
 }
 
-func TestApplicationClassIsIndependentFromDisposition(t *testing.T) {
+func TestAdmittedFindingsRetainTheirDisposition(t *testing.T) {
 	frozen := testFrozenCharter(t)
 	artifactDigest := testDigest("artifact")
 	defect := defectFinding("finding-caller", contracts.WitnessStrengthArgued, contracts.SeverityMedium)
@@ -493,8 +487,6 @@ func TestApplicationClassIsIndependentFromDisposition(t *testing.T) {
 	byID := findingsByID(result)
 	assertDisposition(t, byID["finding-caller"], contracts.DispositionAdmitted)
 	assertDisposition(t, byID["finding-auto"], contracts.DispositionAdmitted)
-	assertApplicationClass(t, byID["finding-caller"], contracts.ApplicationClassCallerDecision)
-	assertApplicationClass(t, byID["finding-auto"], contracts.ApplicationClassAutomaticCandidate)
 }
 
 func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
@@ -531,7 +523,6 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 	assertDisposition(t, byID["in-delta"], contracts.DispositionAdmitted)
 	assertDisposition(t, byID["deleted"], contracts.DispositionAdmitted)
 	assertDisposition(t, byID["out-of-delta"], contracts.DispositionAdvisory)
-	assertApplicationClass(t, byID["out-of-delta"], contracts.ApplicationClassCallerDecision)
 	assertHasReason(t, byID["out-of-delta"], contracts.ReasonOutOfDelta)
 	if result.Summary.Advisory != 1 {
 		t.Fatalf("summary = %#v, want one advisory finding", result.Summary)
@@ -571,21 +562,19 @@ func TestAdjudicationFindingAttributionGate(t *testing.T) {
 		}
 	}
 	assertDisposition(t, byID["pre-existing"], contracts.DispositionAdvisory)
-	assertApplicationClass(t, byID["pre-existing"], contracts.ApplicationClassCallerDecision)
 	assertHasReason(t, byID["pre-existing"], ReasonPreExisting)
 	assertSeverity(t, byID["pre-existing"], "")
 	if byID["pre-existing"].Execution != nil || byID["pre-existing"].Relay != nil {
 		t.Fatalf("pre-existing finding consumed verification: %#v", byID["pre-existing"])
 	}
 	assertDisposition(t, byID["unattributed"], contracts.DispositionAdvisory)
-	assertApplicationClass(t, byID["unattributed"], contracts.ApplicationClassCallerDecision)
 	assertHasReason(t, byID["unattributed"], ReasonAttributionUnattributed)
 	assertSeverity(t, byID["unattributed"], "")
 	if byID["unattributed"].Relay != nil {
 		t.Fatalf("unattributed finding consumed relay verification: %#v", byID["unattributed"])
 	}
-	if result.Summary.Admitted != 2 || result.Summary.Advisory != 2 || result.Summary.CallerDecision != 4 || result.Summary.AutomaticCandidate != 0 {
-		t.Fatalf("summary = %#v, want two admitted, two attribution advisories, and no automatic candidates", result.Summary)
+	if result.Summary.Admitted != 2 || result.Summary.Advisory != 2 {
+		t.Fatalf("summary = %#v, want two admitted and two attribution advisories", result.Summary)
 	}
 
 	canonical, err := contracts.CanonicalBytes(result)
@@ -635,7 +624,6 @@ func TestAdjudicationV3FindingIsUnattributedAndAttributionPrecedesDeltaScope(t *
 		t.Fatalf("v3 attribution = %q, want %q", got.Attribution, contracts.FindingAttributionUnattributed)
 	}
 	assertDisposition(t, got, contracts.DispositionAdvisory)
-	assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
 	assertHasReason(t, got, ReasonAttributionUnattributed)
 	assertMissingReason(t, got, ReasonOutOfDelta)
 }
@@ -701,7 +689,6 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 		SourceRoleOutputDigest: roleOutputDigest,
 		Reason:                 contracts.ReasonOutOfDelta,
 		Disposition:            contracts.DispositionAdvisory,
-		ApplicationClass:       contracts.ApplicationClassCallerDecision,
 	}}
 	result, err := Run(Options{
 		FrozenCharter: &frozen,
@@ -728,6 +715,31 @@ func TestReadResultBytesRejectsV4WithExplicitDiagnostic(t *testing.T) {
 	}
 	if actual, _ := diagnostic.Details["actual"].(string); actual != "witness-adjudication-run-result-v4" {
 		t.Fatalf("actual = %#v, want v4", diagnostic.Details["actual"])
+	}
+	if expected, _ := diagnostic.Details["expected"].(string); expected != ResultSchemaVersion {
+		t.Fatalf("expected = %#v, want %s", diagnostic.Details["expected"], ResultSchemaVersion)
+	}
+}
+
+func TestReadResultBytesRejectsLegacyV5RemovedFieldsBeforeStrictDecode(t *testing.T) {
+	_, err := ReadResultBytes([]byte(`{
+		"schema_version":"witness-adjudication-run-result-v5",
+		"summary":{"automatic_candidate":1},
+		"findings":[{"application_class":"automatic_candidate"}],
+		"legacy_shape_field":true
+	}`))
+	if err == nil {
+		t.Fatal("ReadResultBytes accepted a legacy v5 application-class result")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeUnsupportedResultSchema || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported result schema diagnostic", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want legacy-v5 refusal before strict decoding", diagnostic)
+	}
+	if actual, _ := diagnostic.Details["actual"].(string); actual != ResultSchemaVersion {
+		t.Fatalf("actual = %#v, want %s", diagnostic.Details["actual"], ResultSchemaVersion)
 	}
 	if expected, _ := diagnostic.Details["expected"].(string); expected != ResultSchemaVersion {
 		t.Fatalf("expected = %#v, want %s", diagnostic.Details["expected"], ResultSchemaVersion)
@@ -1187,7 +1199,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	exportRef := testArtifactRef("relay-root-portable-export", "batch-1", "export")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV5,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1213,7 +1225,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 func manifestWithDuplicateRelayBatches(t *testing.T, frozen charter.FrozenCharter, artifactDigest string, finding contracts.Finding) contracts.VerificationManifest {
 	t.Helper()
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV5,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1275,7 +1287,7 @@ func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contract
 func manifestWithRelayStatus(frozen charter.FrozenCharter, artifactDigest string, status string, failureReason string) contracts.VerificationManifest {
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV5,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1312,13 +1324,6 @@ func assertDisposition(t *testing.T, finding FindingVerdict, want string) {
 	t.Helper()
 	if finding.Disposition != want {
 		t.Fatalf("%s disposition = %s, want %s; finding=%#v", finding.FindingID, finding.Disposition, want, finding)
-	}
-}
-
-func assertApplicationClass(t *testing.T, finding FindingVerdict, want string) {
-	t.Helper()
-	if finding.ApplicationClass != want {
-		t.Fatalf("%s application_class = %s, want %s; finding=%#v", finding.FindingID, finding.ApplicationClass, want, finding)
 	}
 }
 

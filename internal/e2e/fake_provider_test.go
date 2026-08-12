@@ -133,16 +133,13 @@ func assertSuccessfulPass(t *testing.T, pass passResult, wantRelayBackend string
 	if pass.result.Summary.Admitted != 2 || pass.result.Summary.PendingVerification != 0 || pass.result.Summary.Advisory != 0 {
 		t.Fatalf("summary = %#v, want 2 admitted and no pending/advisory", pass.result.Summary)
 	}
-	if pass.result.Summary.AutomaticCandidate != 1 || pass.result.Summary.CallerDecision != 1 {
-		t.Fatalf("application summary = %#v, want 1 automatic and 1 caller decision", pass.result.Summary)
-	}
 	findings := findingsByID(pass.result)
 	defect := findings["defect-exec"]
 	if defect.FindingID == "" {
 		t.Fatal("missing defect-exec verdict")
 	}
-	if defect.Disposition != contracts.DispositionAdmitted || defect.ApplicationClass != contracts.ApplicationClassCallerDecision {
-		t.Fatalf("defect verdict = %#v, want admitted/caller_decision", defect)
+	if defect.Disposition != contracts.DispositionAdmitted {
+		t.Fatalf("defect verdict = %#v, want admitted", defect)
 	}
 	if defect.Execution == nil || defect.Execution.VerificationClassification != harness.ClassificationValid {
 		t.Fatalf("defect execution = %#v, want valid receipt", defect.Execution)
@@ -154,8 +151,8 @@ func assertSuccessfulPass(t *testing.T, pass passResult, wantRelayBackend string
 	if economy.FindingID == "" {
 		t.Fatal("missing economy-remove verdict")
 	}
-	if economy.Disposition != contracts.DispositionAdmitted || economy.ApplicationClass != contracts.ApplicationClassAutomaticCandidate {
-		t.Fatalf("economy verdict = %#v, want admitted/automatic_candidate", economy)
+	if economy.Disposition != contracts.DispositionAdmitted {
+		t.Fatalf("economy verdict = %#v, want admitted", economy)
 	}
 	assertRelay(t, economy, "economy-equivalence-v2", wantRelayBackend)
 
