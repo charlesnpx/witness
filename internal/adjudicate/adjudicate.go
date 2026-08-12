@@ -1228,6 +1228,11 @@ func classifyApplication(finding contracts.Finding, disposition string, severity
 	if severity == contracts.SeverityMedium || severity == contracts.SeverityLow {
 		return contracts.ApplicationClassCallerDecision
 	}
+	// Additive changes are never automatic candidates. The deleted cap-release
+	// mechanism once permitted them; its permissiveness is deliberately not preserved.
+	if finding.SmallestSufficientRemedy.Direction == contracts.RemedyDirectionAdd {
+		return contracts.ApplicationClassCallerDecision
+	}
 	if nonPositiveDelta(finding.EstimatedDelta) {
 		return contracts.ApplicationClassAutomaticCandidate
 	}

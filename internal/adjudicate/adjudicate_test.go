@@ -234,6 +234,26 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonSeverityCapped)
 	})
 
+	t.Run("introduced constructed high additive zero deltas survived relay requires caller decision", func(t *testing.T) {
+		frozen := testFrozenCharter(t)
+		artifactDigest := testDigest("artifact")
+		finding := defectFinding("finding-additive-zero-delta", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+		finding.EstimatedDelta = contracts.SplitDeltaEstimate{
+			Production: contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 0, Files: 0},
+			Test:       contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 0, Files: 0},
+		}
+		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
+		finding.SmallestSufficientRemedy.Summary = "Add the missing guard."
+		result := runAdjudication(t, runInput{
+			frozen:      frozen,
+			roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})}},
+			manifest:    manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
+		})
+		got := onlyFinding(t, result)
+		assertDisposition(t, got, contracts.DispositionAdmitted)
+		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
+	})
+
 	t.Run("relay absent high severity cannot forge a clean pass", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
