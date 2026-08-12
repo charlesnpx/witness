@@ -49,9 +49,6 @@ func applyOutputDefaults(config *Config) {
 	if strings.TrimSpace(config.Outputs.RunResultPath) == "" {
 		config.Outputs.RunResultPath = filepath.Join(config.StateDir, "verdict.json")
 	}
-	if strings.TrimSpace(config.Outputs.MetricsPath) == "" {
-		config.Outputs.MetricsPath = filepath.Join(config.StateDir, "metrics.json")
-	}
 }
 
 func assembleResultPath(config Config) string {

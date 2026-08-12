@@ -36,9 +36,8 @@ Every finding must state the smallest sufficient remedy. Propose at most one tes
 7. Assemble verification with `witness verification assemble`.
 8. Adjudicate with `witness adjudicate`.
 9. Inspect the run-result document, ledger records, pending verification, and Operational Envelope questions. Use `witness ledger promote` or `witness ledger accept-unverified` only for explicit owner decisions.
-10. Emit metrics with `witness metrics`.
 
-The pass ends after adjudication and metrics emission. Any decision to apply, override, accept risk, promote a question, or run another pass belongs to the caller or owner outside Witness.
+The pass ends after adjudication. Any decision to apply, override, accept risk, promote a question, derive statistics, or run another pass belongs to the caller or owner outside Witness.
 
 After the pass, the orchestrating agent must manually produce a human-readable
 review report with these required finding sections: `Witness ledger findings`,

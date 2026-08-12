@@ -103,7 +103,6 @@ func driverGeneratedOutputs(config Config) []driverGeneratedOutput {
 		{role: "assemble-result", path: assembleResultPath(config)},
 		{role: roleOutputChangeSurfaceRole, path: roleOutputChangeSurfacePath(config)},
 		{role: "run-result", path: config.Outputs.RunResultPath},
-		{role: "metrics", path: config.Outputs.MetricsPath},
 		{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json")},
 		{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json")},
 		{role: "backend-status", path: filepath.Join(config.StateDir, "backend-status.json")},

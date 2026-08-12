@@ -26,7 +26,6 @@ import (
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/relayrun"
@@ -55,8 +54,7 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	}{
 		{stage: stagePlan},
 		{stage: stageAssemble},
-		{stage: stageAdjudicate},
-		{stage: stageMetrics, complete: true},
+		{stage: stageAdjudicate, complete: true},
 	} {
 		invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 		if err != nil {
@@ -73,6 +71,9 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	if !state.Complete {
 		t.Fatal("final pass state is not complete")
 	}
+	if len(state.Stages) != 5 {
+		t.Fatalf("stage count = %d, want 5 after metrics-stage removal", len(state.Stages))
+	}
 	for _, stage := range orderedStages {
 		if !stageComplete(state, stage) {
 			t.Fatalf("stage %s not complete in final state", stage)
@@ -80,6 +81,13 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	}
 	if state.NextAction.Type != actionComplete {
 		t.Fatalf("next action = %s, want complete", state.NextAction.Type)
+	}
+	stateBytes, err := os.ReadFile(filepath.Join(options.StateDir, StateFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(stateBytes, []byte(`"metrics"`)) || bytes.Contains(stateBytes, []byte(`"metrics_path"`)) {
+		t.Fatalf("pass state still persists metrics fields or stage: %s", stateBytes)
 	}
 }
 
@@ -423,18 +431,21 @@ func TestBeginResumeRejectsStateIdentityMismatch(t *testing.T) {
 	})
 }
 
-func TestResumeRejectsV3PassStateWithPolicyPathBeforeStrictDecode(t *testing.T) {
+func TestResumeRejectsPreMetricsPassStateBeforeStageValidation(t *testing.T) {
 	stateDir := t.TempDir()
 	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), map[string]any{
-		"schema_version": "witness-pass-state-v3",
+		"schema_version": "witness-pass-state-v4",
 		"config": map[string]any{
-			"policy_path": "policy.json",
+			"outputs": map[string]any{
+				"metrics_path": "metrics.json",
+			},
 		},
+		"stages": []any{map[string]any{"name": "metrics", "status": statusComplete}},
 	})
 
 	_, err := Resume(context.Background(), ResumeOptions{StateDir: stateDir})
 	if err == nil {
-		t.Fatal("resume accepted a v3 pass state with policy_path")
+		t.Fatal("resume accepted a pre-metrics-removal pass state")
 	}
 	assertValidationCode(t, err, CodeStateUnsupported)
 
@@ -442,12 +453,12 @@ func TestResumeRejectsV3PassStateWithPolicyPathBeforeStrictDecode(t *testing.T) 
 	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
 		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
 	}
-	if strings.Contains(validation.Diagnostics[0].Message, "unknown_json_field") || !strings.Contains(validation.Diagnostics[0].Message, "policy-path removal") {
-		t.Fatalf("schema diagnostic message = %q, want explicit policy-path legacy refusal", validation.Diagnostics[0].Message)
+	if strings.Contains(validation.Diagnostics[0].Message, "unknown_json_field") || strings.Contains(validation.Diagnostics[0].Message, "unknown recorded stage") || !strings.Contains(validation.Diagnostics[0].Message, "metrics-stage removal") {
+		t.Fatalf("schema diagnostic message = %q, want explicit metrics-stage legacy refusal before stage validation", validation.Diagnostics[0].Message)
 	}
 	details := validation.Diagnostics[0].Details
-	if details["actual"] != "witness-pass-state-v3" || details["expected"] != StateSchemaVersion {
-		t.Fatalf("schema diagnostic details = %#v, want actual v3 and expected %s", details, StateSchemaVersion)
+	if details["actual"] != "witness-pass-state-v4" || details["expected"] != StateSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want actual v4 and expected %s", details, StateSchemaVersion)
 	}
 }
 
@@ -1155,19 +1166,7 @@ func TestResumeRejectsSelfConsistentTamperedAdjudicationResult(t *testing.T) {
 	result.ResultDigest = resultDigest
 	writeCanonicalForTest(t, resultPath, result)
 
-	metricsDocument, err := metrics.Run(metrics.Options{
-		LedgerPath:     state.Config.LedgerPath,
-		PreflightPath:  state.Config.Outputs.PreflightPath,
-		RunResultPaths: []string{resultPath},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeJSONFile(state.Config.Outputs.MetricsPath, metricsDocument); err != nil {
-		t.Fatal(err)
-	}
 	refreshArtifactDigestForTest(t, state, "run-result", state.Config.Outputs.RunResultPath)
-	refreshArtifactDigestForTest(t, state, "metrics", state.Config.Outputs.MetricsPath)
 	for index := range state.Stages {
 		if state.Stages[index].Name == stageAdjudicate {
 			state.Stages[index].Details["result_digest"] = result.ResultDigest
@@ -1937,17 +1936,15 @@ func TestPassResumeConsumesRecordedUnavailableRelayRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume adjudicate: %v", err)
 	}
-	assertInvocation(t, invocation, stageAdjudicate, actionWitnessCommand, false)
+	assertInvocation(t, invocation, stageAdjudicate, actionComplete, true)
 	verdict := readJSONForTest[adjudicate.Result](t, state.Config.Outputs.RunResultPath)
 	if len(verdict.Findings) != 1 || verdict.Findings[0].Disposition != contracts.DispositionPendingVerification || verdict.Summary.PendingVerification != 1 {
 		t.Fatalf("verdict = %#v, want one pending finding", verdict)
 	}
 
-	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
-	if err != nil {
-		t.Fatalf("resume metrics: %v", err)
+	if !invocation.Complete || invocation.NextAction.Type != actionComplete {
+		t.Fatalf("adjudication invocation = %#v, want completed pass", invocation)
 	}
-	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
 }
 
 func TestRunBatchesRecordPassesConsumingBindingValidation(t *testing.T) {
@@ -2535,12 +2532,10 @@ func TestPassResumeAssemblesReadyPortableExportAfterLaunchFailure(t *testing.T) 
 	if err != nil {
 		t.Fatalf("resume adjudicate: %v", err)
 	}
-	assertInvocation(t, invocation, stageAdjudicate, actionWitnessCommand, false)
-	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
-	if err != nil {
-		t.Fatalf("resume metrics: %v", err)
+	assertInvocation(t, invocation, stageAdjudicate, actionComplete, true)
+	if !invocation.Complete || invocation.NextAction.Type != actionComplete {
+		t.Fatalf("adjudication invocation = %#v, want completed pass", invocation)
 	}
-	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
 }
 
 func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
@@ -2577,7 +2572,7 @@ func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
 		t.Fatalf("relay batches = %#v, want one not-required degraded batch", state.RelayBatches)
 	}
 
-	for _, stage := range []string{stageAssemble, stageAdjudicate, stageMetrics} {
+	for _, stage := range []string{stageAssemble, stageAdjudicate} {
 		invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 		if err != nil {
 			t.Fatalf("resume %s: %v", stage, err)
@@ -2593,15 +2588,8 @@ func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
 	if result.Summary.PendingVerification != 1 {
 		t.Fatalf("adjudication summary = %#v, want one pending verification", result.Summary)
 	}
-	metricsDocument := readJSONForTest[map[string]any](t, filepath.Join(options.StateDir, "metrics.json"))
-	pending, _ := metricsDocument["pending_verification"].(map[string]any)
-	strata, _ := pending["strata"].([]any)
-	if len(strata) != 1 {
-		t.Fatalf("metrics pending strata = %#v, want one relay_absent stratum", pending["strata"])
-	}
-	stratum, _ := strata[0].(map[string]any)
-	if stratum["backend_auth_status"] != "relay_absent" {
-		t.Fatalf("metrics stratum = %#v, want relay_absent", stratum)
+	if !invocation.Complete || invocation.NextAction.Type != actionComplete {
+		t.Fatalf("adjudication invocation = %#v, want completed degraded pass", invocation)
 	}
 }
 
@@ -3590,7 +3578,7 @@ func runPassToCompletion(t *testing.T, options BeginOptions, withFinding bool) *
 		t.Fatalf("resume preflight: %v", err)
 	}
 	writeRoleOutputsForState(t, options.StateDir, withFinding)
-	for _, stage := range []string{stagePlan, stageAssemble, stageAdjudicate, stageMetrics} {
+	for _, stage := range []string{stagePlan, stageAssemble, stageAdjudicate} {
 		invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 		if err != nil {
 			t.Fatalf("resume %s: %v", stage, err)

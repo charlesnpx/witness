@@ -16,7 +16,6 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/strictjson"
@@ -242,12 +241,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
 		}
 		return inputs, []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}, nil
-	case stageMetrics:
-		return []artifactInput{
-			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
-			{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()},
-			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
-		}, []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}, nil
 	default:
 		return nil, nil, nil
 	}
@@ -375,8 +368,6 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 		err = validateAssembleStageOutputs(state, artifact.Role)
 	case artifact.Role == "run-result":
 		err = validateAdjudicateOutput(state)
-	case artifact.Role == "metrics":
-		err = validateMetricsOutput(state)
 	default:
 		err = diag.New(CodeStateInvalid, "recorded pass stage output has no authoritative validator.", diag.WithDetail("role", artifact.Role))
 	}
@@ -1666,26 +1657,6 @@ func expectedAdjudicationResult(state *State) (*adjudicate.Result, error) {
 		return nil, diag.New(CodeStateInvalid, "adjudication did not produce a run result.")
 	}
 	return result, nil
-}
-
-func validateMetricsOutput(state *State) error {
-	data, err := os.ReadFile(state.Config.Outputs.MetricsPath)
-	if err != nil {
-		return err
-	}
-	actual, err := metrics.ReadDocumentBytes(data)
-	if err != nil {
-		return err
-	}
-	expected, err := metrics.Run(metrics.Options{
-		LedgerPath:     state.Config.LedgerPath,
-		PreflightPath:  state.Config.Outputs.PreflightPath,
-		RunResultPaths: []string{state.Config.Outputs.RunResultPath},
-	})
-	if err != nil {
-		return err
-	}
-	return requireSemanticMatch("metrics", actual, expected)
 }
 
 func adjudicationResultDigest(result adjudicate.Result) (string, error) {
