@@ -38,6 +38,9 @@ const (
 	// a relay named-input budget before launch.
 	CodeNamedInputBudgetInvalid = "relayrun_named_input_budget_invalid"
 	CodeInvalidRunRecord        = "relayrun_invalid_run_record"
+	// CodeConsumingRunRecordExists identifies an attempted relaunch of a batch
+	// whose retained per-batch record proves it has already been consumed.
+	CodeConsumingRunRecordExists = "relayrun_consuming_record_exists"
 	// CodeInvalidRunRecordStreamSummary identifies claimed launch stream
 	// summaries that do not match retained launch bytes.
 	CodeInvalidRunRecordStreamSummary = "relayrun_invalid_run_record_stream_summary"
@@ -143,6 +146,13 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 	client := relayclient.Client{Executable: options.RelayPath, Runner: options.Runner}
 	result := &Result{SchemaVersion: SchemaVersion}
 	launchCWD := effectiveLaunchCWD(options.LaunchCWD)
+	// Check every target before launching any batch. Besides refusing a
+	// relaunch of a consumed batch, doing this as a complete preflight avoids
+	// launching an earlier batch and then discovering a later batch cannot be
+	// safely persisted.
+	if err := rejectExistingConsumingRunRecords(options.OutputDir, batches); err != nil {
+		return result, err
+	}
 	for _, batch := range batches {
 		record := RunRecord{
 			SchemaVersion:   RunRecordSchema,
@@ -230,16 +240,76 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 		result.Runs = append(result.Runs, record)
 	}
 	if options.OutputDir != "" {
-		if err := writeCanonical(filepath.Join(options.OutputDir, "verification", "runs", "index.json"), result); err != nil {
+		// Recheck before persistence so a consuming per-batch record that
+		// appeared after the launch preflight is not replaced.
+		if err := rejectExistingConsumingRunRecords(options.OutputDir, batches); err != nil {
 			return result, err
 		}
 		for _, record := range result.Runs {
+			// Keep the final check adjacent to the replacement itself. The
+			// earlier batch-wide check prevents an avoidable partial run; this
+			// one preserves consuming evidence if the file changed meanwhile.
+			if err := rejectExistingConsumingRunRecord(options.OutputDir, record.BatchID); err != nil {
+				return result, err
+			}
 			if err := writeCanonical(filepath.Join(options.OutputDir, "verification", "runs", record.BatchID+".json"), record); err != nil {
 				return result, err
 			}
 		}
+		if err := writeCanonical(filepath.Join(options.OutputDir, "verification", "runs", "index.json"), result); err != nil {
+			return result, err
+		}
 	}
 	return result, nil
+}
+
+func rejectExistingConsumingRunRecords(outputDir string, batches []BatchInput) error {
+	if strings.TrimSpace(outputDir) == "" {
+		return nil
+	}
+	seen := make(map[string]bool, len(batches))
+	for _, batch := range batches {
+		batchID := strings.TrimSpace(batch.Plan.BatchID)
+		if batchID == "" || seen[batchID] {
+			continue
+		}
+		seen[batchID] = true
+		if err := rejectExistingConsumingRunRecord(outputDir, batchID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectExistingConsumingRunRecord(outputDir string, batchID string) error {
+	path := filepath.Join(outputDir, "verification", "runs", batchID+".json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return diag.Wrap(err, CodeOutputFailed, "existing relay run record could not be read.", diag.WithDetail("batch_id", batchID), diag.WithDetail("path", path))
+	}
+	records, err := ReadRunRecordsBytes(data)
+	if err != nil {
+		return diag.Wrap(err, CodeInvalidRunRecord, "existing relay run record could not be validated before launch.", diag.WithDetail("batch_id", batchID), diag.WithDetail("path", path))
+	}
+	if len(records) != 1 {
+		return diag.New(CodeInvalidRunRecord, "existing per-batch relay run record must contain exactly one run.", diag.WithDetail("batch_id", batchID), diag.WithDetail("path", path), diag.WithDetail("run_count", len(records)))
+	}
+	record := records[0]
+	if record.BatchID != batchID {
+		return diag.New(CodeInvalidRunRecord, "existing per-batch relay run record batch_id does not match its file name.", diag.WithDetail("expected_batch_id", batchID), diag.WithDetail("actual_batch_id", record.BatchID), diag.WithDetail("path", path))
+	}
+	if !record.ConsumesBatch {
+		return nil
+	}
+	return diag.New(
+		CodeConsumingRunRecordExists,
+		fmt.Sprintf("relay verification batch %q cannot proceed because a consuming record already exists.", batchID),
+		diag.WithDetail("batch_id", batchID),
+		diag.WithDetail("path", path),
+	)
 }
 
 // rejectBeforeLaunch records a local rejection without invoking relay. The
@@ -1015,7 +1085,13 @@ func decodeIntegrationBundle(payload any) (integrationBundle, []diag.Diagnostic)
 		return integrationBundle{}, []diag.Diagnostic{namedInputBudgetInvalid("integration bundle contracts must be a JSON object.")}
 	}
 	bundle := integrationBundle{Contracts: make(map[string]integrationContract, len(contractsObject))}
-	for contractID, contractValue := range contractsObject {
+	contractIDs := make([]string, 0, len(contractsObject))
+	for contractID := range contractsObject {
+		contractIDs = append(contractIDs, contractID)
+	}
+	sort.Strings(contractIDs)
+	for _, contractID := range contractIDs {
+		contractValue := contractsObject[contractID]
 		contractObject, ok := contractValue.(map[string]any)
 		if !ok {
 			return integrationBundle{}, []diag.Diagnostic{namedInputBudgetInvalid("integration bundle contract must be a JSON object.", diag.WithDetail("contract_id", contractID))}

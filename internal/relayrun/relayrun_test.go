@@ -734,6 +734,34 @@ func TestRunBatchesNamedInputBudgets(t *testing.T) {
 	}
 }
 
+func TestRunBatchesBudgetRejectionWithoutPriorRecordRemainsNonConsuming(t *testing.T) {
+	dir := t.TempDir()
+	inputs := newBudgetTestInputs(t, dir, []byte("charter"), []byte(`{"batch":"input"}`), []byte("artifact"))
+	options := inputs.options(rejectIfInvokedRelayRunner{t: t})
+	options.OutputDir = filepath.Join(dir, "state")
+	options.NamedInputBudgetBytes = 1
+
+	result, err := RunBatches(context.Background(), []BatchInput{inputs.batch}, options)
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if len(result.Runs) != 1 {
+		t.Fatalf("runs = %#v, want one", result.Runs)
+	}
+	record := result.Runs[0]
+	if record.Status != RunStatusLaunchFailed || record.ProviderInvoked != ProviderInvokedFalse || record.ConsumesBatch || len(record.Diagnostics) == 0 || record.Diagnostics[0].Code != CodeNamedInputBudgetExceeded {
+		t.Fatalf("record = %#v, want non-consuming launch_failed named-input-budget record", record)
+	}
+	persisted, err := os.ReadFile(filepath.Join(options.OutputDir, "verification", "runs", inputs.batch.Plan.BatchID+".json"))
+	if err != nil {
+		t.Fatalf("read persisted pre-launch rejection: %v", err)
+	}
+	runs, err := ReadRunRecordsBytes(persisted)
+	if err != nil || len(runs) != 1 || runs[0].ConsumesBatch {
+		t.Fatalf("persisted runs=%#v err=%v, want one non-consuming record", runs, err)
+	}
+}
+
 type budgetTestInputs struct {
 	batch        BatchInput
 	batchPath    string
