@@ -25,15 +25,26 @@ Every finding must state the smallest sufficient remedy. Propose at most one tes
 
 ## Orchestration Procedure
 
-1. Freeze the Charter with `witness charter freeze`.
-2. Run verification preflight with `witness verification preflight`.
-3. Produce role-output documents for the applicable finder roles.
-4. Create verification-batch documents with `witness verification plan`.
-5. Run each required relay verification batch once with the selected Witness recipe. Preserve the run-result document, portable export, provider/result refs, transcript, and retained artifacts.
-6. Assemble verification with `witness verification assemble`.
-7. Adjudicate with `witness adjudicate`.
-8. Inspect the run-result document, ledger records, policy decisions, pending verification, and Operational Envelope questions. Use `witness ledger promote` or `witness ledger accept-unverified` only for explicit owner decisions.
-9. Run policy checks for caller-measured deltas with `witness policy check-application` before any external automation applies an automatic candidate.
-10. Emit metrics with `witness metrics`.
+1. Before starting a large, multi-branch, or moving-stack pass, write a short human-readable review plan. It records the frozen branch names and SHAs, included branches, branch-movement policy and response to drift, relay source-reduction approach, and stack-attribution boundary. This is a manual operator step; use it whenever the scope or relay input reduction needs deliberate judgment.
+2. Freeze the Charter with `witness charter freeze`.
+3. Run verification preflight with `witness verification preflight`.
+4. Produce role-output documents for the applicable finder roles.
+5. Create verification-batch documents with `witness verification plan`.
+6. Run each required relay verification batch once with the selected Witness recipe. Preserve the run-result document, portable export, provider/result refs, transcript, and retained artifacts.
+7. Assemble verification with `witness verification assemble`.
+8. Adjudicate with `witness adjudicate`.
+9. Inspect the run-result document, ledger records, policy decisions, pending verification, and Operational Envelope questions. Use `witness ledger promote` or `witness ledger accept-unverified` only for explicit owner decisions.
+10. Run policy checks for caller-measured deltas with `witness policy check-application` before any external automation applies an automatic candidate.
+11. Emit metrics with `witness metrics`.
 
 The pass ends after adjudication and metrics emission. Any decision to apply, override, accept risk, promote a question, or run another pass belongs to the caller or owner outside Witness.
+
+After the pass, the orchestrating agent must manually produce a human-readable
+review report with these required finding sections: `Witness ledger findings`,
+`Manual post-freeze findings`, and `Pre-existing defects excluded from stack
+attribution`. Each finding belongs in exactly one section; state an empty
+section as empty. Ledger findings retain their Witness provenance and truthful
+verification state, including `pending verification` when relay produced no
+verdict. Manual post-freeze findings carry no Witness provenance, and a defect
+that reproduces at the review base is excluded from stack attribution. Witness
+does not generate this report.
