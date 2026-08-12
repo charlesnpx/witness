@@ -83,6 +83,26 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	}
 }
 
+func TestDeltaEstimatePayloadPreservesExplicitZero(t *testing.T) {
+	// An explicit zero must remain distinguishable from an omitted value in the
+	// durable finding payload, even though measured-delta comparison is gone.
+	estimate := contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown}
+	if err := estimate.UnmarshalJSON([]byte(`{"status":"known","lines":0}`)); err != nil {
+		t.Fatalf("unmarshal explicit-zero delta: %v", err)
+	}
+	payload := deltaEstimatePayload(estimate)
+	lines, ok := payload["lines"]
+	if !ok {
+		t.Fatalf("explicit-zero lines dropped from ledger payload: %#v", payload)
+	}
+	if lines != 0 {
+		t.Fatalf("lines = %v, want explicit 0", lines)
+	}
+	if _, ok := payload["files"]; ok {
+		t.Fatalf("omitted files must stay omitted: %#v", payload)
+	}
+}
+
 func TestBeginWithSameOptionsResumesExistingPass(t *testing.T) {
 	options := newBeginOptions(t)
 
@@ -403,18 +423,18 @@ func TestBeginResumeRejectsStateIdentityMismatch(t *testing.T) {
 	})
 }
 
-func TestResumeRejectsV2PassStateWithRulesPathBeforeStrictDecode(t *testing.T) {
+func TestResumeRejectsV3PassStateWithPolicyPathBeforeStrictDecode(t *testing.T) {
 	stateDir := t.TempDir()
 	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), map[string]any{
-		"schema_version": "witness-pass-state-v2",
+		"schema_version": "witness-pass-state-v3",
 		"config": map[string]any{
-			"rules_path": "rules.json",
+			"policy_path": "policy.json",
 		},
 	})
 
 	_, err := Resume(context.Background(), ResumeOptions{StateDir: stateDir})
 	if err == nil {
-		t.Fatal("resume accepted a v2 pass state with rules_path")
+		t.Fatal("resume accepted a v3 pass state with policy_path")
 	}
 	assertValidationCode(t, err, CodeStateUnsupported)
 
@@ -422,12 +442,12 @@ func TestResumeRejectsV2PassStateWithRulesPathBeforeStrictDecode(t *testing.T) {
 	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
 		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
 	}
-	if strings.Contains(validation.Diagnostics[0].Message, "unknown_json_field") || !strings.Contains(validation.Diagnostics[0].Message, "predates the decision-rules change") {
-		t.Fatalf("schema diagnostic message = %q, want explicit decision-rules legacy refusal", validation.Diagnostics[0].Message)
+	if strings.Contains(validation.Diagnostics[0].Message, "unknown_json_field") || !strings.Contains(validation.Diagnostics[0].Message, "policy-path removal") {
+		t.Fatalf("schema diagnostic message = %q, want explicit policy-path legacy refusal", validation.Diagnostics[0].Message)
 	}
 	details := validation.Diagnostics[0].Details
-	if details["actual"] != "witness-pass-state-v2" || details["expected"] != StateSchemaVersion {
-		t.Fatalf("schema diagnostic details = %#v, want actual v2 and expected %s", details, StateSchemaVersion)
+	if details["actual"] != "witness-pass-state-v3" || details["expected"] != StateSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want actual v3 and expected %s", details, StateSchemaVersion)
 	}
 }
 
@@ -436,14 +456,8 @@ func TestResumeRejectsExplicitHeadManifestSnapshotMismatch(t *testing.T) {
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
 	headPath := filepath.Join(root, "head-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
 	options.HeadManifestPath = headPath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -876,14 +890,8 @@ func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
 	headPath := filepath.Join(root, "head-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
 	options.HeadManifestPath = headPath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -932,8 +940,8 @@ func TestCallerRoleOutputsDeltaActionCarriesEarlyChangeSurface(t *testing.T) {
 	if invocation.SchemaVersion != InvocationSchemaVersion {
 		t.Fatalf("schema_version = %s, want %s", invocation.SchemaVersion, InvocationSchemaVersion)
 	}
-	if action.ScopePolicy != contracts.ScopePolicyDeltaObligating {
-		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, contracts.ScopePolicyDeltaObligating)
+	if action.ScopePolicy != changesurface.ScopePolicyDeltaObligating {
+		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, changesurface.ScopePolicyDeltaObligating)
 	}
 	if action.ChangeSurfacePath == "" || !filepath.IsAbs(action.ChangeSurfacePath) {
 		t.Fatalf("change_surface_path = %q, want absolute path", action.ChangeSurfacePath)
@@ -974,21 +982,24 @@ func TestCallerRoleOutputsDeltaActionCarriesEarlyChangeSurface(t *testing.T) {
 	}
 }
 
-func TestResumeRejectsRoleOutputActionPolicyDriftBeforePlanning(t *testing.T) {
+func TestResumeRejectsTamperedRoleOutputActionChangeSurfaceBeforePlanning(t *testing.T) {
 	options, invocation, _, _ := beginDeltaRoleOutputWaitForTest(t)
-	if invocation.NextAction.ScopePolicy != contracts.ScopePolicyDeltaObligating {
-		t.Fatalf("scope_policy = %s, want %s", invocation.NextAction.ScopePolicy, contracts.ScopePolicyDeltaObligating)
+	if invocation.NextAction.ScopePolicy != changesurface.ScopePolicyDeltaObligating {
+		t.Fatalf("scope_policy = %s, want %s", invocation.NextAction.ScopePolicy, changesurface.ScopePolicyDeltaObligating)
 	}
 	writeRoleOutputsForState(t, options.StateDir, false)
 
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "whole-tree-policy"
-	policy.ScopePolicy = contracts.ScopePolicyWholeTree
-	writeCanonicalForTest(t, options.PolicyPath, policy)
+	state := readPassStateForTest(t, options.StateDir)
+	state.NextAction.ScopePolicy = changesurface.ScopePolicyWholeTree
+	state.NextAction.ChangeSurfacePath = ""
+	state.NextAction.ChangeSurfaceDigest = ""
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 	if err == nil {
-		t.Fatal("resume accepted role-output files after action policy drift")
+		t.Fatal("resume accepted a tampered role-output action")
 	}
 	assertValidationCode(t, err, CodeNextActionDrift)
 	var validation *ValidationError
@@ -1004,37 +1015,15 @@ func TestResumeRejectsRoleOutputActionPolicyDriftBeforePlanning(t *testing.T) {
 	if !ok {
 		t.Fatalf("rederived details = %#v, want object", details["rederived"])
 	}
-	if persisted["scope_policy"] != contracts.ScopePolicyDeltaObligating || rederived["scope_policy"] != contracts.ScopePolicyWholeTree {
-		t.Fatalf("drift details = %#v, want delta persisted and whole-tree rederived", details)
+	if persisted["scope_policy"] != changesurface.ScopePolicyWholeTree || rederived["scope_policy"] != changesurface.ScopePolicyDeltaObligating {
+		t.Fatalf("drift details = %#v, want whole-tree persisted and delta rederived", details)
 	}
-	if strings.TrimSpace(persisted["change_surface_digest"].(string)) == "" || rederived["change_surface_digest"] != "" {
-		t.Fatalf("change-surface drift details = %#v, want persisted digest and empty rederived digest", details)
+	if persisted["change_surface_digest"] != "" || strings.TrimSpace(rederived["change_surface_digest"].(string)) == "" {
+		t.Fatalf("change-surface drift details = %#v, want empty persisted digest and a rederived digest", details)
 	}
-	state := readPassStateForTest(t, options.StateDir)
+	state = readPassStateForTest(t, options.StateDir)
 	if _, statErr := os.Stat(state.Config.Outputs.PlanPath); !os.IsNotExist(statErr) {
 		t.Fatalf("plan was written before action drift failure: %v", statErr)
-	}
-}
-
-func TestCallerRoleOutputsDeltaActionFailsWithoutDerivableChangeSurface(t *testing.T) {
-	options := newBeginOptions(t)
-	root := filepath.Dir(options.StateDir)
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
-	options.PolicyPath = policyPath
-
-	if _, err := Begin(context.Background(), options); err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
-	if err == nil {
-		t.Fatal("resume emitted a delta role-output action without a derivable change surface")
-	}
-	if got := diagCode(err); got != planning.CodeMissingChangeSurface {
-		t.Fatalf("error code = %s, want %s: %v", got, planning.CodeMissingChangeSurface, err)
 	}
 }
 
@@ -1043,14 +1032,8 @@ func TestPreflightRecordIncludesEarlyChangeSurfaceInputs(t *testing.T) {
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
 	headPath := filepath.Join(root, "head-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
 	options.HeadManifestPath = headPath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -1118,8 +1101,8 @@ func TestCallerRoleOutputsWholeTreeActionOmitsChangeSurface(t *testing.T) {
 		t.Fatalf("resume preflight: %v", err)
 	}
 	action := invocation.NextAction
-	if action.ScopePolicy != contracts.ScopePolicyWholeTree {
-		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, contracts.ScopePolicyWholeTree)
+	if action.ScopePolicy != changesurface.ScopePolicyWholeTree {
+		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, changesurface.ScopePolicyWholeTree)
 	}
 	if action.ChangeSurfacePath != "" || action.ChangeSurfaceDigest != "" {
 		t.Fatalf("whole-tree action carried change surface fields: %#v", action)
@@ -1485,10 +1468,6 @@ func TestDriverLedgerAppendsSameLineageKindsAsSharedAdjudicationService(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	effective, err := loadEffectivePolicy(stateBeforeAdjudicate.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
 	roleOutputs := make([]adjudicate.RoleOutputInput, 0, len(stateBeforeAdjudicate.Config.RoleOutputs))
 	for _, item := range stateBeforeAdjudicate.Config.RoleOutputs {
 		document, err := readRoleOutput(item.Path)
@@ -1498,14 +1477,12 @@ func TestDriverLedgerAppendsSameLineageKindsAsSharedAdjudicationService(t *testi
 		roleOutputs = append(roleOutputs, adjudicate.RoleOutputInput{Path: item.Path, Document: document})
 	}
 	service, err := RunAdjudicationService(AdjudicationOptions{
-		FrozenCharter:                frozen,
-		RoleOutputs:                  roleOutputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurface.BaseManifest,
-		HeadManifest:                 changeSurface.HeadManifest,
-		LedgerPath:                   serviceLedgerPath,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
+		FrozenCharter: frozen,
+		RoleOutputs:   roleOutputs,
+		Manifest:      manifest,
+		BaseManifest:  changeSurface.BaseManifest,
+		HeadManifest:  changeSurface.HeadManifest,
+		LedgerPath:    serviceLedgerPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1944,8 +1921,8 @@ func TestPassResumeConsumesRecordedUnavailableRelayRun(t *testing.T) {
 	}
 	assertInvocation(t, invocation, stageAdjudicate, actionWitnessCommand, false)
 	verdict := readJSONForTest[adjudicate.Result](t, state.Config.Outputs.RunResultPath)
-	if len(verdict.Findings) != 1 || verdict.Findings[0].Disposition != contracts.DispositionPendingVerification || verdict.Summary.PendingVerification != 1 || verdict.Summary.FixpointEligible {
-		t.Fatalf("verdict = %#v, want one pending, fixpoint-ineligible finding", verdict)
+	if len(verdict.Findings) != 1 || verdict.Findings[0].Disposition != contracts.DispositionPendingVerification || verdict.Summary.PendingVerification != 1 {
+		t.Fatalf("verdict = %#v, want one pending finding", verdict)
 	}
 
 	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
@@ -3273,13 +3250,7 @@ func beginDeltaRoleOutputWaitForTest(t *testing.T) (BeginOptions, *Invocation, f
 	options := newBeginOptions(t)
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -3633,11 +3604,6 @@ func adjudicationSummaryForTest(findings []adjudicate.FindingVerdict) adjudicate
 			summary.None++
 		}
 	}
-	summary.FixpointEligible = summary.Admitted == 0 &&
-		summary.Advisory == 0 &&
-		summary.PendingVerification == 0 &&
-		summary.AutomaticCandidate == 0 &&
-		summary.CallerDecision == 0
 	return summary
 }
 
@@ -3698,10 +3664,6 @@ func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	effective, err := loadEffectivePolicy(state.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
 	roleOutputs := make([]adjudicate.RoleOutputInput, 0, len(state.Config.RoleOutputs))
 	for _, item := range state.Config.RoleOutputs {
 		document, err := readRoleOutput(item.Path)
@@ -3711,14 +3673,12 @@ func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath strin
 		roleOutputs = append(roleOutputs, adjudicate.RoleOutputInput{Path: item.Path, Document: document})
 	}
 	return RunAdjudicationService(AdjudicationOptions{
-		FrozenCharter:                frozen,
-		RoleOutputs:                  roleOutputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurface.BaseManifest,
-		HeadManifest:                 changeSurface.HeadManifest,
-		LedgerPath:                   ledgerPath,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
+		FrozenCharter: frozen,
+		RoleOutputs:   roleOutputs,
+		Manifest:      manifest,
+		BaseManifest:  changeSurface.BaseManifest,
+		HeadManifest:  changeSurface.HeadManifest,
+		LedgerPath:    ledgerPath,
 	})
 }
 

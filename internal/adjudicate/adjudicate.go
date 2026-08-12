@@ -19,14 +19,13 @@ import (
 )
 
 const (
-	ResultSchemaVersion = "witness-adjudication-run-result-v4"
+	ResultSchemaVersion = "witness-adjudication-run-result-v5"
 
 	CodeInvalidInput              = "adjudicate_invalid_input"
 	CodeInvalidFrozenCharter      = "adjudicate_invalid_frozen_charter"
 	CodeInvalidRoleOutput         = "adjudicate_invalid_role_output"
 	CodeInvalidManifest           = "adjudicate_invalid_manifest"
 	CodeUnsupportedResultSchema   = "adjudicate_unsupported_result_schema"
-	CodeInvalidPolicy             = "adjudicate_invalid_policy"
 	CodeInvalidRecurrenceLineage  = "adjudicate_invalid_recurrence_lineage"
 	CodeReceiptLoadFailed         = "adjudicate_receipt_load_failed"
 	CodeReceiptRelationshipFailed = "adjudicate_receipt_relationship_failed"
@@ -63,9 +62,6 @@ type Options struct {
 	ReceiptHMACKey     []byte
 	ReceiptHMACKeyFile string
 
-	Policy                       contracts.ReviewPolicy
-	PolicyCapReleaseLedgerBacked bool
-
 	PriorLineage         []PriorLineageRecord
 	PriorLineageProvided bool
 }
@@ -93,31 +89,25 @@ type PriorLineageResolutionEvent struct {
 }
 
 type Result struct {
-	SchemaVersion             string            `json:"schema_version"`
-	DigestProfile             string            `json:"digest_profile"`
-	ResultDigest              string            `json:"result_digest,omitempty"`
-	DecisionRulesVersion      string            `json:"decision_rules_version"`
-	PolicyVersion             string            `json:"policy_version"`
-	PolicyID                  string            `json:"policy_id"`
-	PolicyDigest              string            `json:"policy_digest,omitempty"`
-	CapReleaseCharterMismatch bool              `json:"cap_release_charter_mismatch"`
-	CapReleaseUnit            string            `json:"cap_release_unit,omitempty"`
-	CharterHash               string            `json:"charter_hash"`
-	ArtifactDigest            string            `json:"artifact_digest"`
-	ManifestDigest            string            `json:"manifest_digest"`
-	Findings                  []FindingVerdict  `json:"findings"`
-	Summary                   Summary           `json:"summary"`
-	Diagnostics               []diag.Diagnostic `json:"diagnostics,omitempty"`
+	SchemaVersion        string            `json:"schema_version"`
+	DigestProfile        string            `json:"digest_profile"`
+	ResultDigest         string            `json:"result_digest,omitempty"`
+	DecisionRulesVersion string            `json:"decision_rules_version"`
+	CharterHash          string            `json:"charter_hash"`
+	ArtifactDigest       string            `json:"artifact_digest"`
+	ManifestDigest       string            `json:"manifest_digest"`
+	Findings             []FindingVerdict  `json:"findings"`
+	Summary              Summary           `json:"summary"`
+	Diagnostics          []diag.Diagnostic `json:"diagnostics,omitempty"`
 }
 
 type Summary struct {
-	Admitted            int  `json:"admitted"`
-	Advisory            int  `json:"advisory"`
-	PendingVerification int  `json:"pending_verification"`
-	AutomaticCandidate  int  `json:"automatic_candidate"`
-	CallerDecision      int  `json:"caller_decision"`
-	None                int  `json:"none"`
-	FixpointEligible    bool `json:"fixpoint_eligible"`
+	Admitted            int `json:"admitted"`
+	Advisory            int `json:"advisory"`
+	PendingVerification int `json:"pending_verification"`
+	AutomaticCandidate  int `json:"automatic_candidate"`
+	CallerDecision      int `json:"caller_decision"`
+	None                int `json:"none"`
 }
 
 type summaryJSON struct {
@@ -127,7 +117,6 @@ type summaryJSON struct {
 	AutomaticCandidate  strictjson.Int `json:"automatic_candidate"`
 	CallerDecision      strictjson.Int `json:"caller_decision"`
 	None                strictjson.Int `json:"none"`
-	FixpointEligible    bool           `json:"fixpoint_eligible"`
 }
 
 func (summary *Summary) UnmarshalJSON(data []byte) error {
@@ -142,7 +131,6 @@ func (summary *Summary) UnmarshalJSON(data []byte) error {
 		AutomaticCandidate:  int(decoded.AutomaticCandidate),
 		CallerDecision:      int(decoded.CallerDecision),
 		None:                int(decoded.None),
-		FixpointEligible:    decoded.FixpointEligible,
 	}
 	return nil
 }
@@ -189,7 +177,7 @@ func ReadResultBytes(data []byte) (Result, error) {
 	if actual != ResultSchemaVersion {
 		return Result{}, diag.New(
 			CodeUnsupportedResultSchema,
-			"adjudication result schema_version is unsupported; witness-adjudication-run-result-v4 is required after decision-rules identity changed.",
+			"adjudication result schema_version is unsupported; witness-adjudication-run-result-v4 is refused and witness-adjudication-run-result-v5 is required after policy-engine fields were removed.",
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", ResultSchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -251,29 +239,7 @@ func (err *ValidationError) Error() string {
 }
 
 func Run(options Options) (*Result, error) {
-	policy := options.Policy
-	if policy.SchemaVersion == "" {
-		policy = contracts.DefaultReviewPolicy()
-	}
-	if !options.PolicyCapReleaseLedgerBacked {
-		policy.CapRelease = nil
-	}
-	scopePolicy := contracts.EffectiveScopePolicy(policy)
-	if scopePolicy == contracts.ScopePolicyDeltaObligating {
-		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
-			return nil, validationError(CodeInvalidPolicy, []diag.Diagnostic{diagnostic(contracts.CodeInvalidPolicy, "delta_obligating scope policy requires review-policy-v3.", "/schema_version", map[string]any{"actual": policy.SchemaVersion, "expected": contracts.ReviewPolicyV3})})
-		}
-	}
-	validationContext := policyContext(policy, options.FrozenCharter)
-	policyValidation := contracts.ValidateReviewPolicy(policy, validationContext)
-	if len(policyValidation.Diagnostics) > 0 {
-		return nil, validationError(CodeInvalidPolicy, policyValidation.Diagnostics)
-	}
-	capReleaseUnit := ""
-	if policy.CapRelease != nil {
-		capReleaseUnit = policy.CapRelease.Unit
-	}
-
+	scopePolicy := changesurface.ScopePolicy(options.Manifest.ScopePolicy)
 	var global []diag.Diagnostic
 	if options.FrozenCharter == nil {
 		global = append(global, diagnostic(CodeInvalidInput, "adjudication requires a frozen Charter.", "/charter", nil))
@@ -305,21 +271,16 @@ func Run(options Options) (*Result, error) {
 	relay := indexRelay(options.Manifest)
 
 	result := &Result{
-		SchemaVersion:             ResultSchemaVersion,
-		DigestProfile:             digest.Profile,
-		DecisionRulesVersion:      contracts.DecisionRulesVersion,
-		PolicyVersion:             policy.SchemaVersion,
-		PolicyID:                  policy.PolicyID,
-		PolicyDigest:              validationContext.PolicyDigest,
-		CapReleaseCharterMismatch: policyValidation.CapReleaseCharterMismatch,
-		CapReleaseUnit:            capReleaseUnit,
-		CharterHash:               options.Manifest.CharterHash,
-		ArtifactDigest:            options.Manifest.ArtifactDigest,
-		ManifestDigest:            manifestDigest,
-		Diagnostics:               append([]diag.Diagnostic(nil), documentDiagnostics...),
+		SchemaVersion:        ResultSchemaVersion,
+		DigestProfile:        digest.Profile,
+		DecisionRulesVersion: contracts.DecisionRulesVersion,
+		CharterHash:          options.Manifest.CharterHash,
+		ArtifactDigest:       options.Manifest.ArtifactDigest,
+		ManifestDigest:       manifestDigest,
+		Diagnostics:          append([]diag.Diagnostic(nil), documentDiagnostics...),
 	}
 	for _, finding := range loadedFindings {
-		verdict := adjudicateFinding(finding, receipts, relay, options, policy, scopePolicy)
+		verdict := adjudicateFinding(finding, receipts, relay, options, scopePolicy)
 		result.Findings = append(result.Findings, verdict)
 		result.Diagnostics = append(result.Diagnostics, verdict.Diagnostics...)
 	}
@@ -396,19 +357,6 @@ func ValidatePriorLineage(records []PriorLineageRecord) []diag.Diagnostic {
 	return diagnostics
 }
 
-func policyContext(policy contracts.ReviewPolicy, frozen *charter.FrozenCharter) *contracts.PolicyValidationContext {
-	policyForDigest := policy
-	policyForDigest.CapRelease = nil
-	policyDigest, _ := contracts.ReviewPolicyDigest(policyForDigest)
-	context := &contracts.PolicyValidationContext{
-		PolicyDigest: policyDigest,
-	}
-	if frozen != nil {
-		context.CharterHash = frozen.CharterHash
-	}
-	return context
-}
-
 func validateFrozenCharter(frozen charter.FrozenCharter) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if frozen.SchemaVersion != charter.FrozenSchemaVersion {
@@ -473,14 +421,14 @@ func validateManifestEnvelope(manifest contracts.VerificationManifest, frozen *c
 
 func validateManifestScopePolicy(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	manifestScopePolicy := contracts.EffectiveScopePolicy(contracts.ReviewPolicy{ScopePolicy: manifest.ScopePolicy})
+	manifestScopePolicy := changesurface.ScopePolicy(manifest.ScopePolicy)
 	if manifest.ScopePolicy != "" && manifestScopePolicy != scopePolicy {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest scope_policy does not match the loaded review policy.", "/manifest/scope_policy", map[string]any{"actual": manifestScopePolicy, "expected": scopePolicy}))
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest scope_policy is unsupported.", "/manifest/scope_policy", map[string]any{"actual": manifest.ScopePolicy, "expected": scopePolicy}))
 	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ScopePolicy == "" {
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ScopePolicy == "" {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires the verification manifest to declare scope_policy.", "/manifest/scope_policy", map[string]any{"expected": scopePolicy}))
 	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface == nil && manifest.BaselinePass == nil {
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ChangeSurface == nil && manifest.BaselinePass == nil {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires a verification manifest with a change_surface or explicit baseline_pass.", "/manifest/change_surface", map[string]any{"scope_policy": scopePolicy}))
 	}
 	return diagnostics
@@ -498,7 +446,7 @@ func validateManifestExclusionChangeSurface(manifest contracts.VerificationManif
 	if len(manifest.ExcludedFindings) == 0 {
 		return nil
 	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
 		return nil
 	}
 	diagnostics := make([]diag.Diagnostic, 0, len(manifest.ExcludedFindings))
@@ -857,7 +805,7 @@ func stringMapValue(object map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, policy contracts.ReviewPolicy, scopePolicy string) FindingVerdict {
+func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, scopePolicy string) FindingVerdict {
 	finding := item.finding
 	verdict := FindingVerdict{
 		FindingID:        finding.ID,
@@ -908,7 +856,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		return verdict
 	}
 
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && options.Manifest.ChangeSurface != nil && !contracts.FindingInChangeSurface(finding, *options.Manifest.ChangeSurface) {
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && options.Manifest.ChangeSurface != nil && !contracts.FindingInChangeSurface(finding, *options.Manifest.ChangeSurface) {
 		verdict.Disposition = contracts.DispositionAdvisory
 		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
 		verdict.Reasons = appendReason(verdict.Reasons, ReasonOutOfDelta)
@@ -953,7 +901,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 	verdict.Diagnostics = append(verdict.Diagnostics, relayResult.diagnostics...)
 	if relayResult.pending {
 		verdict.Disposition = contracts.DispositionPendingVerification
-		verdict.ApplicationClass = classifyApplication(item.role, finding, verdict.Disposition, verdict.EffectiveSeverity, options.FrozenCharter, policy)
+		verdict.ApplicationClass = classifyApplication(finding, verdict.Disposition, verdict.EffectiveSeverity)
 		verdict.Reasons = appendReason(verdict.Reasons, relayResult.reason)
 		return verdict
 	}
@@ -991,14 +939,14 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 			return verdict
 		default:
 			verdict.Disposition = contracts.DispositionPendingVerification
-			verdict.ApplicationClass = classifyApplication(item.role, finding, verdict.Disposition, verdict.EffectiveSeverity, options.FrozenCharter, policy)
+			verdict.ApplicationClass = classifyApplication(finding, verdict.Disposition, verdict.EffectiveSeverity)
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonRelayVerificationInvalid)
 			return verdict
 		}
 	}
 
 	verdict.Disposition = contracts.DispositionAdmitted
-	verdict.ApplicationClass = classifyApplication(item.role, finding, verdict.Disposition, verdict.EffectiveSeverity, options.FrozenCharter, policy)
+	verdict.ApplicationClass = classifyApplication(finding, verdict.Disposition, verdict.EffectiveSeverity)
 	return verdict
 }
 
@@ -1267,7 +1215,7 @@ func downgradeStrength(strength string) string {
 	}
 }
 
-func classifyApplication(role string, finding contracts.Finding, disposition string, severity string, frozen *charter.FrozenCharter, policy contracts.ReviewPolicy) string {
+func classifyApplication(finding contracts.Finding, disposition string, severity string) string {
 	if disposition == contracts.DispositionAdvisory {
 		return contracts.ApplicationClassNone
 	}
@@ -1280,19 +1228,10 @@ func classifyApplication(role string, finding contracts.Finding, disposition str
 	if severity == contracts.SeverityMedium || severity == contracts.SeverityLow {
 		return contracts.ApplicationClassCallerDecision
 	}
-	if role == contracts.RoleDefect && finding.SmallestSufficientRemedy.Direction == contracts.RemedyDirectionAdd {
-		if !policy.DefectAdditiveAutoApplyEnabled || policy.CapRelease == nil || frozen == nil || frozen.Charter.OperationalEnvelope == nil {
-			return contracts.ApplicationClassCallerDecision
-		}
-		productionEstimate, productionKnown := estimatedDeltaValueForUnit(finding.EstimatedDelta.Production, policy.CapRelease.Unit)
-		testEstimate, testKnown := estimatedDeltaValueForUnit(finding.EstimatedDelta.Test, policy.CapRelease.Unit)
-		if !productionKnown || !testKnown || policy.ProductionCap == nil || policy.TestCap == nil {
-			return contracts.ApplicationClassCallerDecision
-		}
-		if productionEstimate > *policy.ProductionCap || testEstimate > *policy.TestCap {
-			return contracts.ApplicationClassCallerDecision
-		}
-		return contracts.ApplicationClassAutomaticCandidate
+	// Additive changes are never automatic candidates. The deleted cap-release
+	// mechanism once permitted them; its permissiveness is deliberately not preserved.
+	if finding.SmallestSufficientRemedy.Direction == contracts.RemedyDirectionAdd {
+		return contracts.ApplicationClassCallerDecision
 	}
 	if nonPositiveDelta(finding.EstimatedDelta) {
 		return contracts.ApplicationClassAutomaticCandidate
@@ -1302,24 +1241,6 @@ func classifyApplication(role string, finding contracts.Finding, disposition str
 
 func deltaKnown(delta contracts.SplitDeltaEstimate) bool {
 	return delta.Production.Status == contracts.DeltaStatusKnown && delta.Test.Status == contracts.DeltaStatusKnown
-}
-
-func estimatedDeltaValueForUnit(delta contracts.DeltaEstimate, unit string) (int, bool) {
-	if delta.Status != contracts.DeltaStatusKnown {
-		return 0, false
-	}
-	switch strings.TrimSpace(unit) {
-	case "files":
-		if !delta.FilesPresent() {
-			return 0, false
-		}
-		return delta.Files, true
-	default:
-		if !delta.LinesPresent() {
-			return 0, false
-		}
-		return delta.Lines, true
-	}
 }
 
 func nonPositiveDelta(delta contracts.SplitDeltaEstimate) bool {
@@ -1346,11 +1267,6 @@ func summarize(findings []FindingVerdict) Summary {
 			summary.None++
 		}
 	}
-	summary.FixpointEligible = summary.Admitted == 0 &&
-		summary.Advisory == 0 &&
-		summary.PendingVerification == 0 &&
-		summary.AutomaticCandidate == 0 &&
-		summary.CallerDecision == 0
 	return summary
 }
 

@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/charlesnpx/witness/internal/adjudicate"
@@ -25,7 +24,6 @@ import (
 	"github.com/charlesnpx/witness/internal/metrics"
 	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
-	"github.com/charlesnpx/witness/internal/policy"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/relayrun"
@@ -62,11 +60,6 @@ var witnessCommands = map[string]map[string]bool{
 		"show":              true,
 		"promote":           true,
 		"accept-unverified": true,
-	},
-	"policy": {
-		"show":              true,
-		"release-caps":      true,
-		"check-application": true,
 	},
 	"role-output": {
 		"init":     true,
@@ -141,9 +134,6 @@ func route(args []string) error {
 			}
 			if args[0] == "ledger" {
 				return runLedger(args[1], args[2:])
-			}
-			if args[0] == "policy" {
-				return runPolicy(args[1], args[2:])
 			}
 			if args[0] == "role-output" {
 				return runRoleOutput(args[1], args[2:])
@@ -403,7 +393,6 @@ func runVerificationPlan(args []string) error {
 	flags := newFlagSet("witness verification plan", "Create a verification plan.")
 	frozenPath := flags.String("charter-freeze", "", "frozen Charter path")
 	preflightPath := flags.String("preflight", "", "verification preflight result path")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface derivation")
 	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface derivation")
 	baselinePass := flags.Bool("baseline-pass", false, "record an explicit whole-tree baseline pass under delta_obligating scope")
@@ -432,7 +421,6 @@ func runVerificationPlan(args []string) error {
 	protected := []protectedInput{
 		{role: "charter-freeze", path: *frozenPath},
 		{role: "preflight", path: *preflightPath},
-		{role: "policy", path: *policyPath},
 		{role: "base-manifest", path: *baseManifestPath},
 		{role: "head-manifest", path: *headManifestPath},
 		{role: "state-dir", path: *stateDir},
@@ -456,13 +444,6 @@ func runVerificationPlan(args []string) error {
 	if err := validatePlanningPreflightBinding(preflightBinding); err != nil {
 		return err
 	}
-	policyDocument := contracts.DefaultReviewPolicy()
-	if *policyPath != "" {
-		policyDocument, err = readReviewPolicyFile(*policyPath)
-		if err != nil {
-			return err
-		}
-	}
 	changeSurfaceInput, err := readPlanningChangeSurfaceInput(*baseManifestPath, *headManifestPath, *baselinePass)
 	if err != nil {
 		return err
@@ -484,7 +465,6 @@ func runVerificationPlan(args []string) error {
 		CharterDigest: digest.RawBytes(frozenBytes),
 		RoleOutputs:   inputs,
 		StateDir:      *stateDir,
-		Policy:        policyDocument,
 		Preflight:     preflightBinding,
 		ChangeSurface: changeSurfaceInput,
 	})
@@ -815,7 +795,6 @@ func runAdjudicate(args []string) error {
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	out := flags.String("out", "", "adjudication run-result output path")
 	var roleOutputPaths repeatedStrings
@@ -842,7 +821,6 @@ func runAdjudicate(args []string) error {
 		{role: "head-manifest", path: *headManifestPath},
 		{role: "receipt-hmac-key-file", path: *receiptHMACKeyFile},
 		{role: "prior-lineage", path: *priorLineagePath},
-		{role: "policy", path: *policyPath},
 		{role: "ledger", path: *ledgerPath},
 	}
 	protected = append(protected, protectedInputsForPaths("role-output", roleOutputPaths)...)
@@ -880,23 +858,17 @@ func runAdjudicate(args []string) error {
 			Document: document,
 		})
 	}
-	effective, err := loadEffectivePolicy(*policyPath, *ledgerPath, *frozenPath, "")
-	if err != nil {
-		return err
-	}
 	service, err := passdriver.RunAdjudicationService(passdriver.AdjudicationOptions{
-		FrozenCharter:                frozen,
-		RoleOutputs:                  inputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurfaceInput.BaseManifest,
-		HeadManifest:                 changeSurfaceInput.HeadManifest,
-		LedgerPath:                   *ledgerPath,
-		ReceiptOutputDir:             *receiptOutputDir,
-		ReceiptHMACKeyFile:           *receiptHMACKeyFile,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
-		PriorLineage:                 priorLineage,
-		PriorLineageProvided:         priorLineageProvided,
+		FrozenCharter:        frozen,
+		RoleOutputs:          inputs,
+		Manifest:             manifest,
+		BaseManifest:         changeSurfaceInput.BaseManifest,
+		HeadManifest:         changeSurfaceInput.HeadManifest,
+		LedgerPath:           *ledgerPath,
+		ReceiptOutputDir:     *receiptOutputDir,
+		ReceiptHMACKeyFile:   *receiptHMACKeyFile,
+		PriorLineage:         priorLineage,
+		PriorLineageProvided: priorLineageProvided,
 	})
 	if err != nil {
 		return err
@@ -1029,16 +1001,6 @@ func pendingVerificationID(runDigest string, findingID string) string {
 	return "pending-" + findingID + "-" + suffix
 }
 
-func policyDecisionReasons(finding adjudicate.FindingVerdict) []string {
-	if len(finding.Reasons) > 0 {
-		return append([]string(nil), finding.Reasons...)
-	}
-	if finding.ApplicationClass != "" {
-		return []string{finding.ApplicationClass}
-	}
-	return []string{"adjudicated"}
-}
-
 func runLedger(command string, args []string) error {
 	switch command {
 	case "show":
@@ -1141,331 +1103,13 @@ func runLedgerAcceptUnverified(args []string) error {
 	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-accept-unverified-v1", record))
 }
 
-func runPolicy(command string, args []string) error {
-	switch command {
-	case "show":
-		return runPolicyShow(args)
-	case "release-caps":
-		return runPolicyReleaseCaps(args)
-	case "check-application":
-		return runPolicyCheckApplication(args)
-	default:
-		return notImplemented("policy " + command)
-	}
-}
-
-func runPolicyShow(args []string) error {
-	flags := newFlagSet("witness policy show", "Show the effective review policy.")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
-	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
-	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
-	charterHash := flags.String("charter-hash", "", "current Charter hash")
-	out := flags.String("out", "", "policy show output path")
-	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return unexpectedArgs(flags.Args())
-	}
-	if err := rejectOutputPathAliases(*out,
-		protectedInput{role: "policy", path: *policyPath},
-		protectedInput{role: "ledger", path: *ledgerPath},
-		protectedInput{role: "charter-freeze", path: *charterPath},
-	); err != nil {
-		return err
-	}
-	effective, err := loadEffectivePolicy(*policyPath, *ledgerPath, *charterPath, *charterHash)
-	if err != nil {
-		return err
-	}
-	return writeCanonical(*out, effective.ShowDocument())
-}
-
-func runPolicyReleaseCaps(args []string) error {
-	flags := newFlagSet("witness policy release-caps", "Record a policy cap release.")
-	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
-	policyPath := flags.String("policy", "", "review-policy JSON path")
-	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
-	charterHash := flags.String("charter-hash", "", "current Charter hash")
-	unit := flags.String("unit", "lines", "cap unit")
-	productionCap := flags.Int("production-cap", 0, "production cap")
-	testCap := flags.Int("test-cap", 0, "test cap")
-	basis := flags.String("basis", "", "cap-release basis")
-	evidence := flags.String("evidence", "", "cap-release evidence")
-	rationale := flags.String("rationale", "", "cap-release rationale")
-	actor := flags.String("actor", "", "owner actor")
-	policyDigest := flags.String("policy-digest", "", "expected policy digest")
-	out := flags.String("out", "", "cap-release output path")
-	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return unexpectedArgs(flags.Args())
-	}
-	if *ledgerPath == "" {
-		return diag.New(diag.CodeInvalidCommand, "witness policy release-caps requires -ledger.")
-	}
-	if *policyPath == "" {
-		return diag.New(diag.CodeInvalidCommand, "witness policy release-caps requires -policy.")
-	}
-	if err := rejectOutputPathAliases(*out,
-		protectedInput{role: "ledger", path: *ledgerPath},
-		protectedInput{role: "policy", path: *policyPath},
-		protectedInput{role: "charter-freeze", path: *charterPath},
-	); err != nil {
-		return err
-	}
-	inputs, err := readPolicyCommandInputs(*policyPath, *charterPath, *charterHash)
-	if err != nil {
-		return err
-	}
-	if inputs.CharterHash == "" {
-		return diag.New(diag.CodeInvalidCommand, "witness policy release-caps requires -charter-freeze or -charter-hash.")
-	}
-	release, err := policy.BuildCapRelease(policy.ReleaseInput{
-		Policy:        inputs.Policy,
-		Unit:          *unit,
-		ProductionCap: *productionCap,
-		TestCap:       *testCap,
-		Basis:         *basis,
-		Evidence:      *evidence,
-		Rationale:     *rationale,
-		Actor:         *actor,
-		PolicyDigest:  *policyDigest,
-		CharterHash:   inputs.CharterHash,
-	})
-	if err != nil {
-		return err
-	}
-	record, err := ledger.AppendEvent(*ledgerPath, ledger.EventKindCapRelease, ledger.CapReleaseEvent{Release: release})
-	if err != nil {
-		return err
-	}
-	return writeCanonical(*out, policyReleaseCapsOutput{
-		SchemaVersion: "witness-policy-release-caps-v1",
-		CapRelease:    release,
-		LedgerRecord:  record,
-	})
-}
-
-func runPolicyCheckApplication(args []string) error {
-	flags := newFlagSet("witness policy check-application", "Check whether a policy application is allowed.")
-	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
-	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
-	charterHash := flags.String("charter-hash", "", "current Charter hash")
-	role := flags.String("role", contracts.RoleDefect, "application role")
-	remedyDirection := flags.String("remedy-direction", contracts.RemedyDirectionAdd, "remedy direction")
-	remedySign := flags.String("remedy-sign", policy.RemedySignPositive, "remedy sign")
-	operationalEnvelopePresent := flags.Bool("operational-envelope-present", false, "whether an Operational Envelope is present")
-	estimateProductionStatus := flags.String("estimated-production-status", contracts.DeltaStatusKnown, "estimated production delta status")
-	estimateProductionLines := flags.Int("estimated-production-lines", 0, "estimated production line delta")
-	estimateProductionFiles := flags.Int("estimated-production-files", 0, "estimated production file delta")
-	estimateTestStatus := flags.String("estimated-test-status", contracts.DeltaStatusKnown, "estimated test delta status")
-	estimateTestLines := flags.Int("estimated-test-lines", 0, "estimated test line delta")
-	estimateTestFiles := flags.Int("estimated-test-files", 0, "estimated test file delta")
-	findingID := flags.String("finding-id", "", "finding ID for lineage")
-	unit := flags.String("unit", "lines", "measured delta unit")
-	out := flags.String("out", "", "policy application check output path")
-	var measuredProduction optionalIntFlag
-	var measuredTest optionalIntFlag
-	flags.Var(&measuredProduction, "measured-production", "measured production line delta")
-	flags.Var(&measuredTest, "measured-test", "measured test line delta")
-	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
-		return err
-	}
-	setFlags := visitedFlagNames(flags)
-	if flags.NArg() != 0 {
-		return unexpectedArgs(flags.Args())
-	}
-	if *ledgerPath == "" {
-		return diag.New(diag.CodeInvalidCommand, "witness policy check-application requires -ledger.")
-	}
-	if !measuredProduction.set {
-		return diag.New(diag.CodeInvalidCommand, "witness policy check-application requires -measured-production.")
-	}
-	if !measuredTest.set {
-		return diag.New(diag.CodeInvalidCommand, "witness policy check-application requires -measured-test.")
-	}
-	if err := rejectOutputPathAliases(*out,
-		protectedInput{role: "ledger", path: *ledgerPath},
-		protectedInput{role: "policy", path: *policyPath},
-		protectedInput{role: "charter-freeze", path: *charterPath},
-	); err != nil {
-		return err
-	}
-	inputs, err := readPolicyCommandInputs(*policyPath, *charterPath, *charterHash)
-	if err != nil {
-		return err
-	}
-	envelopePresent := *operationalEnvelopePresent
-	if inputs.OperationalEnvelopePresent != nil {
-		envelopePresent = *inputs.OperationalEnvelopePresent
-	}
-	records, err := readLedgerRecordsIfSet(*ledgerPath)
-	if err != nil {
-		return err
-	}
-	releases, err := ledger.CapReleases(records)
-	if err != nil {
-		return err
-	}
-	check := policy.ApplicationCheck{
-		Role:                       *role,
-		RemedyDirection:            *remedyDirection,
-		RemedySign:                 *remedySign,
-		Unit:                       *unit,
-		OperationalEnvelopePresent: envelopePresent,
-		EstimatedDelta: contracts.SplitDeltaEstimate{
-			Production: estimateDeltaFromFlags(*estimateProductionStatus, *estimateProductionLines, *estimateProductionFiles, setFlags["estimated-production-status"], setFlags["estimated-production-lines"], setFlags["estimated-production-files"]),
-			Test:       estimateDeltaFromFlags(*estimateTestStatus, *estimateTestLines, *estimateTestFiles, setFlags["estimated-test-status"], setFlags["estimated-test-lines"], setFlags["estimated-test-files"]),
-		},
-		MeasuredDelta: &contracts.MeasuredDelta{Production: measuredProduction.value, Test: measuredTest.value},
-	}
-	if err := validateEstimateDeltaFlagCounts("production", check.Unit, check.EstimatedDelta.Production, setFlags["estimated-production-lines"], setFlags["estimated-production-files"]); err != nil {
-		return err
-	}
-	if err := validateEstimateDeltaFlagCounts("test", check.Unit, check.EstimatedDelta.Test, setFlags["estimated-test-lines"], setFlags["estimated-test-files"]); err != nil {
-		return err
-	}
-	effective, err := policy.Load(policy.LoadOptions{
-		Policy:      inputs.Policy,
-		CharterHash: inputs.CharterHash,
-		Unit:        check.Unit,
-		CapReleases: releases,
-	})
-	if err != nil {
-		return err
-	}
-	decision, err := policy.CheckApplication(effective, check)
-	if err != nil {
-		return err
-	}
-	appended, err := ledger.AppendEvents(*ledgerPath, []ledger.EventToAppend{
-		{
-			Kind: ledger.EventKindMeasuredDelta,
-			Payload: ledger.MeasuredDeltaEvent{
-				Production: ledger.IntPtr(measuredProduction.value),
-				Test:       ledger.IntPtr(measuredTest.value),
-				Unit:       *unit,
-				FindingID:  *findingID,
-			},
-		},
-		{
-			Kind: ledger.EventKindPolicyDecision,
-			Payload: ledger.PolicyDecisionEvent{
-				Allow:                      ledger.BoolPtr(decision.Allow),
-				Reasons:                    decision.Reasons,
-				PolicyID:                   decision.PolicyID,
-				PolicyDigest:               decision.PolicyDigest,
-				DecisionRulesVersion:       decision.DecisionRulesVersion,
-				CharterHash:                decision.CharterHash,
-				CapReleaseCharterMismatch:  decision.CapReleaseCharterMismatch,
-				CapReleaseUnit:             decision.CapReleaseUnit,
-				Unit:                       decision.Unit,
-				PositiveCapAllowanceUsed:   decision.PositiveCapAllowanceConsumed,
-				FindingID:                  *findingID,
-				OperationalEnvelopePresent: envelopePresent,
-			},
-		},
-	})
-	if err != nil {
-		return err
-	}
-	return writeCanonical(*out, policyCheckApplicationOutput{
-		SchemaVersion: "witness-policy-check-application-v1",
-		Allow:         decision.Allow,
-		Reasons:       decision.Reasons,
-		Decision:      decision,
-		LedgerRecords: appended,
-	})
-}
-
 type ledgerAppendDocument struct {
 	SchemaVersion string        `json:"schema_version"`
 	Record        ledger.Record `json:"record"`
 }
 
-type policyReleaseCapsOutput struct {
-	SchemaVersion string                     `json:"schema_version"`
-	CapRelease    contracts.CapReleaseRecord `json:"cap_release"`
-	LedgerRecord  ledger.Record              `json:"ledger_record"`
-}
-
-type policyCheckApplicationOutput struct {
-	SchemaVersion string          `json:"schema_version"`
-	Allow         bool            `json:"allow"`
-	Reasons       []string        `json:"reasons"`
-	Decision      policy.Decision `json:"decision"`
-	LedgerRecords []ledger.Record `json:"ledger_records"`
-}
-
-type policyCommandInputs struct {
-	Policy                     contracts.ReviewPolicy
-	CharterHash                string
-	OperationalEnvelopePresent *bool
-}
-
 func ledgerAppendOutput(schemaVersion string, record ledger.Record) ledgerAppendDocument {
 	return ledgerAppendDocument{SchemaVersion: schemaVersion, Record: record}
-}
-
-func loadEffectivePolicy(policyPath string, ledgerPath string, charterPath string, charterHash string) (policy.Effective, error) {
-	inputs, err := readPolicyCommandInputs(policyPath, charterPath, charterHash)
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	records, err := readLedgerRecordsIfSet(ledgerPath)
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	releases, err := ledger.CapReleases(records)
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	return policy.Load(policy.LoadOptions{
-		Policy:      inputs.Policy,
-		CharterHash: inputs.CharterHash,
-		CapReleases: releases,
-	})
-}
-
-func readPolicyCommandInputs(policyPath string, charterPath string, charterHash string) (policyCommandInputs, error) {
-	policyDocument := contracts.DefaultReviewPolicy()
-	var err error
-	if policyPath != "" {
-		policyDocument, err = readReviewPolicyFile(policyPath)
-		if err != nil {
-			return policyCommandInputs{}, err
-		}
-	}
-	result := policyCommandInputs{Policy: policyDocument, CharterHash: charterHash}
-	if charterPath == "" {
-		return result, nil
-	}
-	frozen, err := readFrozenCharterFile(charterPath)
-	if err != nil {
-		return policyCommandInputs{}, err
-	}
-	if charterHash != "" && charterHash != frozen.CharterHash {
-		return policyCommandInputs{}, diag.New(
-			diag.CodeInvalidCommand,
-			"supplied -charter-hash does not match -charter-freeze.",
-			diag.WithDetail("expected", frozen.CharterHash),
-			diag.WithDetail("actual", charterHash),
-		)
-	}
-	envelopePresent := frozen.Charter.OperationalEnvelope != nil
-	result.CharterHash = frozen.CharterHash
-	result.OperationalEnvelopePresent = &envelopePresent
-	return result, nil
-}
-
-func readLedgerRecordsIfSet(path string) ([]ledger.Record, error) {
-	if path == "" {
-		return nil, nil
-	}
-	return ledger.ReadFile(path)
 }
 
 type repeatedStrings []string
@@ -1482,75 +1126,6 @@ func (values *repeatedStrings) Set(value string) error {
 		return fmt.Errorf("value must not be empty")
 	}
 	*values = append(*values, value)
-	return nil
-}
-
-func visitedFlagNames(flags *flag.FlagSet) map[string]bool {
-	values := map[string]bool{}
-	flags.Visit(func(flag *flag.Flag) {
-		values[flag.Name] = true
-	})
-	return values
-}
-
-func estimateDeltaFromFlags(status string, lines int, files int, statusSet bool, linesSet bool, filesSet bool) contracts.DeltaEstimate {
-	if !statusSet && !linesSet && !filesSet {
-		return contracts.DeltaEstimate{Status: contracts.DeltaStatusUnknown}
-	}
-	if !statusSet {
-		status = contracts.DeltaStatusKnown
-	}
-	return contracts.DeltaEstimate{Status: status, Lines: lines, Files: files}
-}
-
-func validateEstimateDeltaFlagCounts(component string, unit string, delta contracts.DeltaEstimate, linesSet bool, filesSet bool) error {
-	if delta.Status != contracts.DeltaStatusKnown {
-		return nil
-	}
-	requiredFlag := ""
-	switch strings.TrimSpace(unit) {
-	case "", policy.UnitLines:
-		if !linesSet {
-			requiredFlag = "-estimated-" + component + "-lines"
-		}
-	case policy.UnitFiles:
-		if !filesSet {
-			requiredFlag = "-estimated-" + component + "-files"
-		}
-	default:
-		return nil
-	}
-	if requiredFlag == "" {
-		return nil
-	}
-	return diag.New(
-		diag.CodeInvalidCommand,
-		"-estimated-"+component+"-status known requires "+requiredFlag+" to be explicitly set.",
-		diag.WithDetail("status", delta.Status),
-		diag.WithDetail("unit", strings.TrimSpace(unit)),
-		diag.WithDetail("required_flag", requiredFlag),
-	)
-}
-
-type optionalIntFlag struct {
-	value int
-	set   bool
-}
-
-func (value *optionalIntFlag) String() string {
-	if value == nil || !value.set {
-		return ""
-	}
-	return strconv.Itoa(value.value)
-}
-
-func (value *optionalIntFlag) Set(raw string) error {
-	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil {
-		return err
-	}
-	value.value = parsed
-	value.set = true
 	return nil
 }
 
@@ -1593,14 +1168,6 @@ func readVerificationManifestFile(path string) (contracts.VerificationManifest, 
 		return contracts.VerificationManifest{}, fileReadError(err, path, "open verification manifest")
 	}
 	return contracts.ReadVerificationManifestBytes(data)
-}
-
-func readReviewPolicyFile(path string) (contracts.ReviewPolicy, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.ReviewPolicy{}, fileReadError(err, path, "open review policy")
-	}
-	return contracts.ReadReviewPolicyBytes(data)
 }
 
 func readPlanningChangeSurfaceInput(baseManifestPath string, headManifestPath string, baselinePass bool) (planning.ChangeSurfaceInput, error) {
@@ -2418,7 +1985,6 @@ func runPassBegin(args []string) error {
 	relayPath := flags.String("relay", "", "convo-relay executable path")
 	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
 	backend := flags.String("backend", "", "relay backend suffix for reported verification recipes")
-	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface derivation")
 	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface derivation")
@@ -2452,7 +2018,6 @@ func runPassBegin(args []string) error {
 		RelayPath:             resolveRelayExecutable(*relayPath),
 		IntegrationBundlePath: *integrationBundlePath,
 		Backend:               *backend,
-		PolicyPath:            *policyPath,
 		LedgerPath:            *ledgerPath,
 		BaseManifestPath:      *baseManifestPath,
 		HeadManifestPath:      *headManifestPath,
@@ -3023,10 +2588,6 @@ func diagnosticsFromError(err error) []diag.Diagnostic {
 	var ledgerValidation *ledger.ValidationError
 	if errors.As(err, &ledgerValidation) {
 		return ledgerValidation.Diagnostics
-	}
-	var policyValidation *policy.ValidationError
-	if errors.As(err, &policyValidation) {
-		return policyValidation.Diagnostics
 	}
 	var metricsValidation *metrics.ValidationError
 	if errors.As(err, &metricsValidation) {

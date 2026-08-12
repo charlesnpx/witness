@@ -19,11 +19,8 @@ import (
 )
 
 const (
-	RecordSchemaVersion = "witness-ledger-record-v2"
-	ShowSchemaVersion   = "witness-ledger-show-v2"
-
-	UnitLines = "lines"
-	UnitFiles = "files"
+	RecordSchemaVersion = "witness-ledger-record-v3"
+	ShowSchemaVersion   = "witness-ledger-show-v3"
 
 	EventKindAdjudicationRun     = "adjudication_run"
 	EventKindFinding             = "finding"
@@ -31,9 +28,6 @@ const (
 	EventKindQuestion            = "question"
 	EventKindPendingVerification = "pending_verification"
 	EventKindOwnerOverride       = "owner_override"
-	EventKindCapRelease          = "cap_release"
-	EventKindMeasuredDelta       = "measured_delta"
-	EventKindPolicyDecision      = "policy_decision"
 	EventKindPromotion           = "promotion"
 	EventKindAcceptUnverified    = "accept_unverified"
 
@@ -61,21 +55,17 @@ type EventToAppend struct {
 }
 
 type AdjudicationRunEvent struct {
-	RunDigest                 string `json:"run_digest"`
-	ResultSchemaVersion       string `json:"result_schema_version"`
-	PolicyID                  string `json:"policy_id"`
-	PolicyDigest              string `json:"policy_digest"`
-	DecisionRulesVersion      string `json:"decision_rules_version"`
-	CharterHash               string `json:"charter_hash"`
-	ArtifactDigest            string `json:"artifact_digest"`
-	ManifestDigest            string `json:"manifest_digest"`
-	CapReleaseCharterMismatch bool   `json:"cap_release_charter_mismatch"`
-	FindingCount              int    `json:"finding_count"`
-	PendingVerificationCount  int    `json:"pending_verification_count"`
-	AutomaticCandidateCount   int    `json:"automatic_candidate_count"`
-	CallerDecisionCount       int    `json:"caller_decision_count"`
-	PolicyDecisionRecordCount int    `json:"policy_decision_record_count"`
-	MissingGoalQuestionCount  int    `json:"missing_goal_question_count"`
+	RunDigest                string `json:"run_digest"`
+	ResultSchemaVersion      string `json:"result_schema_version"`
+	DecisionRulesVersion     string `json:"decision_rules_version"`
+	CharterHash              string `json:"charter_hash"`
+	ArtifactDigest           string `json:"artifact_digest"`
+	ManifestDigest           string `json:"manifest_digest"`
+	FindingCount             int    `json:"finding_count"`
+	PendingVerificationCount int    `json:"pending_verification_count"`
+	AutomaticCandidateCount  int    `json:"automatic_candidate_count"`
+	CallerDecisionCount      int    `json:"caller_decision_count"`
+	MissingGoalQuestionCount int    `json:"missing_goal_question_count"`
 }
 
 type FindingEvent struct {
@@ -131,35 +121,6 @@ type OwnerOverrideEvent struct {
 	OverrideID string `json:"override_id,omitempty"`
 }
 
-type CapReleaseEvent struct {
-	Release contracts.CapReleaseRecord `json:"release"`
-}
-
-type MeasuredDeltaEvent struct {
-	Production *int   `json:"production"`
-	Test       *int   `json:"test"`
-	Unit       string `json:"unit"`
-	FindingID  string `json:"finding_id,omitempty"`
-}
-
-type PolicyDecisionEvent struct {
-	RunDigest                  string   `json:"run_digest,omitempty"`
-	Allow                      *bool    `json:"allow"`
-	Reasons                    []string `json:"reasons"`
-	PolicyID                   string   `json:"policy_id"`
-	PolicyDigest               string   `json:"policy_digest"`
-	DecisionRulesVersion       string   `json:"decision_rules_version"`
-	CharterHash                string   `json:"charter_hash,omitempty"`
-	CapReleaseCharterMismatch  bool     `json:"cap_release_charter_mismatch"`
-	CapReleaseUnit             string   `json:"cap_release_unit,omitempty"`
-	Unit                       string   `json:"unit,omitempty"`
-	PositiveCapAllowanceUsed   bool     `json:"positive_cap_allowance_used"`
-	DecisionID                 string   `json:"decision_id,omitempty"`
-	FindingID                  string   `json:"finding_id,omitempty"`
-	ApplicationClass           string   `json:"application_class,omitempty"`
-	OperationalEnvelopePresent bool     `json:"operational_envelope_present"`
-}
-
 type PromotionEvent struct {
 	QuestionID string `json:"question_id"`
 	GoalRef    string `json:"goal_ref"`
@@ -175,21 +136,17 @@ type AcceptUnverifiedEvent struct {
 }
 
 type adjudicationRunEventJSON struct {
-	RunDigest                 string         `json:"run_digest"`
-	ResultSchemaVersion       string         `json:"result_schema_version"`
-	PolicyID                  string         `json:"policy_id"`
-	PolicyDigest              string         `json:"policy_digest"`
-	DecisionRulesVersion      string         `json:"decision_rules_version"`
-	CharterHash               string         `json:"charter_hash"`
-	ArtifactDigest            string         `json:"artifact_digest"`
-	ManifestDigest            string         `json:"manifest_digest"`
-	CapReleaseCharterMismatch bool           `json:"cap_release_charter_mismatch"`
-	FindingCount              strictjson.Int `json:"finding_count"`
-	PendingVerificationCount  strictjson.Int `json:"pending_verification_count"`
-	AutomaticCandidateCount   strictjson.Int `json:"automatic_candidate_count"`
-	CallerDecisionCount       strictjson.Int `json:"caller_decision_count"`
-	PolicyDecisionRecordCount strictjson.Int `json:"policy_decision_record_count"`
-	MissingGoalQuestionCount  strictjson.Int `json:"missing_goal_question_count"`
+	RunDigest                string         `json:"run_digest"`
+	ResultSchemaVersion      string         `json:"result_schema_version"`
+	DecisionRulesVersion     string         `json:"decision_rules_version"`
+	CharterHash              string         `json:"charter_hash"`
+	ArtifactDigest           string         `json:"artifact_digest"`
+	ManifestDigest           string         `json:"manifest_digest"`
+	FindingCount             strictjson.Int `json:"finding_count"`
+	PendingVerificationCount strictjson.Int `json:"pending_verification_count"`
+	AutomaticCandidateCount  strictjson.Int `json:"automatic_candidate_count"`
+	CallerDecisionCount      strictjson.Int `json:"caller_decision_count"`
+	MissingGoalQuestionCount strictjson.Int `json:"missing_goal_question_count"`
 }
 
 type questionEventJSON struct {
@@ -205,51 +162,23 @@ type questionEventJSON struct {
 	Statement        string          `json:"statement"`
 }
 
-type measuredDeltaEventJSON struct {
-	Production *strictjson.Int `json:"production"`
-	Test       *strictjson.Int `json:"test"`
-	Unit       string          `json:"unit"`
-	FindingID  string          `json:"finding_id,omitempty"`
-}
-
-type capReleaseEventJSON struct {
-	Release capReleaseRecordJSON `json:"release"`
-}
-
-type capReleaseRecordJSON struct {
-	Unit                 string         `json:"unit"`
-	ProductionCap        strictjson.Int `json:"production_cap"`
-	TestCap              strictjson.Int `json:"test_cap"`
-	Basis                string         `json:"basis"`
-	Evidence             string         `json:"evidence,omitempty"`
-	Rationale            string         `json:"rationale,omitempty"`
-	Actor                string         `json:"actor"`
-	PolicyDigest         string         `json:"policy_digest"`
-	DecisionRulesVersion string         `json:"decision_rules_version"`
-	CharterHash          string         `json:"charter_hash"`
-}
-
 func (event *AdjudicationRunEvent) UnmarshalJSON(data []byte) error {
 	decoded, err := strictjson.DecodeBytes[adjudicationRunEventJSON](data, int64(len(data)))
 	if err != nil {
 		return err
 	}
 	*event = AdjudicationRunEvent{
-		RunDigest:                 decoded.RunDigest,
-		ResultSchemaVersion:       decoded.ResultSchemaVersion,
-		PolicyID:                  decoded.PolicyID,
-		PolicyDigest:              decoded.PolicyDigest,
-		DecisionRulesVersion:      decoded.DecisionRulesVersion,
-		CharterHash:               decoded.CharterHash,
-		ArtifactDigest:            decoded.ArtifactDigest,
-		ManifestDigest:            decoded.ManifestDigest,
-		CapReleaseCharterMismatch: decoded.CapReleaseCharterMismatch,
-		FindingCount:              int(decoded.FindingCount),
-		PendingVerificationCount:  int(decoded.PendingVerificationCount),
-		AutomaticCandidateCount:   int(decoded.AutomaticCandidateCount),
-		CallerDecisionCount:       int(decoded.CallerDecisionCount),
-		PolicyDecisionRecordCount: int(decoded.PolicyDecisionRecordCount),
-		MissingGoalQuestionCount:  int(decoded.MissingGoalQuestionCount),
+		RunDigest:                decoded.RunDigest,
+		ResultSchemaVersion:      decoded.ResultSchemaVersion,
+		DecisionRulesVersion:     decoded.DecisionRulesVersion,
+		CharterHash:              decoded.CharterHash,
+		ArtifactDigest:           decoded.ArtifactDigest,
+		ManifestDigest:           decoded.ManifestDigest,
+		FindingCount:             int(decoded.FindingCount),
+		PendingVerificationCount: int(decoded.PendingVerificationCount),
+		AutomaticCandidateCount:  int(decoded.AutomaticCandidateCount),
+		CallerDecisionCount:      int(decoded.CallerDecisionCount),
+		MissingGoalQuestionCount: int(decoded.MissingGoalQuestionCount),
 	}
 	return nil
 }
@@ -270,42 +199,6 @@ func (event *QuestionEvent) UnmarshalJSON(data []byte) error {
 		AffectedDecision: decoded.AffectedDecision,
 		CharterHash:      decoded.CharterHash,
 		Statement:        decoded.Statement,
-	}
-	return nil
-}
-
-func (event *MeasuredDeltaEvent) UnmarshalJSON(data []byte) error {
-	decoded, err := strictjson.DecodeBytes[measuredDeltaEventJSON](data, int64(len(data)))
-	if err != nil {
-		return err
-	}
-	*event = MeasuredDeltaEvent{
-		Production: strictIntPointer(decoded.Production),
-		Test:       strictIntPointer(decoded.Test),
-		Unit:       decoded.Unit,
-		FindingID:  decoded.FindingID,
-	}
-	return nil
-}
-
-func (event *CapReleaseEvent) UnmarshalJSON(data []byte) error {
-	decoded, err := strictjson.DecodeBytes[capReleaseEventJSON](data, int64(len(data)))
-	if err != nil {
-		return err
-	}
-	*event = CapReleaseEvent{
-		Release: contracts.CapReleaseRecord{
-			Unit:                 decoded.Release.Unit,
-			ProductionCap:        int(decoded.Release.ProductionCap),
-			TestCap:              int(decoded.Release.TestCap),
-			Basis:                decoded.Release.Basis,
-			Evidence:             decoded.Release.Evidence,
-			Rationale:            decoded.Release.Rationale,
-			Actor:                decoded.Release.Actor,
-			PolicyDigest:         decoded.Release.PolicyDigest,
-			DecisionRulesVersion: decoded.Release.DecisionRulesVersion,
-			CharterHash:          decoded.Release.CharterHash,
-		},
 	}
 	return nil
 }
@@ -390,7 +283,7 @@ func ValidateRecords(records []Record) error {
 		if record.SchemaVersion != RecordSchemaVersion {
 			return &ValidationError{Diagnostics: []diag.Diagnostic{diagnostic(
 				CodeInvalidLedger,
-				fmt.Sprintf("ledger schema_version %q is unsupported; expected %q after decision-rules identity changed.", record.SchemaVersion, RecordSchemaVersion),
+				fmt.Sprintf("ledger schema_version %q is unsupported; witness-ledger-record-v2 is refused and %q is required after policy-engine event fields were removed.", record.SchemaVersion, RecordSchemaVersion),
 				fmt.Sprintf("/records/%d/schema_version", index),
 				map[string]any{"expected": RecordSchemaVersion, "actual": record.SchemaVersion},
 			)}}
@@ -639,21 +532,6 @@ func Show(path string, options ShowOptions) (ShowDocument, error) {
 	return document, nil
 }
 
-func CapReleases(records []Record) ([]contracts.CapReleaseRecord, error) {
-	releases := make([]contracts.CapReleaseRecord, 0)
-	for _, record := range records {
-		if record.EventKind != EventKindCapRelease {
-			continue
-		}
-		event, err := strictjson.DecodeBytes[CapReleaseEvent](record.Event, strictjson.DefaultMaxBytes)
-		if err != nil {
-			return nil, err
-		}
-		releases = append(releases, event.Release)
-	}
-	return releases, nil
-}
-
 func ContainsRunDigest(records []Record, runDigest string) (bool, error) {
 	if strings.TrimSpace(runDigest) == "" {
 		return false, nil
@@ -676,10 +554,6 @@ func DuplicateRunDigestError(runDigest string) error {
 		"adjudication run digest already exists in the append-only ledger.",
 		diag.WithDetail("run_digest", runDigest),
 	)
-}
-
-func BoolPtr(value bool) *bool {
-	return &value
 }
 
 func IntPtr(value int) *int {
@@ -752,12 +626,6 @@ func runDigestForRecord(record Record) (string, error) {
 			return "", err
 		}
 		return event.RunDigest, nil
-	case EventKindPolicyDecision:
-		event, err := strictjson.DecodeBytes[PolicyDecisionEvent](record.Event, strictjson.DefaultMaxBytes*8)
-		if err != nil {
-			return "", err
-		}
-		return event.RunDigest, nil
 	default:
 		return "", nil
 	}
@@ -775,8 +643,6 @@ func validateEvent(kind string, raw json.RawMessage, path string) []diag.Diagnos
 		}
 		requireDigest(&diagnostics, path+"/run_digest", "run_digest", event.RunDigest)
 		requireString(&diagnostics, path+"/result_schema_version", "result_schema_version", event.ResultSchemaVersion)
-		requireString(&diagnostics, path+"/policy_id", "policy_id", event.PolicyID)
-		requireDigest(&diagnostics, path+"/policy_digest", "policy_digest", event.PolicyDigest)
 		requireDecisionRulesVersion(&diagnostics, path+"/decision_rules_version", event.DecisionRulesVersion)
 		requireDigest(&diagnostics, path+"/charter_hash", "charter_hash", event.CharterHash)
 		requireDigest(&diagnostics, path+"/artifact_digest", "artifact_digest", event.ArtifactDigest)
@@ -848,51 +714,6 @@ func validateEvent(kind string, raw json.RawMessage, path string) []diag.Diagnos
 		requireString(&diagnostics, path+"/actor", "actor", event.Actor)
 		requireString(&diagnostics, path+"/rationale", "rationale", event.Rationale)
 		return diagnostics
-	case EventKindCapRelease:
-		event, diagnostics := decodePayload[CapReleaseEvent](raw, path)
-		if len(diagnostics) > 0 {
-			return diagnostics
-		}
-		validateCapRelease(&diagnostics, path+"/release", event.Release)
-		return diagnostics
-	case EventKindMeasuredDelta:
-		event, diagnostics := decodePayload[MeasuredDeltaEvent](raw, path)
-		if len(diagnostics) > 0 {
-			return diagnostics
-		}
-		if event.Production == nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedgerEvent, "measured_delta production is required.", path+"/production", nil))
-		}
-		if event.Test == nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedgerEvent, "measured_delta test is required.", path+"/test", nil))
-		}
-		requireUnit(&diagnostics, path+"/unit", "unit", event.Unit)
-		return diagnostics
-	case EventKindPolicyDecision:
-		event, diagnostics := decodePayload[PolicyDecisionEvent](raw, path)
-		if len(diagnostics) > 0 {
-			return diagnostics
-		}
-		if event.RunDigest != "" {
-			requireDigest(&diagnostics, path+"/run_digest", "run_digest", event.RunDigest)
-		}
-		if event.Allow == nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedgerEvent, "policy_decision allow is required.", path+"/allow", nil))
-		}
-		requireReasons(&diagnostics, path+"/reasons", event.Reasons)
-		requireString(&diagnostics, path+"/policy_id", "policy_id", event.PolicyID)
-		requireDigest(&diagnostics, path+"/policy_digest", "policy_digest", event.PolicyDigest)
-		requireDecisionRulesVersion(&diagnostics, path+"/decision_rules_version", event.DecisionRulesVersion)
-		if event.CharterHash != "" {
-			requireDigest(&diagnostics, path+"/charter_hash", "charter_hash", event.CharterHash)
-		}
-		if event.CapReleaseUnit != "" {
-			requireUnit(&diagnostics, path+"/cap_release_unit", "cap_release_unit", event.CapReleaseUnit)
-		}
-		if event.Unit != "" {
-			requireUnit(&diagnostics, path+"/unit", "unit", event.Unit)
-		}
-		return diagnostics
 	case EventKindPromotion:
 		event, diagnostics := decodePayload[PromotionEvent](raw, path)
 		if len(diagnostics) > 0 {
@@ -931,28 +752,6 @@ func decodePayload[T any](raw json.RawMessage, path string) (T, []diag.Diagnosti
 	return event, nil
 }
 
-func validateCapRelease(diagnostics *[]diag.Diagnostic, path string, release contracts.CapReleaseRecord) {
-	requireUnit(diagnostics, path+"/unit", "unit", release.Unit)
-	if release.ProductionCap <= 0 {
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, "cap release production_cap must be positive.", path+"/production_cap", map[string]any{"value": release.ProductionCap}))
-	}
-	if release.TestCap <= 0 {
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, "cap release test_cap must be positive.", path+"/test_cap", map[string]any{"value": release.TestCap}))
-	}
-	requireEnum(diagnostics, path+"/basis", "basis", release.Basis, []string{contracts.CapReleaseBasisMeasuredHistory, contracts.CapReleaseBasisOwnerJudgment})
-	if strings.TrimSpace(release.Evidence) == "" && strings.TrimSpace(release.Rationale) == "" {
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, "cap release requires evidence or rationale.", path, nil))
-	}
-	requireString(diagnostics, path+"/actor", "actor", release.Actor)
-	requireDigest(diagnostics, path+"/policy_digest", "policy_digest", release.PolicyDigest)
-	requireDecisionRulesVersion(diagnostics, path+"/decision_rules_version", release.DecisionRulesVersion)
-	requireDigest(diagnostics, path+"/charter_hash", "charter_hash", release.CharterHash)
-}
-
-func requireUnit(diagnostics *[]diag.Diagnostic, path string, label string, value string) {
-	requireEnum(diagnostics, path, label, value, []string{UnitLines, UnitFiles})
-}
-
 func requireDecisionRulesVersion(diagnostics *[]diag.Diagnostic, path string, value string) {
 	if value != contracts.DecisionRulesVersion {
 		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, "decision_rules_version is unsupported.", path, map[string]any{"expected": contracts.DecisionRulesVersion, "actual": value}))
@@ -962,18 +761,6 @@ func requireDecisionRulesVersion(diagnostics *[]diag.Diagnostic, path string, va
 func requireString(diagnostics *[]diag.Diagnostic, path string, label string, value string) {
 	if strings.TrimSpace(value) == "" {
 		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, label+" is required.", path, nil))
-	}
-}
-
-func requireReasons(diagnostics *[]diag.Diagnostic, path string, values []string) {
-	if len(values) == 0 {
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, "policy_decision reasons are required.", path, nil))
-		return
-	}
-	for index, value := range values {
-		if strings.TrimSpace(value) == "" {
-			*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, "policy_decision reason must not be empty.", fmt.Sprintf("%s/%d", path, index), nil))
-		}
 	}
 }
 

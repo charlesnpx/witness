@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -16,40 +15,32 @@ import (
 )
 
 const (
-	SchemaVersion = "witness-metrics-v1"
+	SchemaVersion = "witness-metrics-v2"
 
-	CodeInvalidRunResult = "metrics_invalid_run_result"
-	CodeInvalidPreflight = "metrics_invalid_preflight"
+	CodeInvalidRunResult         = "metrics_invalid_run_result"
+	CodeInvalidPreflight         = "metrics_invalid_preflight"
+	CodeUnsupportedMetricsSchema = "metrics_unsupported_schema"
 )
 
 const (
 	InputStatusLoaded  = "loaded"
 	InputStatusMissing = "missing"
 
-	ReasonLedgerMissing                      = "ledger_missing"
-	ReasonPreflightMissing                   = "preflight_missing"
-	ReasonRunResultsMissing                  = "run_results_missing"
-	ReasonBackendStatusMissing               = "backend_auth_status_missing"
-	ReasonBackendAttributionMissing          = "backend_attribution_missing"
-	ReasonReceiptLineageMissing              = "receipt_lineage_missing"
-	ReasonNoPairedEstimatedAndMeasuredDeltas = "no_paired_estimated_and_measured_deltas"
-	ReasonEstimatedDeltaMissing              = "estimated_delta_missing"
-	ReasonEstimatedProductionMissing         = "estimated_production_missing"
-	ReasonEstimatedTestMissing               = "estimated_test_missing"
-	ReasonEstimatedProductionUnitMissing     = "estimated_production_unit_missing"
-	ReasonEstimatedTestUnitMissing           = "estimated_test_unit_missing"
-	ReasonMeasuredDeltaMissing               = "measured_missing"
-	ReasonMeasuredProductionMissing          = "measured_production_missing"
-	ReasonMeasuredTestMissing                = "measured_test_missing"
-	BackendAuthStatusAuthenticated           = "authenticated"
-	BackendAuthStatusInstalledAuthUnknown    = "installed_auth_unknown"
-	BackendAuthStatusFailed                  = "failed"
-	BackendAuthStatusRelayAbsent             = "relay_absent"
-	BackendAuthStatusUnattributed            = "unattributed"
-	VerdictClassNone                         = "none"
-	MetricStatusReceiptBasedContradiction    = "receipt_based_contradiction"
-	MetricStatusUnattributedContradiction    = "unattributed_contradiction"
-	MetricStatusInvalidResult                = "invalid_result"
+	ReasonLedgerMissing                   = "ledger_missing"
+	ReasonPreflightMissing                = "preflight_missing"
+	ReasonRunResultsMissing               = "run_results_missing"
+	ReasonBackendStatusMissing            = "backend_auth_status_missing"
+	ReasonBackendAttributionMissing       = "backend_attribution_missing"
+	ReasonReceiptLineageMissing           = "receipt_lineage_missing"
+	BackendAuthStatusAuthenticated        = "authenticated"
+	BackendAuthStatusInstalledAuthUnknown = "installed_auth_unknown"
+	BackendAuthStatusFailed               = "failed"
+	BackendAuthStatusRelayAbsent          = "relay_absent"
+	BackendAuthStatusUnattributed         = "unattributed"
+	VerdictClassNone                      = "none"
+	MetricStatusReceiptBasedContradiction = "receipt_based_contradiction"
+	MetricStatusUnattributedContradiction = "unattributed_contradiction"
+	MetricStatusInvalidResult             = "invalid_result"
 )
 
 var backendAuthStatuses = []string{
@@ -79,8 +70,6 @@ type Document struct {
 	PendingVerification PendingVerificationMetrics `json:"pending_verification"`
 	OperationalEnvelope OperationalEnvelopeMetrics `json:"operational_envelope"`
 	Verdicts            VerdictMetrics             `json:"verdicts"`
-	CapRelease          CapReleaseMetrics          `json:"cap_release"`
-	DeltaComparison     DeltaComparisonMetrics     `json:"delta_comparison"`
 	Diagnostics         []diag.Diagnostic          `json:"diagnostics,omitempty"`
 }
 
@@ -144,34 +133,6 @@ type VerdictClassCount struct {
 	Reason                     string `json:"reason,omitempty"`
 }
 
-type CapReleaseMetrics struct {
-	CharterMismatchCount     int             `json:"charter_mismatch_count"`
-	RunResultMismatchCount   CountWithReason `json:"run_result_mismatch_count"`
-	LedgerEventMismatchCount CountWithReason `json:"ledger_event_mismatch_count"`
-}
-
-type DeltaComparisonMetrics struct {
-	PairedFindings   int                     `json:"paired_findings"`
-	ExcludedFindings int                     `json:"excluded_findings,omitempty"`
-	ExcludedStrata   []DeltaExclusionStratum `json:"excluded_strata,omitempty"`
-	Production       DeltaComponentMetrics   `json:"production"`
-	Test             DeltaComponentMetrics   `json:"test"`
-	Reason           string                  `json:"reason,omitempty"`
-}
-
-type DeltaExclusionStratum struct {
-	Reason string `json:"reason"`
-	Count  int    `json:"count"`
-}
-
-type DeltaComponentMetrics struct {
-	Equal           int `json:"equal"`
-	OverEstimate    int `json:"over_estimate"`
-	UnderEstimate   int `json:"under_estimate"`
-	EstimateUnknown int `json:"estimate_unknown"`
-	EstimateMissing int `json:"estimate_missing"`
-}
-
 type ValidationError struct {
 	Diagnostics []diag.Diagnostic
 }
@@ -189,6 +150,32 @@ func (err *ValidationError) Error() string {
 
 type runResultInput struct {
 	result adjudicate.Result
+}
+
+// ReadDocumentBytes refuses metrics documents produced before policy-engine
+// metrics were removed. The outer schema check deliberately runs before strict
+// decoding so callers receive a version-boundary diagnostic instead of an
+// opaque unknown_json_field failure.
+func ReadDocumentBytes(data []byte) (Document, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return Document{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return Document{}, diag.New(CodeUnsupportedMetricsSchema, "metrics document must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != SchemaVersion {
+		return Document{}, diag.New(
+			CodeUnsupportedMetricsSchema,
+			"metrics document schema_version is unsupported; witness-metrics-v1 is refused and witness-metrics-v2 is required after policy-engine metrics fields were removed.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", SchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	return strictjson.DecodeBytes[Document](data, strictjson.DefaultMaxBytes*8)
 }
 
 func Run(options Options) (Document, error) {
@@ -216,8 +203,6 @@ func Run(options Options) (Document, error) {
 	document.PendingVerification = pendingVerificationMetrics(runResults, preflightResult, preflightLoaded)
 	document.OperationalEnvelope = operationalEnvelopeMetrics(records, ledgerLoaded)
 	document.Verdicts = verdictMetrics(runResults)
-	document.CapRelease = capReleaseMetrics(runResults, records, ledgerLoaded)
-	document.DeltaComparison = deltaComparisonMetrics(records, ledgerLoaded)
 	return document, nil
 }
 
@@ -640,235 +625,6 @@ func verdictClassRank(value string) int {
 		}
 	}
 	return len(verdictClasses)
-}
-
-func capReleaseMetrics(results []runResultInput, records []ledger.Record, ledgerLoaded bool) CapReleaseMetrics {
-	metrics := CapReleaseMetrics{}
-	if len(results) == 0 {
-		metrics.RunResultMismatchCount.Reason = ReasonRunResultsMissing
-	}
-	for _, input := range results {
-		if input.result.CapReleaseCharterMismatch {
-			metrics.RunResultMismatchCount.Count++
-		}
-	}
-	if !ledgerLoaded {
-		metrics.LedgerEventMismatchCount.Reason = ReasonLedgerMissing
-	} else {
-		for _, record := range records {
-			switch record.EventKind {
-			case ledger.EventKindAdjudicationRun:
-				event, err := decodeLedgerEvent[ledger.AdjudicationRunEvent](record)
-				if err == nil && event.CapReleaseCharterMismatch {
-					metrics.LedgerEventMismatchCount.Count++
-				}
-			case ledger.EventKindPolicyDecision:
-				event, err := decodeLedgerEvent[ledger.PolicyDecisionEvent](record)
-				if err == nil && event.CapReleaseCharterMismatch {
-					metrics.LedgerEventMismatchCount.Count++
-				}
-			}
-		}
-	}
-	metrics.CharterMismatchCount = metrics.RunResultMismatchCount.Count + metrics.LedgerEventMismatchCount.Count
-	return metrics
-}
-
-type findingEstimate struct {
-	production componentEstimate
-	test       componentEstimate
-}
-
-type componentEstimate struct {
-	present      bool
-	known        bool
-	lines        int
-	linesPresent bool
-	files        int
-	filesPresent bool
-}
-
-func deltaComparisonMetrics(records []ledger.Record, ledgerLoaded bool) DeltaComparisonMetrics {
-	metrics := DeltaComparisonMetrics{}
-	if !ledgerLoaded {
-		metrics.Reason = ReasonLedgerMissing
-		return metrics
-	}
-	estimates := map[string]findingEstimate{}
-	measured := map[string]ledger.MeasuredDeltaEvent{}
-	for _, record := range records {
-		switch record.EventKind {
-		case ledger.EventKindFinding:
-			event, err := decodeLedgerEvent[ledger.FindingEvent](record)
-			if err == nil && event.FindingID != "" {
-				estimate, ok := estimateFromFindingPayload(event.Finding)
-				if ok {
-					estimates[event.FindingID] = estimate
-				}
-			}
-		case ledger.EventKindMeasuredDelta:
-			event, err := decodeLedgerEvent[ledger.MeasuredDeltaEvent](record)
-			if err == nil && event.FindingID != "" {
-				measured[event.FindingID] = event
-			}
-		}
-	}
-	findingIDs := map[string]struct{}{}
-	for findingID := range estimates {
-		findingIDs[findingID] = struct{}{}
-	}
-	for findingID := range measured {
-		findingIDs[findingID] = struct{}{}
-	}
-	orderedFindingIDs := make([]string, 0, len(findingIDs))
-	for findingID := range findingIDs {
-		orderedFindingIDs = append(orderedFindingIDs, findingID)
-	}
-	sort.Strings(orderedFindingIDs)
-	for _, findingID := range orderedFindingIDs {
-		estimate, estimatePresent := estimates[findingID]
-		measuredDelta, measuredPresent := measured[findingID]
-		if reasons := deltaPairExclusionReasons(estimate, estimatePresent, measuredDelta, measuredPresent); len(reasons) > 0 {
-			metrics.ExcludedFindings++
-			addDeltaExclusionReasons(&metrics, reasons)
-			continue
-		}
-		metrics.PairedFindings++
-		compareComponent(&metrics.Production, estimate.production, measuredDelta.Production, measuredDelta.Unit)
-		compareComponent(&metrics.Test, estimate.test, measuredDelta.Test, measuredDelta.Unit)
-	}
-	if metrics.PairedFindings == 0 {
-		metrics.Reason = ReasonNoPairedEstimatedAndMeasuredDeltas
-	}
-	return metrics
-}
-
-func deltaPairExclusionReasons(estimate findingEstimate, estimatePresent bool, measured ledger.MeasuredDeltaEvent, measuredPresent bool) []string {
-	var reasons []string
-	if !measuredPresent {
-		return []string{ReasonMeasuredDeltaMissing}
-	}
-	if !estimatePresent {
-		reasons = append(reasons, ReasonEstimatedDeltaMissing)
-	} else {
-		if !estimate.production.present {
-			reasons = append(reasons, ReasonEstimatedProductionMissing)
-		} else if estimate.production.known && !estimate.production.valuePresent(measured.Unit) {
-			reasons = append(reasons, ReasonEstimatedProductionUnitMissing)
-		}
-		if !estimate.test.present {
-			reasons = append(reasons, ReasonEstimatedTestMissing)
-		} else if estimate.test.known && !estimate.test.valuePresent(measured.Unit) {
-			reasons = append(reasons, ReasonEstimatedTestUnitMissing)
-		}
-	}
-	if measured.Production == nil {
-		reasons = append(reasons, ReasonMeasuredProductionMissing)
-	}
-	if measured.Test == nil {
-		reasons = append(reasons, ReasonMeasuredTestMissing)
-	}
-	return reasons
-}
-
-func addDeltaExclusionReasons(metrics *DeltaComparisonMetrics, reasons []string) {
-	byReason := map[string]int{}
-	for index, stratum := range metrics.ExcludedStrata {
-		byReason[stratum.Reason] = index
-	}
-	for _, reason := range reasons {
-		if index, ok := byReason[reason]; ok {
-			metrics.ExcludedStrata[index].Count++
-			continue
-		}
-		metrics.ExcludedStrata = append(metrics.ExcludedStrata, DeltaExclusionStratum{Reason: reason, Count: 1})
-		byReason[reason] = len(metrics.ExcludedStrata) - 1
-	}
-	sort.SliceStable(metrics.ExcludedStrata, func(i, j int) bool {
-		return metrics.ExcludedStrata[i].Reason < metrics.ExcludedStrata[j].Reason
-	})
-}
-
-func compareComponent(metrics *DeltaComponentMetrics, estimate componentEstimate, measured *int, unit string) {
-	if measured == nil {
-		return
-	}
-	if !estimate.present {
-		metrics.EstimateMissing++
-		return
-	}
-	if !estimate.known {
-		metrics.EstimateUnknown++
-		return
-	}
-	value := estimate.lines
-	if strings.TrimSpace(unit) == ledger.UnitFiles {
-		value = estimate.files
-	}
-	switch {
-	case value == *measured:
-		metrics.Equal++
-	case value > *measured:
-		metrics.OverEstimate++
-	default:
-		metrics.UnderEstimate++
-	}
-}
-
-func (estimate componentEstimate) valuePresent(unit string) bool {
-	if strings.TrimSpace(unit) == ledger.UnitFiles {
-		return estimate.filesPresent
-	}
-	return estimate.linesPresent
-}
-
-func estimateFromFindingPayload(payload map[string]any) (findingEstimate, bool) {
-	raw, ok := payload["estimated_delta"]
-	if !ok {
-		return findingEstimate{}, false
-	}
-	object, ok := raw.(map[string]any)
-	if !ok {
-		return findingEstimate{}, false
-	}
-	return findingEstimate{
-		production: componentEstimateFromObject(object["production"]),
-		test:       componentEstimateFromObject(object["test"]),
-	}, true
-}
-
-func componentEstimateFromObject(raw any) componentEstimate {
-	object, ok := raw.(map[string]any)
-	if !ok {
-		return componentEstimate{}
-	}
-	status, _ := object["status"].(string)
-	estimate := componentEstimate{present: true, known: status == contracts.DeltaStatusKnown}
-	if value, ok := intValue(object["lines"]); ok {
-		estimate.lines = value
-		estimate.linesPresent = true
-	}
-	if value, ok := intValue(object["files"]); ok {
-		estimate.files = value
-		estimate.filesPresent = true
-	}
-	return estimate
-}
-
-func intValue(raw any) (int, bool) {
-	switch value := raw.(type) {
-	case json.Number:
-		parsed, err := value.Int64()
-		return int(parsed), err == nil
-	case float64:
-		return int(value), value == float64(int(value))
-	case int:
-		return value, true
-	case int64:
-		return int(value), true
-	default:
-		return 0, false
-	}
 }
 
 func decodeLedgerEvent[T any](record ledger.Record) (T, error) {

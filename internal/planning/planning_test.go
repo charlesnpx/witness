@@ -251,14 +251,13 @@ func TestPlanningDeltaChangeSurfacePartitionsFindings(t *testing.T) {
 	result, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if result.Plan.ScopePolicy != contracts.ScopePolicyDeltaObligating || result.Plan.ChangeSurface == nil || result.Plan.ChangeSurfaceDigest == "" {
+	if result.Plan.ScopePolicy != changesurface.ScopePolicyDeltaObligating || result.Plan.ChangeSurface == nil || result.Plan.ChangeSurfaceDigest == "" {
 		t.Fatalf("plan change surface fields = %#v", result.Plan)
 	}
 	if len(result.Plan.Batches) != 1 || fmt.Sprint(result.Plan.Batches[0].FindingIDs) != fmt.Sprint([]string{"deleted", "in-delta"}) {
@@ -276,22 +275,7 @@ func TestPlanningDeltaChangeSurfacePartitionsFindings(t *testing.T) {
 	}
 }
 
-func TestPlanningDeltaFailsClosedWithoutDerivedSurfaceOrBaseline(t *testing.T) {
-	frozen := planningTestFrozenCharter(t)
-	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
-		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
-	})
-	_, err := Run(Options{
-		FrozenCharter: frozen,
-		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
-	})
-	if planningErrorCode(err) != CodeMissingChangeSurface {
-		t.Fatalf("err = %v, want %s", err, CodeMissingChangeSurface)
-	}
-}
-
-func TestPlanningDeltaBaselinePassProceedsWholeTreeWithVisibleMarker(t *testing.T) {
+func TestPlanningBaselinePassProceedsWholeTreeWithVisibleMarker(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
 		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
@@ -299,7 +283,6 @@ func TestPlanningDeltaBaselinePassProceedsWholeTreeWithVisibleMarker(t *testing.
 	result, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		ChangeSurface: ChangeSurfaceInput{BaselinePass: true},
 	})
 	if err != nil {
@@ -325,7 +308,6 @@ func TestPlanningChangeSurfaceRejectsPartialManifestInput(t *testing.T) {
 	_, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		ChangeSurface: ChangeSurfaceInput{HeadManifest: &headManifest},
 	})
 	if planningErrorCode(err) != CodeMissingChangeSurface {
@@ -344,7 +326,6 @@ func TestPlanningChangeSurfaceHeadMustMatchPreflightArtifact(t *testing.T) {
 	result, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     PreflightBinding{SnapshotDigest: wrongDigest},
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
@@ -356,7 +337,7 @@ func TestPlanningChangeSurfaceHeadMustMatchPreflightArtifact(t *testing.T) {
 	}
 }
 
-func TestPlanningWholeTreeAndAbsentPolicyRemainUnchanged(t *testing.T) {
+func TestPlanningWholeTreeWithoutChangeSurfaceRemainsUnchanged(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
 		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
@@ -368,12 +349,12 @@ func TestPlanningWholeTreeAndAbsentPolicyRemainUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(result.Plan.Batches) != 1 || result.Plan.ChangeSurface != nil || result.Plan.BaselinePass != nil || result.Plan.ScopePolicy != contracts.ScopePolicyWholeTree {
+	if len(result.Plan.Batches) != 1 || result.Plan.ChangeSurface != nil || result.Plan.BaselinePass != nil || result.Plan.ScopePolicy != changesurface.ScopePolicyWholeTree {
 		t.Fatalf("plan = %#v, want existing whole-tree behavior", result.Plan)
 	}
 }
 
-func TestVersionStampsForPlanManifestRulesPolicyAndChangeSurface(t *testing.T) {
+func TestVersionStampsForPlanManifestAndChangeSurface(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
 		planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
@@ -394,10 +375,6 @@ func TestVersionStampsForPlanManifestRulesPolicyAndChangeSurface(t *testing.T) {
 	}
 	if contracts.DecisionRulesVersion != "witness-decision-rules-v1" {
 		t.Fatalf("decision rules version = %s, want witness-decision-rules-v1", contracts.DecisionRulesVersion)
-	}
-	policy := contracts.DefaultReviewPolicy()
-	if policy.SchemaVersion != contracts.ReviewPolicyV3 || policy.PolicyID != "bootstrap-review-policy-v3" || policy.ScopePolicy != contracts.ScopePolicyWholeTree {
-		t.Fatalf("default policy = %#v, want review-policy-v3 whole_tree", policy)
 	}
 	if changesurface.SchemaVersion != "witness-change-surface-v1" {
 		t.Fatalf("change surface schema = %s, want witness-change-surface-v1", changesurface.SchemaVersion)
@@ -465,13 +442,6 @@ func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
 	if !found {
 		t.Fatalf("missing %s diagnostic: %#v", CodeSnapshotArtifactMismatch, result.Plan.Diagnostics)
 	}
-}
-
-func planningDeltaPolicy() contracts.ReviewPolicy {
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	return policy
 }
 
 func planningDeltaManifests(t *testing.T) (freeze.Manifest, freeze.Manifest, string) {

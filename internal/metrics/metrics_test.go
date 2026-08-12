@@ -12,6 +12,7 @@ import (
 	"github.com/charlesnpx/witness/internal/canonjson"
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/ledger"
 	"github.com/charlesnpx/witness/internal/planning"
@@ -49,17 +50,6 @@ func TestMetricsGolden(t *testing.T) {
 			golden:     "verdict-class-contradictions.golden.json",
 		},
 		{
-			name:         "cap release mismatch",
-			ledgerEvents: "ledger-events-cap-mismatch.json",
-			runResults:   []string{"run-result-cap-mismatch.json"},
-			golden:       "cap-release-mismatch.golden.json",
-		},
-		{
-			name:         "delta comparison",
-			ledgerEvents: "ledger-events-deltas.json",
-			golden:       "delta-comparison.golden.json",
-		},
-		{
 			name:   "missing input reasons",
 			golden: "missing-input-reasons.golden.json",
 		},
@@ -93,7 +83,7 @@ func TestMetricsGolden(t *testing.T) {
 	}
 }
 
-func TestMetricsRejectsPreV4RunResult(t *testing.T) {
+func TestMetricsRejectsPreV5RunResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run-result-v2.json")
 	const runResult = `{
 		"schema_version": "witness-adjudication-run-result-v2",
@@ -116,6 +106,26 @@ func TestMetricsRejectsPreV4RunResult(t *testing.T) {
 	expected, ok := validation.Diagnostics[0].Details["expected"].(string)
 	if !ok || expected != adjudicate.ResultSchemaVersion {
 		t.Fatalf("unsupported-version expected = %#v, want %s", validation.Diagnostics[0].Details["expected"], adjudicate.ResultSchemaVersion)
+	}
+}
+
+func TestReadDocumentBytesRejectsV1WithExplicitDiagnostic(t *testing.T) {
+	_, err := ReadDocumentBytes([]byte(`{"schema_version":"witness-metrics-v1","cap_release":{}}`))
+	if err == nil {
+		t.Fatal("ReadDocumentBytes accepted a v1 metrics document")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeUnsupportedMetricsSchema || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported schema diagnostic", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want version refusal before strict decoding", diagnostic)
+	}
+	if actual, _ := diagnostic.Details["actual"].(string); actual != "witness-metrics-v1" {
+		t.Fatalf("actual = %#v, want witness-metrics-v1", diagnostic.Details["actual"])
+	}
+	if expected, _ := diagnostic.Details["expected"].(string); expected != SchemaVersion {
+		t.Fatalf("expected = %#v, want %s", diagnostic.Details["expected"], SchemaVersion)
 	}
 }
 
@@ -330,39 +340,6 @@ func TestOperationalEnvelopeQuestionClassificationUsesQuestionLinkage(t *testing
 	}
 }
 
-func TestDeltaComparisonExcludesUnpairedEstimateAndMeasuredDelta(t *testing.T) {
-	records := []ledger.Record{
-		ledgerRecordForEvent(t, ledger.EventKindFinding, ledger.FindingEvent{
-			FindingID:      "finding-estimate-only",
-			FindingKey:     "defect:estimate-only",
-			WitnessDigest:  testDigest("witness-estimate"),
-			CharterHash:    testDigest("charter"),
-			ArtifactDigest: testDigest("artifact"),
-			Finding: map[string]any{
-				"estimated_delta": map[string]any{
-					"production": map[string]any{"status": "known", "lines": 2},
-					"test":       map[string]any{"status": "known", "lines": 1},
-				},
-			},
-		}),
-		ledgerRecordForEvent(t, ledger.EventKindMeasuredDelta, ledger.MeasuredDeltaEvent{
-			FindingID:  "finding-measured-only",
-			Production: ledger.IntPtr(2),
-			Test:       ledger.IntPtr(1),
-			Unit:       ledger.UnitLines,
-		}),
-	}
-	got := deltaComparisonMetrics(records, true)
-	if got.PairedFindings != 0 || got.ExcludedFindings != 2 {
-		t.Fatalf("delta comparison = %#v, want two excluded unpaired findings", got)
-	}
-	assertDeltaExclusionStratum(t, got, ReasonEstimatedDeltaMissing, 1)
-	assertDeltaExclusionStratum(t, got, ReasonMeasuredDeltaMissing, 1)
-	if got.Reason != ReasonNoPairedEstimatedAndMeasuredDeltas {
-		t.Fatalf("reason = %q, want %q", got.Reason, ReasonNoPairedEstimatedAndMeasuredDeltas)
-	}
-}
-
 func TestSkillLint(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "skill", "SKILL.md"))
 	if err != nil {
@@ -413,16 +390,6 @@ func writeMetricsJSON(t *testing.T, dir string, name string, value any) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-func assertDeltaExclusionStratum(t *testing.T, metrics DeltaComparisonMetrics, reason string, count int) {
-	t.Helper()
-	for _, stratum := range metrics.ExcludedStrata {
-		if stratum.Reason == reason && stratum.Count == count {
-			return
-		}
-	}
-	t.Fatalf("excluded strata = %#v, missing %s count %d", metrics.ExcludedStrata, reason, count)
 }
 
 func ledgerRecordForEvent(t *testing.T, kind string, payload any) ledger.Record {
@@ -696,10 +663,6 @@ func decodeLedgerFixturePayload(t *testing.T, fixture ledgerFixtureEvent) any {
 		return decodeFixture[ledger.PromotionEvent](t, fixture.Event)
 	case ledger.EventKindAdjudicationRun:
 		return decodeFixture[ledger.AdjudicationRunEvent](t, fixture.Event)
-	case ledger.EventKindPolicyDecision:
-		return decodeFixture[ledger.PolicyDecisionEvent](t, fixture.Event)
-	case ledger.EventKindMeasuredDelta:
-		return decodeFixture[ledger.MeasuredDeltaEvent](t, fixture.Event)
 	default:
 		t.Fatalf("unsupported fixture ledger event kind %q", fixture.Kind)
 		return nil

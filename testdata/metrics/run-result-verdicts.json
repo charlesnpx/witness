@@ -1,5 +1,5 @@
 {
-  "schema_version": "witness-adjudication-run-result-v4",
+  "schema_version": "witness-adjudication-run-result-v5",
   "decision_rules_version": "witness-decision-rules-v1",
   "findings": [
     {

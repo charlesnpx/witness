@@ -916,7 +916,7 @@ func validatePlanChangeSurfaceDerivation(plan PlanDocument, base *freeze.Manifes
 }
 
 func validatePlanExclusionChangeSurface(plan PlanDocument) []diag.Diagnostic {
-	if plan.ScopePolicy == contracts.ScopePolicyDeltaObligating && plan.ChangeSurface != nil {
+	if plan.ScopePolicy == changesurface.ScopePolicyDeltaObligating && plan.ChangeSurface != nil {
 		return nil
 	}
 	var diagnostics []diag.Diagnostic
