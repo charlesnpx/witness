@@ -469,13 +469,6 @@ func TestVerificationManifestRejectsInvalidRelayLaunchStatusMarkers(t *testing.T
 	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
 }
 
-func TestReviewRulesRejectReorderedAdjudicationSequence(t *testing.T) {
-	rules := DefaultReviewRules()
-	rules.AdjudicationOrder[0], rules.AdjudicationOrder[1] = rules.AdjudicationOrder[1], rules.AdjudicationOrder[0]
-	diagnostics := ValidateReviewRules(rules)
-	assertDiagnosticCode(t, diagnostics, CodeInvalidRules)
-}
-
 func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {
 	frozen := validFrozenCharter(t)
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "role-output-defect.json"))
@@ -611,15 +604,15 @@ func validAutoApplyPolicy(productionCap int, testCap int) ReviewPolicy {
 		ProductionCap:                  &productionCap,
 		TestCap:                        &testCap,
 		CapRelease: &CapReleaseRecord{
-			Unit:          "lines",
-			ProductionCap: productionCap,
-			TestCap:       testCap,
-			Basis:         CapReleaseBasisOwnerJudgment,
-			Rationale:     "Test policy cap release.",
-			Actor:         "owner",
-			PolicyDigest:  testDigest("policy"),
-			RulesDigest:   testDigest("rules"),
-			CharterHash:   testDigest("charter"),
+			Unit:                 "lines",
+			ProductionCap:        productionCap,
+			TestCap:              testCap,
+			Basis:                CapReleaseBasisOwnerJudgment,
+			Rationale:            "Test policy cap release.",
+			Actor:                "owner",
+			PolicyDigest:         testDigest("policy"),
+			DecisionRulesVersion: DecisionRulesVersion,
+			CharterHash:          testDigest("charter"),
 		},
 	}
 }

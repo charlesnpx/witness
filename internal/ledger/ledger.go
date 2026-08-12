@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	RecordSchemaVersion = "witness-ledger-record-v1"
-	ShowSchemaVersion   = "witness-ledger-show-v1"
+	RecordSchemaVersion = "witness-ledger-record-v2"
+	ShowSchemaVersion   = "witness-ledger-show-v2"
 
 	UnitLines = "lines"
 	UnitFiles = "files"
@@ -65,7 +65,7 @@ type AdjudicationRunEvent struct {
 	ResultSchemaVersion       string `json:"result_schema_version"`
 	PolicyID                  string `json:"policy_id"`
 	PolicyDigest              string `json:"policy_digest"`
-	RulesDigest               string `json:"rules_digest"`
+	DecisionRulesVersion      string `json:"decision_rules_version"`
 	CharterHash               string `json:"charter_hash"`
 	ArtifactDigest            string `json:"artifact_digest"`
 	ManifestDigest            string `json:"manifest_digest"`
@@ -148,7 +148,7 @@ type PolicyDecisionEvent struct {
 	Reasons                    []string `json:"reasons"`
 	PolicyID                   string   `json:"policy_id"`
 	PolicyDigest               string   `json:"policy_digest"`
-	RulesDigest                string   `json:"rules_digest"`
+	DecisionRulesVersion       string   `json:"decision_rules_version"`
 	CharterHash                string   `json:"charter_hash,omitempty"`
 	CapReleaseCharterMismatch  bool     `json:"cap_release_charter_mismatch"`
 	CapReleaseUnit             string   `json:"cap_release_unit,omitempty"`
@@ -179,7 +179,7 @@ type adjudicationRunEventJSON struct {
 	ResultSchemaVersion       string         `json:"result_schema_version"`
 	PolicyID                  string         `json:"policy_id"`
 	PolicyDigest              string         `json:"policy_digest"`
-	RulesDigest               string         `json:"rules_digest"`
+	DecisionRulesVersion      string         `json:"decision_rules_version"`
 	CharterHash               string         `json:"charter_hash"`
 	ArtifactDigest            string         `json:"artifact_digest"`
 	ManifestDigest            string         `json:"manifest_digest"`
@@ -217,16 +217,16 @@ type capReleaseEventJSON struct {
 }
 
 type capReleaseRecordJSON struct {
-	Unit          string         `json:"unit"`
-	ProductionCap strictjson.Int `json:"production_cap"`
-	TestCap       strictjson.Int `json:"test_cap"`
-	Basis         string         `json:"basis"`
-	Evidence      string         `json:"evidence,omitempty"`
-	Rationale     string         `json:"rationale,omitempty"`
-	Actor         string         `json:"actor"`
-	PolicyDigest  string         `json:"policy_digest"`
-	RulesDigest   string         `json:"rules_digest"`
-	CharterHash   string         `json:"charter_hash"`
+	Unit                 string         `json:"unit"`
+	ProductionCap        strictjson.Int `json:"production_cap"`
+	TestCap              strictjson.Int `json:"test_cap"`
+	Basis                string         `json:"basis"`
+	Evidence             string         `json:"evidence,omitempty"`
+	Rationale            string         `json:"rationale,omitempty"`
+	Actor                string         `json:"actor"`
+	PolicyDigest         string         `json:"policy_digest"`
+	DecisionRulesVersion string         `json:"decision_rules_version"`
+	CharterHash          string         `json:"charter_hash"`
 }
 
 func (event *AdjudicationRunEvent) UnmarshalJSON(data []byte) error {
@@ -239,7 +239,7 @@ func (event *AdjudicationRunEvent) UnmarshalJSON(data []byte) error {
 		ResultSchemaVersion:       decoded.ResultSchemaVersion,
 		PolicyID:                  decoded.PolicyID,
 		PolicyDigest:              decoded.PolicyDigest,
-		RulesDigest:               decoded.RulesDigest,
+		DecisionRulesVersion:      decoded.DecisionRulesVersion,
 		CharterHash:               decoded.CharterHash,
 		ArtifactDigest:            decoded.ArtifactDigest,
 		ManifestDigest:            decoded.ManifestDigest,
@@ -295,16 +295,16 @@ func (event *CapReleaseEvent) UnmarshalJSON(data []byte) error {
 	}
 	*event = CapReleaseEvent{
 		Release: contracts.CapReleaseRecord{
-			Unit:          decoded.Release.Unit,
-			ProductionCap: int(decoded.Release.ProductionCap),
-			TestCap:       int(decoded.Release.TestCap),
-			Basis:         decoded.Release.Basis,
-			Evidence:      decoded.Release.Evidence,
-			Rationale:     decoded.Release.Rationale,
-			Actor:         decoded.Release.Actor,
-			PolicyDigest:  decoded.Release.PolicyDigest,
-			RulesDigest:   decoded.Release.RulesDigest,
-			CharterHash:   decoded.Release.CharterHash,
+			Unit:                 decoded.Release.Unit,
+			ProductionCap:        int(decoded.Release.ProductionCap),
+			TestCap:              int(decoded.Release.TestCap),
+			Basis:                decoded.Release.Basis,
+			Evidence:             decoded.Release.Evidence,
+			Rationale:            decoded.Release.Rationale,
+			Actor:                decoded.Release.Actor,
+			PolicyDigest:         decoded.Release.PolicyDigest,
+			DecisionRulesVersion: decoded.Release.DecisionRulesVersion,
+			CharterHash:          decoded.Release.CharterHash,
 		},
 	}
 	return nil
@@ -386,12 +386,19 @@ func decodeLedgerRecords(data []byte) ([]Record, error) {
 
 func ValidateRecords(records []Record) error {
 	var diagnostics []diag.Diagnostic
+	for index, record := range records {
+		if record.SchemaVersion != RecordSchemaVersion {
+			return &ValidationError{Diagnostics: []diag.Diagnostic{diagnostic(
+				CodeInvalidLedger,
+				fmt.Sprintf("ledger schema_version %q is unsupported; expected %q after decision-rules identity changed.", record.SchemaVersion, RecordSchemaVersion),
+				fmt.Sprintf("/records/%d/schema_version", index),
+				map[string]any{"expected": RecordSchemaVersion, "actual": record.SchemaVersion},
+			)}}
+		}
+	}
 	previous := ""
 	for index, record := range records {
 		path := fmt.Sprintf("/records/%d", index)
-		if record.SchemaVersion != RecordSchemaVersion {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedger, "ledger record schema_version is unsupported.", path+"/schema_version", map[string]any{"expected": RecordSchemaVersion, "actual": record.SchemaVersion}))
-		}
 		expectedSequence := index + 1
 		if record.Sequence != expectedSequence {
 			diagnostics = append(diagnostics, diagnostic(CodeInvalidLedger, "ledger record sequence must be contiguous.", path+"/sequence", map[string]any{"expected": expectedSequence, "actual": record.Sequence}))
@@ -770,7 +777,7 @@ func validateEvent(kind string, raw json.RawMessage, path string) []diag.Diagnos
 		requireString(&diagnostics, path+"/result_schema_version", "result_schema_version", event.ResultSchemaVersion)
 		requireString(&diagnostics, path+"/policy_id", "policy_id", event.PolicyID)
 		requireDigest(&diagnostics, path+"/policy_digest", "policy_digest", event.PolicyDigest)
-		requireDigest(&diagnostics, path+"/rules_digest", "rules_digest", event.RulesDigest)
+		requireDecisionRulesVersion(&diagnostics, path+"/decision_rules_version", event.DecisionRulesVersion)
 		requireDigest(&diagnostics, path+"/charter_hash", "charter_hash", event.CharterHash)
 		requireDigest(&diagnostics, path+"/artifact_digest", "artifact_digest", event.ArtifactDigest)
 		requireDigest(&diagnostics, path+"/manifest_digest", "manifest_digest", event.ManifestDigest)
@@ -875,7 +882,7 @@ func validateEvent(kind string, raw json.RawMessage, path string) []diag.Diagnos
 		requireReasons(&diagnostics, path+"/reasons", event.Reasons)
 		requireString(&diagnostics, path+"/policy_id", "policy_id", event.PolicyID)
 		requireDigest(&diagnostics, path+"/policy_digest", "policy_digest", event.PolicyDigest)
-		requireDigest(&diagnostics, path+"/rules_digest", "rules_digest", event.RulesDigest)
+		requireDecisionRulesVersion(&diagnostics, path+"/decision_rules_version", event.DecisionRulesVersion)
 		if event.CharterHash != "" {
 			requireDigest(&diagnostics, path+"/charter_hash", "charter_hash", event.CharterHash)
 		}
@@ -938,12 +945,18 @@ func validateCapRelease(diagnostics *[]diag.Diagnostic, path string, release con
 	}
 	requireString(diagnostics, path+"/actor", "actor", release.Actor)
 	requireDigest(diagnostics, path+"/policy_digest", "policy_digest", release.PolicyDigest)
-	requireDigest(diagnostics, path+"/rules_digest", "rules_digest", release.RulesDigest)
+	requireDecisionRulesVersion(diagnostics, path+"/decision_rules_version", release.DecisionRulesVersion)
 	requireDigest(diagnostics, path+"/charter_hash", "charter_hash", release.CharterHash)
 }
 
 func requireUnit(diagnostics *[]diag.Diagnostic, path string, label string, value string) {
 	requireEnum(diagnostics, path, label, value, []string{UnitLines, UnitFiles})
+}
+
+func requireDecisionRulesVersion(diagnostics *[]diag.Diagnostic, path string, value string) {
+	if value != contracts.DecisionRulesVersion {
+		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidLedgerEvent, "decision_rules_version is unsupported.", path, map[string]any{"expected": contracts.DecisionRulesVersion, "actual": value}))
+	}
 }
 
 func requireString(diagnostics *[]diag.Diagnostic, path string, label string, value string) {

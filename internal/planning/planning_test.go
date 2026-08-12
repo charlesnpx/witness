@@ -392,9 +392,8 @@ func TestVersionStampsForPlanManifestRulesPolicyAndChangeSurface(t *testing.T) {
 	if SchemaVersion != "witness-verification-plan-v2" {
 		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v2", SchemaVersion)
 	}
-	rules := contracts.DefaultReviewRules()
-	if rules.SchemaVersion != contracts.ReviewRulesV3 || rules.RulesID != "default-review-rules-v3" {
-		t.Fatalf("default rules = %#v, want review-rules-v3/default-review-rules-v3", rules)
+	if contracts.DecisionRulesVersion != "witness-decision-rules-v1" {
+		t.Fatalf("decision rules version = %s, want witness-decision-rules-v1", contracts.DecisionRulesVersion)
 	}
 	policy := contracts.DefaultReviewPolicy()
 	if policy.SchemaVersion != contracts.ReviewPolicyV3 || policy.PolicyID != "bootstrap-review-policy-v3" || policy.ScopePolicy != contracts.ScopePolicyWholeTree {

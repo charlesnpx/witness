@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	StateSchemaVersion      = "witness-pass-state-v2"
+	StateSchemaVersion      = "witness-pass-state-v3"
 	InvocationSchemaVersion = "witness-pass-next-action-v2"
 
 	StateFileName = "pass-state.json"
@@ -99,7 +99,6 @@ type BeginOptions struct {
 	IntegrationBundlePath string
 	Backend               string
 	PolicyPath            string
-	RulesPath             string
 	LedgerPath            string
 	BaseManifestPath      string
 	HeadManifestPath      string
@@ -134,7 +133,6 @@ type Config struct {
 	IntegrationBundlePath string           `json:"integration_bundle_path"`
 	Backend               string           `json:"backend,omitempty"`
 	PolicyPath            string           `json:"policy_path,omitempty"`
-	RulesPath             string           `json:"rules_path,omitempty"`
 	LedgerPath            string           `json:"ledger_path,omitempty"`
 	BaseManifestPath      string           `json:"base_manifest_path,omitempty"`
 	HeadManifestPath      string           `json:"head_manifest_path,omitempty"`
@@ -839,7 +837,6 @@ func runAdjudicate(state *State) error {
 		LedgerPath:                   config.LedgerPath,
 		ReceiptOutputDir:             config.ReceiptOutputDir,
 		ReceiptHMACKeyFile:           config.ReceiptHMACKeyFile,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 		PriorLineage:                 priorLineage,
@@ -865,7 +862,6 @@ func runAdjudicate(state *State) error {
 		{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digest.ClassRawBytes},
 		{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digest.ClassRawBytes},
 		{role: "policy", path: config.PolicyPath, digestClass: digest.ClassRawBytes},
-		{role: "rules", path: config.RulesPath, digestClass: digest.ClassRawBytes},
 		{role: "ledger", path: config.LedgerPath, digestClass: digest.ClassRawBytes},
 		{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
@@ -997,7 +993,6 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		{&config.RelayPath, options.RelayPath},
 		{&config.IntegrationBundlePath, options.IntegrationBundlePath},
 		{&config.PolicyPath, options.PolicyPath},
-		{&config.RulesPath, options.RulesPath},
 		{&config.LedgerPath, options.LedgerPath},
 		{&config.BaseManifestPath, options.BaseManifestPath},
 		{&config.HeadManifestPath, options.HeadManifestPath},
@@ -1524,12 +1519,21 @@ func readState(path string) (*State, error) {
 	if err != nil {
 		return nil, fileError(err, path, "open pass state")
 	}
-	state, err := strictjson.DecodeBytes[State](data, strictjson.DefaultMaxBytes*8)
+	outer, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
 	if err != nil {
 		return nil, err
 	}
-	if state.SchemaVersion != StateSchemaVersion {
-		return nil, validationError(CodeStateUnsupported, "pass state schema_version is unsupported.", "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": state.SchemaVersion})
+	document, ok := outer.(map[string]any)
+	if !ok {
+		return nil, validationError(CodeStateUnsupported, "pass state schema_version is unsupported.", "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": ""})
+	}
+	schemaVersion, _ := document["schema_version"].(string)
+	if schemaVersion != StateSchemaVersion {
+		return nil, validationError(CodeStateUnsupported, fmt.Sprintf("pass state schema_version %q is unsupported; expected %q; this state predates the decision-rules change.", schemaVersion, StateSchemaVersion), "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": schemaVersion})
+	}
+	state, err := strictjson.DecodeBytes[State](data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return nil, err
 	}
 	if state.DigestProfile != digest.Profile {
 		return nil, validationError(CodeStateUnsupported, "pass state digest_profile is unsupported.", "/digest_profile", map[string]any{"expected": digest.Profile, "actual": state.DigestProfile})
@@ -1882,10 +1886,6 @@ func loadEffectivePolicy(config Config) (policy.Effective, error) {
 	if err != nil {
 		return policy.Effective{}, err
 	}
-	rules, err := readReviewRules(config.RulesPath)
-	if err != nil {
-		return policy.Effective{}, err
-	}
 	records, err := ledger.ReadFile(config.LedgerPath)
 	if config.LedgerPath == "" {
 		records = nil
@@ -1904,7 +1904,6 @@ func loadEffectivePolicy(config Config) (policy.Effective, error) {
 	}
 	return policy.Load(policy.LoadOptions{
 		Policy:      policyDocument,
-		Rules:       rules,
 		CharterHash: frozen.CharterHash,
 		CapReleases: releases,
 	})
@@ -1963,17 +1962,6 @@ func readReviewPolicy(path string) (contracts.ReviewPolicy, error) {
 		return contracts.ReviewPolicy{}, fileError(err, path, "open review policy")
 	}
 	return contracts.ReadReviewPolicyBytes(data)
-}
-
-func readReviewRules(path string) (contracts.ReviewRules, error) {
-	if strings.TrimSpace(path) == "" {
-		return contracts.DefaultReviewRules(), nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.ReviewRules{}, fileError(err, path, "open review rules")
-	}
-	return contracts.ReadReviewRulesBytes(data)
 }
 
 func nextActionScopePolicy(config Config) (string, error) {

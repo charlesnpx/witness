@@ -300,17 +300,9 @@ func readRunResults(paths []string) ([]runResultInput, error) {
 		if err != nil {
 			return nil, err
 		}
-		result, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes*8)
+		result, err := adjudicate.ReadResultBytes(data)
 		if err != nil {
 			return nil, validationError(CodeInvalidRunResult, "run-result document could not be decoded.", "/run_results/"+itoa(index), path, err)
-		}
-		if result.SchemaVersion != adjudicate.ResultSchemaVersion && result.SchemaVersion != adjudicate.ResultSchemaVersionV2 && result.SchemaVersion != adjudicate.ResultSchemaVersionV1 {
-			return nil, &ValidationError{Diagnostics: []diag.Diagnostic{{
-				Code:    CodeInvalidRunResult,
-				Message: "run-result document schema_version is unsupported.",
-				Path:    "/run_results/" + itoa(index) + "/schema_version",
-				Details: map[string]any{"expected": []string{adjudicate.ResultSchemaVersion, adjudicate.ResultSchemaVersionV2, adjudicate.ResultSchemaVersionV1}, "actual": result.SchemaVersion, "path": path},
-			}}}
 		}
 		results = append(results, runResultInput{result: result})
 	}

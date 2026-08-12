@@ -815,7 +815,6 @@ func runAdjudicate(args []string) error {
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness receipt artifact directory")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	priorLineagePath := flags.String("prior-lineage", "", "prior finding lineage JSONL path")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	out := flags.String("out", "", "adjudication run-result output path")
@@ -843,7 +842,6 @@ func runAdjudicate(args []string) error {
 		{role: "head-manifest", path: *headManifestPath},
 		{role: "receipt-hmac-key-file", path: *receiptHMACKeyFile},
 		{role: "prior-lineage", path: *priorLineagePath},
-		{role: "rules", path: *rulesPath},
 		{role: "policy", path: *policyPath},
 		{role: "ledger", path: *ledgerPath},
 	}
@@ -882,7 +880,7 @@ func runAdjudicate(args []string) error {
 			Document: document,
 		})
 	}
-	effective, err := loadEffectivePolicy(*policyPath, *rulesPath, *ledgerPath, *frozenPath, "")
+	effective, err := loadEffectivePolicy(*policyPath, *ledgerPath, *frozenPath, "")
 	if err != nil {
 		return err
 	}
@@ -895,7 +893,6 @@ func runAdjudicate(args []string) error {
 		LedgerPath:                   *ledgerPath,
 		ReceiptOutputDir:             *receiptOutputDir,
 		ReceiptHMACKeyFile:           *receiptHMACKeyFile,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 		PriorLineage:                 priorLineage,
@@ -1160,7 +1157,6 @@ func runPolicy(command string, args []string) error {
 func runPolicyShow(args []string) error {
 	flags := newFlagSet("witness policy show", "Show the effective review policy.")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
@@ -1173,13 +1169,12 @@ func runPolicyShow(args []string) error {
 	}
 	if err := rejectOutputPathAliases(*out,
 		protectedInput{role: "policy", path: *policyPath},
-		protectedInput{role: "rules", path: *rulesPath},
 		protectedInput{role: "ledger", path: *ledgerPath},
 		protectedInput{role: "charter-freeze", path: *charterPath},
 	); err != nil {
 		return err
 	}
-	effective, err := loadEffectivePolicy(*policyPath, *rulesPath, *ledgerPath, *charterPath, *charterHash)
+	effective, err := loadEffectivePolicy(*policyPath, *ledgerPath, *charterPath, *charterHash)
 	if err != nil {
 		return err
 	}
@@ -1190,7 +1185,6 @@ func runPolicyReleaseCaps(args []string) error {
 	flags := newFlagSet("witness policy release-caps", "Record a policy cap release.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	unit := flags.String("unit", "lines", "cap unit")
@@ -1201,7 +1195,6 @@ func runPolicyReleaseCaps(args []string) error {
 	rationale := flags.String("rationale", "", "cap-release rationale")
 	actor := flags.String("actor", "", "owner actor")
 	policyDigest := flags.String("policy-digest", "", "expected policy digest")
-	rulesDigest := flags.String("rules-digest", "", "expected rules digest")
 	out := flags.String("out", "", "cap-release output path")
 	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
 		return err
@@ -1218,12 +1211,11 @@ func runPolicyReleaseCaps(args []string) error {
 	if err := rejectOutputPathAliases(*out,
 		protectedInput{role: "ledger", path: *ledgerPath},
 		protectedInput{role: "policy", path: *policyPath},
-		protectedInput{role: "rules", path: *rulesPath},
 		protectedInput{role: "charter-freeze", path: *charterPath},
 	); err != nil {
 		return err
 	}
-	inputs, err := readPolicyCommandInputs(*policyPath, *rulesPath, *charterPath, *charterHash)
+	inputs, err := readPolicyCommandInputs(*policyPath, *charterPath, *charterHash)
 	if err != nil {
 		return err
 	}
@@ -1232,7 +1224,6 @@ func runPolicyReleaseCaps(args []string) error {
 	}
 	release, err := policy.BuildCapRelease(policy.ReleaseInput{
 		Policy:        inputs.Policy,
-		Rules:         inputs.Rules,
 		Unit:          *unit,
 		ProductionCap: *productionCap,
 		TestCap:       *testCap,
@@ -1241,7 +1232,6 @@ func runPolicyReleaseCaps(args []string) error {
 		Rationale:     *rationale,
 		Actor:         *actor,
 		PolicyDigest:  *policyDigest,
-		RulesDigest:   *rulesDigest,
 		CharterHash:   inputs.CharterHash,
 	})
 	if err != nil {
@@ -1262,7 +1252,6 @@ func runPolicyCheckApplication(args []string) error {
 	flags := newFlagSet("witness policy check-application", "Check whether a policy application is allowed.")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	charterPath := flags.String("charter-freeze", "", "frozen Charter path")
 	charterHash := flags.String("charter-hash", "", "current Charter hash")
 	role := flags.String("role", contracts.RoleDefect, "application role")
@@ -1301,12 +1290,11 @@ func runPolicyCheckApplication(args []string) error {
 	if err := rejectOutputPathAliases(*out,
 		protectedInput{role: "ledger", path: *ledgerPath},
 		protectedInput{role: "policy", path: *policyPath},
-		protectedInput{role: "rules", path: *rulesPath},
 		protectedInput{role: "charter-freeze", path: *charterPath},
 	); err != nil {
 		return err
 	}
-	inputs, err := readPolicyCommandInputs(*policyPath, *rulesPath, *charterPath, *charterHash)
+	inputs, err := readPolicyCommandInputs(*policyPath, *charterPath, *charterHash)
 	if err != nil {
 		return err
 	}
@@ -1342,7 +1330,6 @@ func runPolicyCheckApplication(args []string) error {
 	}
 	effective, err := policy.Load(policy.LoadOptions{
 		Policy:      inputs.Policy,
-		Rules:       inputs.Rules,
 		CharterHash: inputs.CharterHash,
 		Unit:        check.Unit,
 		CapReleases: releases,
@@ -1371,7 +1358,7 @@ func runPolicyCheckApplication(args []string) error {
 				Reasons:                    decision.Reasons,
 				PolicyID:                   decision.PolicyID,
 				PolicyDigest:               decision.PolicyDigest,
-				RulesDigest:                decision.RulesDigest,
+				DecisionRulesVersion:       decision.DecisionRulesVersion,
 				CharterHash:                decision.CharterHash,
 				CapReleaseCharterMismatch:  decision.CapReleaseCharterMismatch,
 				CapReleaseUnit:             decision.CapReleaseUnit,
@@ -1415,7 +1402,6 @@ type policyCheckApplicationOutput struct {
 
 type policyCommandInputs struct {
 	Policy                     contracts.ReviewPolicy
-	Rules                      contracts.ReviewRules
 	CharterHash                string
 	OperationalEnvelopePresent *bool
 }
@@ -1424,8 +1410,8 @@ func ledgerAppendOutput(schemaVersion string, record ledger.Record) ledgerAppend
 	return ledgerAppendDocument{SchemaVersion: schemaVersion, Record: record}
 }
 
-func loadEffectivePolicy(policyPath string, rulesPath string, ledgerPath string, charterPath string, charterHash string) (policy.Effective, error) {
-	inputs, err := readPolicyCommandInputs(policyPath, rulesPath, charterPath, charterHash)
+func loadEffectivePolicy(policyPath string, ledgerPath string, charterPath string, charterHash string) (policy.Effective, error) {
+	inputs, err := readPolicyCommandInputs(policyPath, charterPath, charterHash)
 	if err != nil {
 		return policy.Effective{}, err
 	}
@@ -1439,13 +1425,12 @@ func loadEffectivePolicy(policyPath string, rulesPath string, ledgerPath string,
 	}
 	return policy.Load(policy.LoadOptions{
 		Policy:      inputs.Policy,
-		Rules:       inputs.Rules,
 		CharterHash: inputs.CharterHash,
 		CapReleases: releases,
 	})
 }
 
-func readPolicyCommandInputs(policyPath string, rulesPath string, charterPath string, charterHash string) (policyCommandInputs, error) {
+func readPolicyCommandInputs(policyPath string, charterPath string, charterHash string) (policyCommandInputs, error) {
 	policyDocument := contracts.DefaultReviewPolicy()
 	var err error
 	if policyPath != "" {
@@ -1454,14 +1439,7 @@ func readPolicyCommandInputs(policyPath string, rulesPath string, charterPath st
 			return policyCommandInputs{}, err
 		}
 	}
-	rules := contracts.DefaultReviewRules()
-	if rulesPath != "" {
-		rules, err = readReviewRulesFile(rulesPath)
-		if err != nil {
-			return policyCommandInputs{}, err
-		}
-	}
-	result := policyCommandInputs{Policy: policyDocument, Rules: rules, CharterHash: charterHash}
+	result := policyCommandInputs{Policy: policyDocument, CharterHash: charterHash}
 	if charterPath == "" {
 		return result, nil
 	}
@@ -1615,14 +1593,6 @@ func readVerificationManifestFile(path string) (contracts.VerificationManifest, 
 		return contracts.VerificationManifest{}, fileReadError(err, path, "open verification manifest")
 	}
 	return contracts.ReadVerificationManifestBytes(data)
-}
-
-func readReviewRulesFile(path string) (contracts.ReviewRules, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.ReviewRules{}, fileReadError(err, path, "open review rules")
-	}
-	return contracts.ReadReviewRulesBytes(data)
 }
 
 func readReviewPolicyFile(path string) (contracts.ReviewPolicy, error) {
@@ -2449,7 +2419,6 @@ func runPassBegin(args []string) error {
 	integrationBundlePath := flags.String("integration-bundle", "", "relay integration bundle path")
 	backend := flags.String("backend", "", "relay backend suffix for reported verification recipes")
 	policyPath := flags.String("policy", "", "review-policy JSON path; defaults to bootstrap review-policy-v3")
-	rulesPath := flags.String("rules", "", "review-rules JSON path; defaults to review-rules-v3")
 	ledgerPath := flags.String("ledger", "", "ledger JSONL path")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface derivation")
 	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface derivation")
@@ -2484,7 +2453,6 @@ func runPassBegin(args []string) error {
 		IntegrationBundlePath: *integrationBundlePath,
 		Backend:               *backend,
 		PolicyPath:            *policyPath,
-		RulesPath:             *rulesPath,
 		LedgerPath:            *ledgerPath,
 		BaseManifestPath:      *baseManifestPath,
 		HeadManifestPath:      *headManifestPath,

@@ -19,15 +19,13 @@ import (
 )
 
 const (
-	ResultSchemaVersionV1 = "witness-adjudication-run-result-v1"
-	ResultSchemaVersionV2 = "witness-adjudication-run-result-v2"
-	ResultSchemaVersion   = "witness-adjudication-run-result-v3"
+	ResultSchemaVersion = "witness-adjudication-run-result-v4"
 
 	CodeInvalidInput              = "adjudicate_invalid_input"
 	CodeInvalidFrozenCharter      = "adjudicate_invalid_frozen_charter"
 	CodeInvalidRoleOutput         = "adjudicate_invalid_role_output"
 	CodeInvalidManifest           = "adjudicate_invalid_manifest"
-	CodeInvalidRules              = "adjudicate_invalid_rules"
+	CodeUnsupportedResultSchema   = "adjudicate_unsupported_result_schema"
 	CodeInvalidPolicy             = "adjudicate_invalid_policy"
 	CodeInvalidRecurrenceLineage  = "adjudicate_invalid_recurrence_lineage"
 	CodeReceiptLoadFailed         = "adjudicate_receipt_load_failed"
@@ -65,7 +63,6 @@ type Options struct {
 	ReceiptHMACKey     []byte
 	ReceiptHMACKeyFile string
 
-	Rules                        contracts.ReviewRules
 	Policy                       contracts.ReviewPolicy
 	PolicyCapReleaseLedgerBacked bool
 
@@ -99,12 +96,10 @@ type Result struct {
 	SchemaVersion             string            `json:"schema_version"`
 	DigestProfile             string            `json:"digest_profile"`
 	ResultDigest              string            `json:"result_digest,omitempty"`
-	RulesVersion              string            `json:"rules_version"`
-	RulesID                   string            `json:"rules_id"`
+	DecisionRulesVersion      string            `json:"decision_rules_version"`
 	PolicyVersion             string            `json:"policy_version"`
 	PolicyID                  string            `json:"policy_id"`
 	PolicyDigest              string            `json:"policy_digest,omitempty"`
-	RulesDigest               string            `json:"rules_digest,omitempty"`
 	CapReleaseCharterMismatch bool              `json:"cap_release_charter_mismatch"`
 	CapReleaseUnit            string            `json:"cap_release_unit,omitempty"`
 	CharterHash               string            `json:"charter_hash"`
@@ -156,7 +151,7 @@ type FindingVerdict struct {
 	FindingID string `json:"finding_id"`
 	// FindingKey and EstimatedDelta are in-memory transport only (populated in
 	// adjudicateFinding and consumed by ledger emission). Attribution is persisted
-	// in v3 results because it is required to explain whether stack scoring was
+	// in run results because it is required to explain whether stack scoring was
 	// blocked. finding_digest already binds the source finding, including its
 	// attribution, recurrence, and estimated delta.
 	FindingKey         string                       `json:"-"`
@@ -179,6 +174,38 @@ type FindingVerdict struct {
 	Relay              *RelayMetadata               `json:"relay,omitempty"`
 	VerdictClass       *string                      `json:"verdict_class"`
 	Diagnostics        []diag.Diagnostic            `json:"diagnostics,omitempty"`
+}
+
+func ReadResultBytes(data []byte) (Result, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return Result{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return Result{}, diag.New(CodeUnsupportedResultSchema, "adjudication result must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != ResultSchemaVersion {
+		return Result{}, diag.New(
+			CodeUnsupportedResultSchema,
+			"adjudication result schema_version is unsupported; witness-adjudication-run-result-v4 is required after decision-rules identity changed.",
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", ResultSchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	decisionRulesVersion, _ := document["decision_rules_version"].(string)
+	if decisionRulesVersion != contracts.DecisionRulesVersion {
+		return Result{}, diag.New(
+			CodeUnsupportedResultSchema,
+			"adjudication result decision_rules_version is unsupported.",
+			diag.WithPath("/decision_rules_version"),
+			diag.WithDetail("expected", contracts.DecisionRulesVersion),
+			diag.WithDetail("actual", decisionRulesVersion),
+		)
+	}
+	return strictjson.DecodeBytes[Result](data, strictjson.DefaultMaxBytes*8)
 }
 
 type StrengthStep struct {
@@ -224,13 +251,6 @@ func (err *ValidationError) Error() string {
 }
 
 func Run(options Options) (*Result, error) {
-	rules := options.Rules
-	if rules.SchemaVersion == "" {
-		rules = contracts.DefaultReviewRules()
-	}
-	if diagnostics := contracts.ValidateReviewRules(rules); len(diagnostics) > 0 {
-		return nil, validationError(CodeInvalidRules, diagnostics)
-	}
 	policy := options.Policy
 	if policy.SchemaVersion == "" {
 		policy = contracts.DefaultReviewPolicy()
@@ -243,11 +263,8 @@ func Run(options Options) (*Result, error) {
 		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
 			return nil, validationError(CodeInvalidPolicy, []diag.Diagnostic{diagnostic(contracts.CodeInvalidPolicy, "delta_obligating scope policy requires review-policy-v3.", "/schema_version", map[string]any{"actual": policy.SchemaVersion, "expected": contracts.ReviewPolicyV3})})
 		}
-		if rules.SchemaVersion != contracts.ReviewRulesV3 {
-			return nil, validationError(CodeInvalidRules, []diag.Diagnostic{diagnostic(contracts.CodeInvalidRules, "delta_obligating scope policy requires review-rules-v3.", "/schema_version", map[string]any{"actual": rules.SchemaVersion, "expected": contracts.ReviewRulesV3})})
-		}
 	}
-	validationContext := policyContext(rules, policy, options.FrozenCharter)
+	validationContext := policyContext(policy, options.FrozenCharter)
 	policyValidation := contracts.ValidateReviewPolicy(policy, validationContext)
 	if len(policyValidation.Diagnostics) > 0 {
 		return nil, validationError(CodeInvalidPolicy, policyValidation.Diagnostics)
@@ -290,12 +307,10 @@ func Run(options Options) (*Result, error) {
 	result := &Result{
 		SchemaVersion:             ResultSchemaVersion,
 		DigestProfile:             digest.Profile,
-		RulesVersion:              rules.SchemaVersion,
-		RulesID:                   rules.RulesID,
+		DecisionRulesVersion:      contracts.DecisionRulesVersion,
 		PolicyVersion:             policy.SchemaVersion,
 		PolicyID:                  policy.PolicyID,
 		PolicyDigest:              validationContext.PolicyDigest,
-		RulesDigest:               validationContext.RulesDigest,
 		CapReleaseCharterMismatch: policyValidation.CapReleaseCharterMismatch,
 		CapReleaseUnit:            capReleaseUnit,
 		CharterHash:               options.Manifest.CharterHash,
@@ -304,7 +319,7 @@ func Run(options Options) (*Result, error) {
 		Diagnostics:               append([]diag.Diagnostic(nil), documentDiagnostics...),
 	}
 	for _, finding := range loadedFindings {
-		verdict := adjudicateFinding(finding, receipts, relay, options, rules, policy, scopePolicy)
+		verdict := adjudicateFinding(finding, receipts, relay, options, policy, scopePolicy)
 		result.Findings = append(result.Findings, verdict)
 		result.Diagnostics = append(result.Diagnostics, verdict.Diagnostics...)
 	}
@@ -381,13 +396,11 @@ func ValidatePriorLineage(records []PriorLineageRecord) []diag.Diagnostic {
 	return diagnostics
 }
 
-func policyContext(rules contracts.ReviewRules, policy contracts.ReviewPolicy, frozen *charter.FrozenCharter) *contracts.PolicyValidationContext {
-	rulesDigest, _ := contracts.ReviewRulesDigest(rules)
+func policyContext(policy contracts.ReviewPolicy, frozen *charter.FrozenCharter) *contracts.PolicyValidationContext {
 	policyForDigest := policy
 	policyForDigest.CapRelease = nil
 	policyDigest, _ := contracts.ReviewPolicyDigest(policyForDigest)
 	context := &contracts.PolicyValidationContext{
-		RulesDigest:  rulesDigest,
 		PolicyDigest: policyDigest,
 	}
 	if frozen != nil {
@@ -844,7 +857,7 @@ func stringMapValue(object map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, rules contracts.ReviewRules, policy contracts.ReviewPolicy, scopePolicy string) FindingVerdict {
+func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, policy contracts.ReviewPolicy, scopePolicy string) FindingVerdict {
 	finding := item.finding
 	verdict := FindingVerdict{
 		FindingID:        finding.ID,
@@ -922,7 +935,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		}
 	}
 
-	effective, capSeverity, capped := applySeverityCap(finding.ClaimedSeverity, currentStrength, rules)
+	effective, capSeverity, capped := applySeverityCap(finding.ClaimedSeverity, currentStrength)
 	if capSeverity == "" {
 		verdict.Disposition = contracts.DispositionAdvisory
 		verdict.ApplicationClass = contracts.ApplicationClassNone
@@ -962,7 +975,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 			}
 			verdict.StrengthTrajectory = append(verdict.StrengthTrajectory, StrengthStep{Step: "relay_result", Strength: currentStrength, Reason: ReasonRelayWeakened})
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonRelayWeakened)
-			effective, capSeverity, capped = applySeverityCap(finding.ClaimedSeverity, currentStrength, rules)
+			effective, capSeverity, capped = applySeverityCap(finding.ClaimedSeverity, currentStrength)
 			verdict.EffectiveSeverity = effective
 			verdict.SeverityCap = capSeverity
 			if capped {
@@ -1217,8 +1230,8 @@ func duplicateRelayBatchDiagnostics(findingID string, selectedBatchID string, ba
 	)}
 }
 
-func applySeverityCap(claimed string, strength string, rules contracts.ReviewRules) (string, string, bool) {
-	capSeverity := rules.SeverityCaps[strength]
+func applySeverityCap(claimed string, strength string) (string, string, bool) {
+	capSeverity := severityCap(strength)
 	if capSeverity == "" {
 		return "", "", false
 	}
@@ -1226,6 +1239,19 @@ func applySeverityCap(claimed string, strength string, rules contracts.ReviewRul
 		return capSeverity, capSeverity, true
 	}
 	return claimed, capSeverity, false
+}
+
+func severityCap(strength string) string {
+	switch strength {
+	case contracts.WitnessStrengthExecutable:
+		return contracts.SeverityCritical
+	case contracts.WitnessStrengthConstructed:
+		return contracts.SeverityHigh
+	case contracts.WitnessStrengthArgued:
+		return contracts.SeverityMedium
+	default:
+		return ""
+	}
 }
 
 func downgradeStrength(strength string) string {

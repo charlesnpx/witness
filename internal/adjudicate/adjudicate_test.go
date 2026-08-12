@@ -11,6 +11,7 @@ import (
 	"github.com/charlesnpx/witness/internal/changesurface"
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
@@ -719,7 +720,7 @@ func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
 	artifactDigest := testDigest("artifact")
 	productionCap := 5
 	testCap := 5
-	rules, policyDocument := filesReleasePolicy(t, frozen, productionCap, testCap)
+	policyDocument := filesReleasePolicy(t, frozen, productionCap, testCap)
 
 	t.Run("line estimate does not satisfy files release", func(t *testing.T) {
 		finding := defectFinding("finding-files-release", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
@@ -734,7 +735,6 @@ func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
 			frozen:                       frozen,
 			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			rules:                        rules,
 			policy:                       policyDocument,
 			policyCapReleaseLedgerBacked: true,
 		})
@@ -759,7 +759,6 @@ func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
 			frozen:                       frozen,
 			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			rules:                        rules,
 			policy:                       policyDocument,
 			policyCapReleaseLedgerBacked: true,
 		})
@@ -784,7 +783,6 @@ func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
 			frozen:                       frozen,
 			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			rules:                        rules,
 			policy:                       policyDocument,
 			policyCapReleaseLedgerBacked: true,
 		})
@@ -792,6 +790,39 @@ func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
 		assertDisposition(t, got, contracts.DispositionAdmitted)
 		assertApplicationClass(t, got, contracts.ApplicationClassAutomaticCandidate)
 	})
+}
+
+func TestReadResultBytesRejectsPreV4WithExplicitDiagnostic(t *testing.T) {
+	_, err := ReadResultBytes([]byte(`{"schema_version":"witness-adjudication-run-result-v3"}`))
+	if err == nil {
+		t.Fatal("ReadResultBytes accepted a v3 result")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeUnsupportedResultSchema || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported schema diagnostic", diagnostic)
+	}
+	if actual, _ := diagnostic.Details["actual"].(string); actual != "witness-adjudication-run-result-v3" {
+		t.Fatalf("actual = %#v, want v3", diagnostic.Details["actual"])
+	}
+	if expected, _ := diagnostic.Details["expected"].(string); expected != ResultSchemaVersion {
+		t.Fatalf("expected = %#v, want %s", diagnostic.Details["expected"], ResultSchemaVersion)
+	}
+}
+
+func TestDecisionRulesSeverityCaps(t *testing.T) {
+	tests := []struct {
+		strength string
+		want     string
+	}{
+		{strength: contracts.WitnessStrengthExecutable, want: contracts.SeverityCritical},
+		{strength: contracts.WitnessStrengthConstructed, want: contracts.SeverityHigh},
+		{strength: contracts.WitnessStrengthArgued, want: contracts.SeverityMedium},
+	}
+	for _, test := range tests {
+		if got := severityCap(test.strength); got != test.want {
+			t.Fatalf("severityCap(%q) = %q, want %q", test.strength, got, test.want)
+		}
+	}
 }
 
 type runInput struct {
@@ -802,7 +833,6 @@ type runInput struct {
 	headManifest                 *freeze.Manifest
 	receiptDir                   string
 	receiptKey                   []byte
-	rules                        contracts.ReviewRules
 	policy                       contracts.ReviewPolicy
 	policyCapReleaseLedgerBacked bool
 	priorLineage                 []PriorLineageRecord
@@ -819,7 +849,6 @@ func runAdjudication(t *testing.T, input runInput) *Result {
 		HeadManifest:                 input.headManifest,
 		ReceiptOutputDir:             input.receiptDir,
 		ReceiptHMACKey:               input.receiptKey,
-		Rules:                        input.rules,
 		Policy:                       input.policy,
 		PolicyCapReleaseLedgerBacked: input.policyCapReleaseLedgerBacked,
 		PriorLineage:                 input.priorLineage,
@@ -831,12 +860,14 @@ func runAdjudication(t *testing.T, input runInput) *Result {
 	if result.SchemaVersion != ResultSchemaVersion {
 		t.Fatalf("schema_version = %s, want %s", result.SchemaVersion, ResultSchemaVersion)
 	}
+	if result.DecisionRulesVersion != contracts.DecisionRulesVersion {
+		t.Fatalf("decision_rules_version = %s, want %s", result.DecisionRulesVersion, contracts.DecisionRulesVersion)
+	}
 	return result
 }
 
-func filesReleasePolicy(t *testing.T, frozen charter.FrozenCharter, productionCap int, testCap int) (contracts.ReviewRules, contracts.ReviewPolicy) {
+func filesReleasePolicy(t *testing.T, frozen charter.FrozenCharter, productionCap int, testCap int) contracts.ReviewPolicy {
 	t.Helper()
-	rules := contracts.DefaultReviewRules()
 	policyDocument := contracts.ReviewPolicy{
 		SchemaVersion:                  contracts.ReviewPolicyV3,
 		PolicyID:                       "policy-files-release",
@@ -849,22 +880,18 @@ func filesReleasePolicy(t *testing.T, frozen charter.FrozenCharter, productionCa
 	if err != nil {
 		t.Fatal(err)
 	}
-	rulesDigest, err := contracts.ReviewRulesDigest(rules)
-	if err != nil {
-		t.Fatal(err)
-	}
 	policyDocument.CapRelease = &contracts.CapReleaseRecord{
-		Unit:          "files",
-		ProductionCap: productionCap,
-		TestCap:       testCap,
-		Basis:         contracts.CapReleaseBasisOwnerJudgment,
-		Rationale:     "Owner accepted file caps.",
-		Actor:         "owner",
-		PolicyDigest:  policyDigest,
-		RulesDigest:   rulesDigest,
-		CharterHash:   frozen.CharterHash,
+		Unit:                 "files",
+		ProductionCap:        productionCap,
+		TestCap:              testCap,
+		Basis:                contracts.CapReleaseBasisOwnerJudgment,
+		Rationale:            "Owner accepted file caps.",
+		Actor:                "owner",
+		PolicyDigest:         policyDigest,
+		DecisionRulesVersion: contracts.DecisionRulesVersion,
+		CharterHash:          frozen.CharterHash,
 	}
-	return rules, policyDocument
+	return policyDocument
 }
 
 func roleOutputWithEstimatedDelta(t *testing.T, document contracts.RoleOutputDocument, estimatedDelta map[string]any) contracts.RoleOutputDocument {

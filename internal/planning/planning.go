@@ -22,7 +22,6 @@ const (
 	MaxBatchFindings              = 8
 
 	CodeMissingFrozenCharter       = "planning_missing_frozen_charter"
-	CodeInvalidReviewRules         = "planning_invalid_review_rules"
 	CodeInvalidReviewPolicy        = "planning_invalid_review_policy"
 	CodeMixedCharter               = "planning_mixed_charter"
 	CodeMixedArtifact              = "planning_mixed_artifact"
@@ -55,7 +54,6 @@ type Options struct {
 	RoleOutputs      []RoleOutputInput
 	StateDir         string
 	ConsumerIdentity map[string]any
-	Rules            contracts.ReviewRules
 	Policy           contracts.ReviewPolicy
 	Preflight        PreflightBinding
 	ChangeSurface    ChangeSurfaceInput
@@ -197,13 +195,6 @@ func Run(options Options) (*Result, error) {
 	if len(options.RoleOutputs) == 0 {
 		return nil, diag.New(CodeMissingRoleOutput, "planning requires at least one role-output document.")
 	}
-	rules := options.Rules
-	if rules.SchemaVersion == "" {
-		rules = contracts.DefaultReviewRules()
-	}
-	if diagnostics := contracts.ValidateReviewRules(rules); len(diagnostics) > 0 {
-		return nil, diag.New(CodeInvalidReviewRules, "planning review rules are invalid.", diag.WithDetails(firstDiagnosticDetails(diagnostics)))
-	}
 	policy := options.Policy
 	if policy.SchemaVersion == "" {
 		policy = contracts.DefaultReviewPolicy()
@@ -215,9 +206,6 @@ func Run(options Options) (*Result, error) {
 	if scopePolicy == contracts.ScopePolicyDeltaObligating {
 		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
 			return nil, diag.New(CodeInvalidReviewPolicy, "delta_obligating scope policy requires review-policy-v3.", diag.WithDetail("actual", policy.SchemaVersion), diag.WithDetail("expected", contracts.ReviewPolicyV3))
-		}
-		if rules.SchemaVersion != contracts.ReviewRulesV3 {
-			return nil, diag.New(CodeInvalidReviewRules, "delta_obligating scope policy requires review-rules-v3.", diag.WithDetail("actual", rules.SchemaVersion), diag.WithDetail("expected", contracts.ReviewRulesV3))
 		}
 	}
 
@@ -507,7 +495,7 @@ func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contract
 			return prefixDiagnostics("/witness", witness.Diagnostics), CodeInvalidReachability
 		}
 	}
-	// Review-rules caps are adjudication semantics: planning sends over-cap
+	// Severity caps are adjudication semantics: planning sends over-cap
 	// claims to verification, and adjudication caps admitted or pending results.
 	if finding.Recurrence != nil && finding.Recurrence.PriorFindingID == finding.ID {
 		return []diag.Diagnostic{diag.FromError(diag.New(
@@ -730,16 +718,6 @@ func sourceRoleOutputRef(input RoleOutputInput, index int, document contracts.Ro
 		DigestProfile: digest.Profile,
 		MediaType:     "application/json",
 	}
-}
-
-func exceedsSeverityCap(claimed string, strength string, rules contracts.ReviewRules) bool {
-	capSeverity := rules.SeverityCaps[strength]
-	if capSeverity == "" {
-		return true
-	}
-	claimedRank := severityRank(claimed)
-	capRank := severityRank(capSeverity)
-	return claimedRank >= 0 && capRank >= 0 && claimedRank < capRank
 }
 
 func severityRank(severity string) int {

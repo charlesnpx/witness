@@ -8,16 +8,6 @@ import (
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
-type ReviewRules struct {
-	SchemaVersion      string            `json:"schema_version"`
-	RulesID            string            `json:"rules_id"`
-	SeverityCaps       map[string]string `json:"severity_caps"`
-	Dispositions       []string          `json:"dispositions"`
-	ApplicationClasses []string          `json:"application_classes"`
-	AdjudicationOrder  []string          `json:"adjudication_order"`
-	AdvisoryReasons    []string          `json:"advisory_reasons,omitempty"`
-}
-
 type ReviewPolicy struct {
 	SchemaVersion                  string            `json:"schema_version"`
 	PolicyID                       string            `json:"policy_id"`
@@ -29,21 +19,20 @@ type ReviewPolicy struct {
 }
 
 type CapReleaseRecord struct {
-	Unit          string `json:"unit"`
-	ProductionCap int    `json:"production_cap"`
-	TestCap       int    `json:"test_cap"`
-	Basis         string `json:"basis"`
-	Evidence      string `json:"evidence,omitempty"`
-	Rationale     string `json:"rationale,omitempty"`
-	Actor         string `json:"actor"`
-	PolicyDigest  string `json:"policy_digest"`
-	RulesDigest   string `json:"rules_digest"`
-	CharterHash   string `json:"charter_hash"`
+	Unit                 string `json:"unit"`
+	ProductionCap        int    `json:"production_cap"`
+	TestCap              int    `json:"test_cap"`
+	Basis                string `json:"basis"`
+	Evidence             string `json:"evidence,omitempty"`
+	Rationale            string `json:"rationale,omitempty"`
+	Actor                string `json:"actor"`
+	PolicyDigest         string `json:"policy_digest"`
+	DecisionRulesVersion string `json:"decision_rules_version"`
+	CharterHash          string `json:"charter_hash"`
 }
 
 type PolicyValidationContext struct {
 	PolicyDigest string
-	RulesDigest  string
 	CharterHash  string
 }
 
@@ -71,64 +60,12 @@ type PolicyDecision struct {
 	CapReleaseCharterMismatch bool   `json:"cap_release_charter_mismatch"`
 }
 
-var requiredAdjudicationOrderV2 = []string{
-	"charter_role_goal_scope_witness_recurrence",
-	"execution_receipt",
-	"strength_severity_cap",
-	"pending_verification",
-	"relay_result",
-	"application_class",
-}
-
-var requiredAdjudicationOrderV3 = []string{
-	"change_surface_scope",
-	"charter_role_goal_scope_witness_recurrence",
-	"execution_receipt",
-	"strength_severity_cap",
-	"pending_verification",
-	"relay_result",
-	"application_class",
-}
-
-func ReadReviewRules(reader io.Reader) (ReviewRules, error) {
-	return strictjson.Decode[ReviewRules](reader, strictjson.DefaultMaxBytes)
-}
-
-func ReadReviewRulesBytes(data []byte) (ReviewRules, error) {
-	return strictjson.DecodeBytes[ReviewRules](data, strictjson.DefaultMaxBytes)
-}
-
 func ReadReviewPolicy(reader io.Reader) (ReviewPolicy, error) {
 	return strictjson.Decode[ReviewPolicy](reader, strictjson.DefaultMaxBytes)
 }
 
 func ReadReviewPolicyBytes(data []byte) (ReviewPolicy, error) {
 	return strictjson.DecodeBytes[ReviewPolicy](data, strictjson.DefaultMaxBytes)
-}
-
-func DefaultReviewRules() ReviewRules {
-	return ReviewRules{
-		SchemaVersion: ReviewRulesV3,
-		RulesID:       "default-review-rules-v3",
-		SeverityCaps: map[string]string{
-			WitnessStrengthExecutable:  SeverityCritical,
-			WitnessStrengthConstructed: SeverityHigh,
-			WitnessStrengthArgued:      SeverityMedium,
-		},
-		Dispositions: []string{
-			DispositionAdmitted,
-			DispositionAdvisory,
-			DispositionPendingVerification,
-			DispositionOwnerOverride,
-		},
-		ApplicationClasses: []string{
-			ApplicationClassAutomaticCandidate,
-			ApplicationClassCallerDecision,
-			ApplicationClassNone,
-		},
-		AdjudicationOrder: append([]string(nil), requiredAdjudicationOrderV3...),
-		AdvisoryReasons:   []string{ReasonOutOfDelta},
-	}
 }
 
 func DefaultReviewPolicy() ReviewPolicy {
@@ -138,55 +75,6 @@ func DefaultReviewPolicy() ReviewPolicy {
 		ScopePolicy:                    ScopePolicyWholeTree,
 		DefectAdditiveAutoApplyEnabled: false,
 	}
-}
-
-func RequireValidReviewRules(document ReviewRules) error {
-	return ErrorFromDiagnostics(ValidateReviewRules(document))
-}
-
-func ValidateReviewRules(document ReviewRules) []diag.Diagnostic {
-	var diagnostics []diag.Diagnostic
-	requiredOrder := requiredAdjudicationOrderV3
-	if document.SchemaVersion == ReviewRulesV2 {
-		requiredOrder = requiredAdjudicationOrderV2
-	} else if document.SchemaVersion != ReviewRulesV3 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, "review rules schema_version must be review-rules-v3.", "/schema_version", map[string]any{"expected": ReviewRulesV3, "actual": document.SchemaVersion}))
-	}
-	requireStableID(&diagnostics, "/rules_id", "rules ID", document.RulesID)
-	expectedCaps := []struct {
-		strength string
-		cap      string
-	}{
-		{strength: WitnessStrengthExecutable, cap: SeverityCritical},
-		{strength: WitnessStrengthConstructed, cap: SeverityHigh},
-		{strength: WitnessStrengthArgued, cap: SeverityMedium},
-	}
-	for _, expected := range expectedCaps {
-		path := "/severity_caps/" + expected.strength
-		if document.SeverityCaps[expected.strength] != expected.cap {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, reviewRulesLabel(document.SchemaVersion)+" severity caps must match the versioned contract.", path, map[string]any{"expected": expected.cap, "actual": document.SeverityCaps[expected.strength]}))
-		}
-	}
-	requireStringSet(&diagnostics, "/dispositions", "disposition", document.Dispositions, []string{DispositionAdmitted, DispositionAdvisory, DispositionPendingVerification, DispositionOwnerOverride}, CodeInvalidRules)
-	requireStringSet(&diagnostics, "/application_classes", "application class", document.ApplicationClasses, []string{ApplicationClassAutomaticCandidate, ApplicationClassCallerDecision, ApplicationClassNone}, CodeInvalidRules)
-	if len(document.AdjudicationOrder) != len(requiredOrder) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRules, reviewRulesLabel(document.SchemaVersion)+" must declare the fixed adjudication order.", "/adjudication_order", map[string]any{"actual_count": len(document.AdjudicationOrder), "expected_count": len(requiredOrder)}))
-	} else {
-		for index, expected := range requiredOrder {
-			if document.AdjudicationOrder[index] != expected {
-				diagnostics = append(diagnostics, diagnostic(
-					CodeInvalidRules,
-					reviewRulesLabel(document.SchemaVersion)+" adjudication order must match the versioned sequence exactly.",
-					"/adjudication_order/"+itoa(index),
-					map[string]any{"actual": document.AdjudicationOrder[index], "expected": expected},
-				))
-			}
-		}
-	}
-	if document.SchemaVersion == ReviewRulesV3 {
-		requireStringSet(&diagnostics, "/advisory_reasons", "advisory reason", document.AdvisoryReasons, []string{ReasonOutOfDelta}, CodeInvalidRules)
-	}
-	return diagnostics
 }
 
 func ValidateReviewPolicy(document ReviewPolicy, context *PolicyValidationContext) PolicyValidationResult {
@@ -282,14 +170,6 @@ func EffectiveScopePolicy(document ReviewPolicy) string {
 	return ScopePolicyWholeTree
 }
 
-func ReviewRulesDigest(document ReviewRules) (string, error) {
-	return SemanticDigest(document)
-}
-
-func ReviewRulesCanonicalBytes(document ReviewRules) ([]byte, error) {
-	return CanonicalBytes(document)
-}
-
 func ReviewPolicyDigest(document ReviewPolicy) (string, error) {
 	return SemanticDigest(document)
 }
@@ -319,7 +199,9 @@ func validateCapRelease(release CapReleaseRecord, policy ReviewPolicy, context *
 	}
 	requireString(&diagnostics, "/cap_release/actor", "cap-release actor", release.Actor)
 	requireDigest(&diagnostics, "/cap_release/policy_digest", "cap-release policy_digest", release.PolicyDigest)
-	requireDigest(&diagnostics, "/cap_release/rules_digest", "cap-release rules_digest", release.RulesDigest)
+	if release.DecisionRulesVersion != DecisionRulesVersion {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidPolicy, "cap-release decision_rules_version must match the current decision engine.", "/cap_release/decision_rules_version", map[string]any{"expected": DecisionRulesVersion, "actual": release.DecisionRulesVersion}))
+	}
 	requireDigest(&diagnostics, "/cap_release/charter_hash", "cap-release charter_hash", release.CharterHash)
 	if context == nil {
 		return diagnostics
@@ -327,29 +209,10 @@ func validateCapRelease(release CapReleaseRecord, policy ReviewPolicy, context *
 	if context.PolicyDigest != "" {
 		compareDigest(&diagnostics, "/cap_release/policy_digest", "cap-release policy", release.PolicyDigest, context.PolicyDigest)
 	}
-	if context.RulesDigest != "" {
-		compareDigest(&diagnostics, "/cap_release/rules_digest", "cap-release rules", release.RulesDigest, context.RulesDigest)
-	}
 	if context.CharterHash != "" && release.CharterHash != context.CharterHash {
 		result.CapReleaseCharterMismatch = true
 	}
 	return diagnostics
-}
-
-func requireStringSet(diagnostics *[]diag.Diagnostic, path string, label string, actual []string, expected []string, code string) {
-	if len(actual) != len(expected) {
-		*diagnostics = append(*diagnostics, diagnostic(code, "review rules must declare the complete "+label+" set.", path, map[string]any{"actual_count": len(actual), "expected_count": len(expected)}))
-		return
-	}
-	actualSet := map[string]bool{}
-	for _, value := range actual {
-		actualSet[value] = true
-	}
-	for _, value := range expected {
-		if !actualSet[value] {
-			*diagnostics = append(*diagnostics, diagnostic(code, "review rules are missing a required "+label+".", path, map[string]any{"value": value}))
-		}
-	}
 }
 
 func validScopePolicy(value string) bool {
@@ -359,11 +222,4 @@ func validScopePolicy(value string) bool {
 	default:
 		return false
 	}
-}
-
-func reviewRulesLabel(schemaVersion string) string {
-	if schemaVersion == "" {
-		return "review rules"
-	}
-	return schemaVersion
 }

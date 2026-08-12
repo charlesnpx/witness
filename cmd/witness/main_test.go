@@ -976,7 +976,7 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes)
+	result, err := adjudicate.ReadResultBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1422,7 +1422,6 @@ func TestAdjudicateCLIIgnoresEmbeddedCapReleaseWithoutLedger(t *testing.T) {
 	}
 	release, err := policy.BuildCapRelease(policy.ReleaseInput{
 		Policy:        policyDocument,
-		Rules:         contracts.DefaultReviewRules(),
 		Unit:          policy.UnitLines,
 		ProductionCap: productionCap,
 		TestCap:       testCap,
@@ -1587,7 +1586,6 @@ func TestAdjudicateCLILedgerBackedPolicyAppendsLineageAndRefusesDuplicate(t *tes
 	}
 	release, err := policy.BuildCapRelease(policy.ReleaseInput{
 		Policy:        policyDocument,
-		Rules:         contracts.DefaultReviewRules(),
 		Unit:          policy.UnitLines,
 		ProductionCap: productionCap,
 		TestCap:       testCap,
@@ -1618,7 +1616,7 @@ func TestAdjudicateCLILedgerBackedPolicyAppendsLineageAndRefusesDuplicate(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := strictjson.DecodeBytes[adjudicate.Result](resultData, strictjson.DefaultMaxBytes*2)
+	result, err := adjudicate.ReadResultBytes(resultData)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1722,7 +1720,7 @@ func TestAdjudicateCLIAcceptsPriorLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes)
+	result, err := adjudicate.ReadResultBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}

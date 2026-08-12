@@ -403,17 +403,18 @@ func TestBeginResumeRejectsStateIdentityMismatch(t *testing.T) {
 	})
 }
 
-func TestResumeRejectsV1PassStateSchema(t *testing.T) {
+func TestResumeRejectsV2PassStateWithRulesPathBeforeStrictDecode(t *testing.T) {
 	stateDir := t.TempDir()
-	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), State{
-		SchemaVersion: "witness-pass-state-v1",
-		DigestProfile: digest.Profile,
-		StateDigest:   digest.Prefix + strings.Repeat("0", 64),
+	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), map[string]any{
+		"schema_version": "witness-pass-state-v2",
+		"config": map[string]any{
+			"rules_path": "rules.json",
+		},
 	})
 
 	_, err := Resume(context.Background(), ResumeOptions{StateDir: stateDir})
 	if err == nil {
-		t.Fatal("resume accepted a v1 pass state")
+		t.Fatal("resume accepted a v2 pass state with rules_path")
 	}
 	assertValidationCode(t, err, CodeStateUnsupported)
 
@@ -421,9 +422,12 @@ func TestResumeRejectsV1PassStateSchema(t *testing.T) {
 	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
 		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
 	}
+	if strings.Contains(validation.Diagnostics[0].Message, "unknown_json_field") || !strings.Contains(validation.Diagnostics[0].Message, "predates the decision-rules change") {
+		t.Fatalf("schema diagnostic message = %q, want explicit decision-rules legacy refusal", validation.Diagnostics[0].Message)
+	}
 	details := validation.Diagnostics[0].Details
-	if details["actual"] != "witness-pass-state-v1" || details["expected"] != StateSchemaVersion {
-		t.Fatalf("schema diagnostic details = %#v, want actual v1 and expected %s", details, StateSchemaVersion)
+	if details["actual"] != "witness-pass-state-v2" || details["expected"] != StateSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want actual v2 and expected %s", details, StateSchemaVersion)
 	}
 }
 
@@ -1500,7 +1504,6 @@ func TestDriverLedgerAppendsSameLineageKindsAsSharedAdjudicationService(t *testi
 		BaseManifest:                 changeSurface.BaseManifest,
 		HeadManifest:                 changeSurface.HeadManifest,
 		LedgerPath:                   serviceLedgerPath,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 	})
@@ -3714,7 +3717,6 @@ func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath strin
 		BaseManifest:                 changeSurface.BaseManifest,
 		HeadManifest:                 changeSurface.HeadManifest,
 		LedgerPath:                   ledgerPath,
-		Rules:                        effective.Rules,
 		Policy:                       effective.Policy,
 		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
 	})

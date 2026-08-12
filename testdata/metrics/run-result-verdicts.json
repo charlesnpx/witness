@@ -1,5 +1,6 @@
 {
-  "schema_version": "witness-adjudication-run-result-v1",
+  "schema_version": "witness-adjudication-run-result-v4",
+  "decision_rules_version": "witness-decision-rules-v1",
   "findings": [
     {
       "finding_id": "survived-1",

@@ -127,7 +127,6 @@ func driverConfiguredInputs(config Config) []driverConfiguredInput {
 		{role: "source-dir", path: config.SourceDir, rejectsContainedOutput: true},
 		{role: "integration-bundle", path: config.IntegrationBundlePath},
 		{role: "policy", path: config.PolicyPath},
-		{role: "rules", path: config.RulesPath},
 		{role: "ledger", path: config.LedgerPath},
 		{role: "base-manifest", path: config.BaseManifestPath},
 		{role: "head-manifest", path: config.HeadManifestPath},
