@@ -8,7 +8,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/ledger"
 	"github.com/charlesnpx/witness/internal/metrics"
+	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/policy"
 	"github.com/charlesnpx/witness/internal/preflight"
@@ -1812,6 +1815,157 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 	}
 }
 
+func TestVerificationAssembleRunRelayRetainsConsumingRecordAcrossBudgetRejection(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := filepath.Join(dir, "source")
+	stateDir := filepath.Join(dir, "state")
+	manifestOut := filepath.Join(dir, "manifest-run.json")
+	charterPath := filepath.Join(dir, "charter.json")
+	relayPath := filepath.Join(dir, "fake-relay")
+	bundlePath := filepath.Join(cliTestRepoRoot(t), "testdata", "preflight", "integration-bundle-v2.fixture.json")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "app.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(charterPath, validCLICharter(t)); err != nil {
+		t.Fatal(err)
+	}
+	buildCLIFakeRelay(t, relayPath)
+
+	beginOutput, err := captureRouteStdout(t, []string{
+		"pass", "begin",
+		"-state-dir", stateDir,
+		"-charter", charterPath,
+		"-source-dir", sourceDir,
+		"-allow-non-git-source",
+		"-relay", relayPath,
+		"-integration-bundle", bundlePath,
+		"-backend", "codex",
+	})
+	if err != nil {
+		t.Fatalf("pass begin: %v", err)
+	}
+	invocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(beginOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode pass begin output: %v", err)
+	}
+	if invocation.StageRun != "freeze" {
+		t.Fatalf("pass begin invocation = %#v, want freeze", invocation)
+	}
+
+	preflightOutput, err := captureRouteStdout(t, []string{"pass", "resume", "-state-dir", stateDir})
+	if err != nil {
+		t.Fatalf("pass resume preflight: %v", err)
+	}
+	preflightInvocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(preflightOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode preflight invocation: %v", err)
+	}
+	if preflightInvocation.NextAction.Type != "caller_role_outputs" || len(preflightInvocation.NextAction.Roles) != 2 {
+		t.Fatalf("preflight invocation = %#v, want caller role outputs", preflightInvocation)
+	}
+	frozenData, err := os.ReadFile(filepath.Join(stateDir, "charter.freeze.json"))
+	if err != nil {
+		t.Fatalf("read frozen charter: %v", err)
+	}
+	frozen, err := strictjson.DecodeBytes[charter.FrozenCharter](frozenData, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatalf("decode frozen charter: %v", err)
+	}
+	for _, request := range preflightInvocation.NextAction.Roles {
+		roleOutput := validCLIRoleOutput(frozen)
+		roleOutput.CharterHash = preflightInvocation.NextAction.CharterHash
+		roleOutput.ArtifactDigest = preflightInvocation.NextAction.SnapshotDigest
+		switch request.Role {
+		case contracts.RoleDefect:
+		case contracts.RoleEconomy:
+			roleOutput.Role = contracts.RoleEconomy
+			roleOutput.Findings = []contracts.Finding{}
+		default:
+			t.Fatalf("unexpected caller role-output request: %#v", request)
+		}
+		if err := os.MkdirAll(filepath.Dir(request.Path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeCanonical(request.Path, roleOutput); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	planOutput, err := captureRouteStdout(t, []string{"pass", "resume", "-state-dir", stateDir})
+	if err != nil {
+		t.Fatalf("pass resume plan: %v", err)
+	}
+	planInvocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(planOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode plan invocation: %v", err)
+	}
+	if planInvocation.StageRun != "plan" || planInvocation.NextAction.Type != "caller_relay_batch" || planInvocation.NextAction.RelayBatch == nil {
+		t.Fatalf("plan invocation = %#v, want caller relay batch", planInvocation)
+	}
+
+	t.Setenv("WITNESS_FAKE_RELAY_FAIL_RUN", "1")
+	baseArgs := []string{
+		"verification", "assemble",
+		"-run-relay",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-state-dir", stateDir,
+		"-relay", relayPath,
+		"-backend", "codex",
+		"-charter-freeze", filepath.Join(stateDir, "charter.freeze.json"),
+		"-artifact", filepath.Join(stateDir, "source-snapshot", "manifest.json"),
+		"-compatibility-manifest", filepath.Join(stateDir, "compatibility-manifest.json"),
+		"-relay-capabilities", filepath.Join(stateDir, "relay-capabilities.json"),
+		"-integration-bundle", filepath.Join(stateDir, "integration-bundle.body.json"),
+		"-selected-contract", filepath.Join(stateDir, "integration-bundle.body.json"),
+		"-out", manifestOut,
+	}
+	if err := route(baseArgs); err != nil {
+		t.Fatalf("first verification assemble -run-relay: %v", err)
+	}
+
+	recordPath := filepath.Join(stateDir, "verification", "runs", "defect-batch-1.json")
+	before, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read first consuming run record: %v", err)
+	}
+	records, err := relayrun.ReadRunRecordsBytes(before)
+	if err != nil || len(records) != 1 || !records[0].ConsumesBatch {
+		t.Fatalf("first run record records=%#v err=%v, want one consuming record", records, err)
+	}
+
+	secondArgs := append(append([]string(nil), baseArgs...), "-named-input-budget-bytes", "1")
+	err = route(secondArgs)
+	if err == nil {
+		t.Fatal("second verification assemble -run-relay succeeded despite the retained consuming record")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != relayrun.CodeConsumingRunRecordExists || diagnostic.Details["batch_id"] != "defect-batch-1" || !strings.Contains(diagnostic.Message, "consuming record already exists") {
+		t.Fatalf("second-run diagnostic = %#v, want clear consuming-record refusal", diagnostic)
+	}
+	after, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read retained run record after refusal: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("consuming run record changed after later budget rejection\nbefore: %s\nafter: %s", before, after)
+	}
+
+	resumeOutput, err := captureRouteStdout(t, []string{"pass", "resume", "-state-dir", stateDir})
+	if err != nil {
+		t.Fatalf("pass resume after consuming relay record: %v", err)
+	}
+	resumeInvocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(resumeOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode post-record pass invocation: %v", err)
+	}
+	if resumeInvocation.StageRun != "assemble" || resumeInvocation.NextAction.Type != "witness_command" {
+		t.Fatalf("post-record pass invocation = %#v, want assembly instead of a reopened caller relay batch", resumeInvocation)
+	}
+}
+
 func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testing.T) {
 	dir := t.TempDir()
 	const sentinel = "relay-run-record-secret-sentinel"
@@ -3169,7 +3323,16 @@ func readFrozen(t *testing.T, path string) charter.FrozenCharter {
 
 func validCLIFrozenCharter(t *testing.T) charter.FrozenCharter {
 	t.Helper()
-	frozen, err := charter.Freeze(charter.Charter{
+	frozen, err := charter.Freeze(validCLICharter(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frozen
+}
+
+func validCLICharter(t *testing.T) charter.Charter {
+	t.Helper()
+	return charter.Charter{
 		SchemaVersion: charter.SchemaVersion,
 		Goals: []charter.Statement{{
 			ID:        "goal-cli",
@@ -3218,11 +3381,29 @@ func validCLIFrozenCharter(t *testing.T) charter.FrozenCharter {
 				Entries:   []charter.Entry{},
 			},
 		},
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
 	}
-	return frozen
+}
+
+func cliTestRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve CLI test source path")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("CLI test repo root %q: %v", root, err)
+	}
+	return root
+}
+
+func buildCLIFakeRelay(t *testing.T, outputPath string) {
+	t.Helper()
+	command := exec.Command("go", "build", "-o", outputPath, "./testdata/e2e/fake-relay")
+	command.Dir = cliTestRepoRoot(t)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build fake relay: %v\n%s", err, output)
+	}
 }
 
 func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocument {
@@ -3389,6 +3570,9 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 			"retention_scope": "test",
 		}
 	}
+	if strings.HasPrefix(name, "bundle") {
+		value = validCLIIntegrationBundle()
+	}
 	if err := writeCanonical(path, value); err != nil {
 		t.Fatal(err)
 	}
@@ -3485,7 +3669,6 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 	t.Helper()
 	suffix := strings.TrimPrefix(compatibilityName, "compatibility")
 	capabilitiesName := "capabilities" + suffix
-	bundleName := "bundle" + suffix
 	capabilities := map[string]bool{}
 	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
 		capabilities[requirement.Key] = true
@@ -3527,7 +3710,7 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 		DigestProfile:           digest.Profile,
 		Capabilities:            capabilities,
 		CapabilitiesDigest:      cliWrittenCanonicalDigest(t, map[string]any{"name": capabilitiesName}),
-		IntegrationBundleDigest: cliSemanticDigest(t, map[string]any{"name": bundleName}),
+		IntegrationBundleDigest: cliSemanticDigest(t, validCLIIntegrationBundle()),
 		SelectedContracts:       selectedContracts,
 		RecipePlans:             recipePlans,
 		CompileReports:          compileReports,
@@ -3536,6 +3719,57 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 			{Backend: "claude", Status: "available"},
 		},
 		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
+	}
+}
+
+func validCLIIntegrationBundle() map[string]any {
+	return map[string]any{
+		"schema_version": "relay-integration-bundle-v2",
+		"id":             "witness/cli-fixture-v1",
+		"contracts": map[string]any{
+			"witnessed-review/witness-falsification-v2": validCLIIntegrationContract(),
+			"witnessed-review/economy-equivalence-v2":   validCLIIntegrationContract(),
+		},
+	}
+}
+
+func validCLIIntegrationContract() map[string]any {
+	return map[string]any{
+		"turns": []any{
+			map[string]any{"participant_turn": 1, "slot": "slot_0", "instructions": "Present the filed witness using only bound inputs."},
+			map[string]any{"participant_turn": 2, "slot": "slot_1", "instructions": "Challenge the filed witness without introducing new evidence."},
+			map[string]any{"participant_turn": 3, "slot": "slot_0", "instructions": "Answer the challenge using only bound inputs."},
+			map[string]any{"participant_turn": 4, "slot": "slot_1", "instructions": "State remaining objections to the filed witness."},
+		},
+		"reducer": map[string]any{
+			"instructions": "Return one JSON object that conforms to the result schema.",
+		},
+		"prompt_context": map[string]any{
+			"participant_transcript": "complete",
+			"facilitator_ledger":     "trace_only",
+		},
+		"inputs": map[string]any{
+			"artifact": map[string]any{"required": false, "cardinality": "many", "max_bytes": 1048576},
+			"charter": map[string]any{
+				"required":    true,
+				"cardinality": "one",
+				"media_type":  "application/json",
+				"max_bytes":   262144,
+				"schema":      map[string]any{"type": "object"},
+			},
+			"findings": map[string]any{
+				"required":    true,
+				"cardinality": "one",
+				"media_type":  "application/json",
+				"max_bytes":   262144,
+				"schema":      map[string]any{"type": "object"},
+			},
+		},
+		"result": map[string]any{
+			"transport":  "json",
+			"schema":     map[string]any{"type": "object"},
+			"assertions": []any{},
+		},
 	}
 }
 

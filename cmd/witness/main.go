@@ -515,6 +515,7 @@ func runVerificationAssemble(args []string) error {
 	launchCWD := flags.String("launch-cwd", "", "relay launch working directory")
 	settingsPath := flags.String("settings", "", "convo-relay settings path")
 	allowDirtySource := flags.Bool("allow-dirty-source", false, "allow a dirty relay launch source; distinct from pass begin/verification preflight -allow-dirty-source, which permits freezing a dirty reviewed working tree snapshot")
+	namedInputBudgetBytes := flags.Int64("named-input-budget-bytes", 0, "override every relay named-input raw-byte budget; zero uses the selected integration bundle")
 	receiptOutputDir := flags.String("receipt-output-dir", "", "witness-harness output directory for receipt verification")
 	receiptHMACKeyFile := flags.String("receipt-hmac-key-file", "", "HMAC key file for execution receipt verification")
 	out := flags.String("out", "", "verification manifest output path")
@@ -537,6 +538,9 @@ func runVerificationAssemble(args []string) error {
 	}
 	if flags.NArg() != 0 {
 		return unexpectedArgs(flags.Args())
+	}
+	if *namedInputBudgetBytes < 0 {
+		return diag.New(diag.CodeInvalidCommand, "-named-input-budget-bytes must be zero or positive.")
 	}
 	if *planPath == "" {
 		return diag.New(diag.CodeInvalidCommand, "witness verification assemble requires -plan.")
@@ -609,6 +613,7 @@ func runVerificationAssemble(args []string) error {
 			IntegrationBundlePath:   *integrationBundlePath,
 			CharterPath:             *charterPath,
 			ArtifactPaths:           append([]string(nil), artifactPaths...),
+			NamedInputBudgetBytes:   *namedInputBudgetBytes,
 			ArtifactDigests:         artifactDigests,
 			CharterDigest:           plan.CharterDigest,
 			ArtifactDigest:          plan.PreflightSnapshotDigest,
