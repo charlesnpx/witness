@@ -104,7 +104,7 @@ func ReadAssembleResultBytes(data []byte) (AssembleResult, error) {
 	if actual != AssembleResultSchemaVersion {
 		return AssembleResult{}, diag.New(
 			CodeUnsupportedAssembleResultSchema,
-			"verification assemble result schema_version is unsupported; unversioned results are refused and witness-verification-assemble-result-v1 is required after application_class was removed from the embedded verification manifest.",
+			unsupportedSchemaVersionMessage("verification assemble result", actual, AssembleResultSchemaVersion, "", ""),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", AssembleResultSchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -963,7 +963,7 @@ func validatePlanExclusionChangeSurface(plan PlanDocument) []diag.Diagnostic {
 func manifestExcludedFindings(excluded []ExcludedFinding) []contracts.ExcludedFindingRecord {
 	records := make([]contracts.ExcludedFindingRecord, 0, len(excluded))
 	for _, item := range excluded {
-		if item.Reason != contracts.ReasonOutOfDelta {
+		if !manifestExcludedFindingReason(item.Reason) {
 			continue
 		}
 		records = append(records, contracts.ExcludedFindingRecord{
@@ -976,6 +976,15 @@ func manifestExcludedFindings(excluded []ExcludedFinding) []contracts.ExcludedFi
 		})
 	}
 	return records
+}
+
+func manifestExcludedFindingReason(reason string) bool {
+	switch reason {
+	case contracts.ReasonOutOfDelta, contracts.ReasonPreExisting, contracts.ReasonAttributionUnattributed:
+		return true
+	default:
+		return false
+	}
 }
 
 func prefixDiagnosticPaths(prefix string, diagnostics []diag.Diagnostic) []diag.Diagnostic {

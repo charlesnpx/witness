@@ -452,21 +452,43 @@ func TestVerificationManifestRejectsInvalidRelayLaunchStatusMarkers(t *testing.T
 	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
 }
 
-func TestReadVerificationManifestBytesRejectsV4BeforeStrictDecode(t *testing.T) {
-	_, err := ReadVerificationManifestBytes([]byte(`{"schema_version":"review-verification-manifest-v4","legacy_shape_field":true}`))
-	if err == nil {
-		t.Fatal("ReadVerificationManifestBytes accepted a v4 manifest")
+func TestReadVerificationManifestBytesRefusesActualSchemaVersion(t *testing.T) {
+	for _, actual := range []string{VerificationManifestV3, VerificationManifestV4, "", "future-version"} {
+		t.Run(contractSchemaVersionTestName(actual), func(t *testing.T) {
+			data := []byte(`{"legacy_shape_field":true}`)
+			if actual != "" {
+				data = []byte(`{"schema_version":"` + actual + `","legacy_shape_field":true}`)
+			}
+			_, err := ReadVerificationManifestBytes(data)
+			if err == nil {
+				t.Fatalf("ReadVerificationManifestBytes accepted %q", actual)
+			}
+			diagnostic := diag.FromError(err)
+			if diagnostic.Code != CodeInvalidManifest || diagnostic.Path != "/schema_version" {
+				t.Fatalf("diagnostic = %#v", diagnostic)
+			}
+			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, VerificationManifestV5) {
+				t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+			}
+			if actual == "" {
+				if !strings.Contains(diagnostic.Message, "missing or unversioned") {
+					t.Fatalf("diagnostic = %#v, want missing-version wording", diagnostic)
+				}
+			} else if !strings.Contains(diagnostic.Message, actual) {
+				t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
+			}
+			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != VerificationManifestV5 {
+				t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
+			}
+		})
 	}
-	diagnostic := diag.FromError(err)
-	if diagnostic.Code != CodeInvalidManifest || diagnostic.Path != "/schema_version" {
-		t.Fatalf("diagnostic = %#v, want explicit unsupported manifest schema diagnostic", diagnostic)
+}
+
+func contractSchemaVersionTestName(version string) string {
+	if version == "" {
+		return "missing"
 	}
-	if strings.Contains(diagnostic.Message, "unknown_json_field") {
-		t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
-	}
-	if diagnostic.Details["actual"] != VerificationManifestV4 || diagnostic.Details["expected"] != VerificationManifestV5 {
-		t.Fatalf("schema diagnostic details = %#v, want v4 and %s", diagnostic.Details, VerificationManifestV5)
-	}
+	return version
 }
 
 func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {

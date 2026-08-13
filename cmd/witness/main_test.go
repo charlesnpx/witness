@@ -1135,11 +1135,11 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 		t.Fatalf("adjudication result header = %#v", result)
 	}
 	if len(result.Findings) != 1 ||
-		result.Findings[0].Attribution != contracts.FindingAttributionUnattributed ||
-		result.Findings[0].Disposition != contracts.DispositionAdvisory ||
+		result.Findings[0].Attribution != contracts.FindingAttributionIntroduced ||
+		result.Findings[0].Disposition != contracts.DispositionAdmitted ||
 		len(result.Findings[0].Reasons) != 1 ||
-		result.Findings[0].Reasons[0] != adjudicate.ReasonAttributionUnattributed {
-		t.Fatalf("adjudication findings = %#v, want v3 attribution advisory", result.Findings)
+		result.Findings[0].Reasons[0] != adjudicate.ReasonRelaySurvived {
+		t.Fatalf("adjudication findings = %#v, want introduced admitted finding", result.Findings)
 	}
 }
 
@@ -1181,12 +1181,12 @@ func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
 		if _, ok := event.Finding["estimated_delta"]; !ok {
 			t.Fatalf("finding payload = %#v, missing estimated_delta", event.Finding)
 		}
-		if event.Finding["attribution"] != contracts.FindingAttributionUnattributed {
-			t.Fatalf("finding payload = %#v, want v3 unattributed attribution", event.Finding)
+		if event.Finding["attribution"] != contracts.FindingAttributionIntroduced {
+			t.Fatalf("finding payload = %#v, want introduced attribution", event.Finding)
 		}
 		reasons, ok := event.Finding["reasons"].([]string)
-		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonAttributionUnattributed {
-			t.Fatalf("finding payload = %#v, want attribution gate reason", event.Finding)
+		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonRelaySurvived {
+			t.Fatalf("finding payload = %#v, want relay-survived reason", event.Finding)
 		}
 	}
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
@@ -1205,12 +1205,12 @@ func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode finding ledger record: %v", err)
 		}
-		if finding.Finding["attribution"] != contracts.FindingAttributionUnattributed {
-			t.Fatalf("serialized finding ledger record = %#v, want v3 unattributed attribution", finding)
+		if finding.Finding["attribution"] != contracts.FindingAttributionIntroduced {
+			t.Fatalf("serialized finding ledger record = %#v, want introduced attribution", finding)
 		}
 		reasons, ok := finding.Finding["reasons"].([]any)
-		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonAttributionUnattributed {
-			t.Fatalf("serialized finding ledger record = %#v, want attribution gate reason", finding)
+		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonRelaySurvived {
+			t.Fatalf("serialized finding ledger record = %#v, want relay-survived reason", finding)
 		}
 	}
 }
@@ -3026,7 +3026,7 @@ func buildCLIFakeRelay(t *testing.T, outputPath string) {
 
 func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocument {
 	return contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV3,
+		SchemaVersion:  contracts.RoleOutputV4,
 		Role:           contracts.RoleDefect,
 		CharterHash:    frozen.CharterHash,
 		ArtifactDigest: digest.RawBytes([]byte("artifact")),
@@ -3041,6 +3041,7 @@ func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocume
 			Title:           "CLI rejects a declared input",
 			CharterGoalIDs:  []string{"goal-cli"},
 			ClaimedSeverity: contracts.SeverityHigh,
+			Attribution:     contracts.FindingAttributionIntroduced,
 			ScopeAnchors:    []contracts.ScopeAnchor{{Dimension: charter.DimensionEntryPoints, EntryID: "cli"}},
 			Witness: contracts.Witness{
 				Kind:     contracts.WitnessKindDefect,

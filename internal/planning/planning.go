@@ -313,6 +313,28 @@ func Run(options Options) (*Result, error) {
 				})
 				continue
 			}
+			switch document.EffectiveFindingAttribution(finding) {
+			case contracts.FindingAttributionPreExisting:
+				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 contracts.ReasonPreExisting,
+				})
+				continue
+			case contracts.FindingAttributionUnattributed:
+				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 contracts.ReasonAttributionUnattributed,
+				})
+				continue
+			}
 			if scopePolicy == changesurface.ScopePolicyDeltaObligating && changeSurface != nil && !contracts.FindingInChangeSurface(finding, *changeSurface) {
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
 					Role:                   document.Role,
@@ -399,7 +421,7 @@ func ReadPlanDocumentBytes(data []byte) (PlanDocument, error) {
 	if actual != SchemaVersion {
 		return PlanDocument{}, diag.New(
 			CodeInvalidPlanDigest,
-			"verification plan schema_version is unsupported; witness-verification-plan-v2 is refused and witness-verification-plan-v3 is required after application_class was removed from excluded findings.",
+			unsupportedSchemaVersionMessage("verification plan", actual, SchemaVersion, "witness-verification-plan-v2", "after application_class was removed from excluded findings."),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", SchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -421,13 +443,23 @@ func ReadManifestSkeletonBytes(data []byte) (ManifestSkeleton, error) {
 	if actual != ManifestSkeletonSchemaVersion {
 		return ManifestSkeleton{}, diag.New(
 			CodeUnsupportedManifestSkeletonSchema,
-			"verification manifest skeleton schema_version is unsupported; witness-verification-manifest-skeleton-v1 is refused and witness-verification-manifest-skeleton-v2 is required after application_class was removed from excluded findings.",
+			unsupportedSchemaVersionMessage("verification manifest skeleton", actual, ManifestSkeletonSchemaVersion, "witness-verification-manifest-skeleton-v1", "after application_class was removed from excluded findings."),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", ManifestSkeletonSchemaVersion),
 			diag.WithDetail("actual", actual),
 		)
 	}
 	return strictjson.DecodeBytes[ManifestSkeleton](data, strictjson.DefaultMaxBytes*4)
+}
+
+func unsupportedSchemaVersionMessage(artifact string, actual string, expected string, predecessor string, migration string) string {
+	if strings.TrimSpace(actual) == "" {
+		return fmt.Sprintf("%s schema_version is unsupported; a missing or unversioned schema_version is refused and %s is required.", artifact, expected)
+	}
+	if actual == predecessor && migration != "" {
+		return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required %s", artifact, actual, expected, migration)
+	}
+	return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required.", artifact, actual, expected)
 }
 
 func WriteState(stateDir string, result *Result) error {
