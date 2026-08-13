@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	AssembleResultSchemaVersion         = "witness-verification-assemble-result-v1"
+	AssembleResultSchemaVersion         = "witness-verification-assemble-result-v2"
 	CodeMissingEvidenceRef              = "assemble_missing_evidence_ref"
 	CodeMissingBatch                    = "assemble_missing_batch"
 	CodeInvalidAssembleBatch            = "assemble_invalid_batch"
@@ -104,7 +104,7 @@ func ReadAssembleResultBytes(data []byte) (AssembleResult, error) {
 	if actual != AssembleResultSchemaVersion {
 		return AssembleResult{}, diag.New(
 			CodeUnsupportedAssembleResultSchema,
-			"verification assemble result schema_version is unsupported; unversioned results are refused and witness-verification-assemble-result-v1 is required after application_class was removed from the embedded verification manifest.",
+			unsupportedSchemaVersionMessage("verification assemble result", actual, AssembleResultSchemaVersion, "witness-verification-assemble-result-v1", "after the embedded verification manifest expanded its exclusion reasons."),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", AssembleResultSchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -126,7 +126,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	result := &AssembleResult{SchemaVersion: AssembleResultSchemaVersion}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            options.Plan.PlanDigest,
 		CharterHash:           options.Plan.CharterHash,
 		ArtifactDigest:        options.Plan.ArtifactDigest,
@@ -963,7 +963,7 @@ func validatePlanExclusionChangeSurface(plan PlanDocument) []diag.Diagnostic {
 func manifestExcludedFindings(excluded []ExcludedFinding) []contracts.ExcludedFindingRecord {
 	records := make([]contracts.ExcludedFindingRecord, 0, len(excluded))
 	for _, item := range excluded {
-		if item.Reason != contracts.ReasonOutOfDelta {
+		if !manifestExcludedFindingReason(item.Reason) {
 			continue
 		}
 		records = append(records, contracts.ExcludedFindingRecord{
@@ -976,6 +976,15 @@ func manifestExcludedFindings(excluded []ExcludedFinding) []contracts.ExcludedFi
 		})
 	}
 	return records
+}
+
+func manifestExcludedFindingReason(reason string) bool {
+	switch reason {
+	case contracts.ReasonOutOfDelta, contracts.ReasonPreExisting, contracts.ReasonAttributionUnattributed:
+		return true
+	default:
+		return false
+	}
 }
 
 func prefixDiagnosticPaths(prefix string, diagnostics []diag.Diagnostic) []diag.Diagnostic {

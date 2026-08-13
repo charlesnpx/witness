@@ -299,6 +299,77 @@ func TestPlanningBaselinePassProceedsWholeTreeWithVisibleMarker(t *testing.T) {
 	}
 }
 
+func TestPlanningAttributionExclusionsPrecedeDeltaScope(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	for _, test := range []struct {
+		name           string
+		schemaVersion  string
+		attribution    string
+		wantReason     string
+		wantBatchCount int
+	}{
+		{name: "v4 pre-existing", schemaVersion: contracts.RoleOutputV4, attribution: contracts.FindingAttributionPreExisting, wantReason: contracts.ReasonPreExisting},
+		{name: "v4 unattributed", schemaVersion: contracts.RoleOutputV4, attribution: contracts.FindingAttributionUnattributed, wantReason: contracts.ReasonAttributionUnattributed},
+		{name: "readable v3", schemaVersion: contracts.RoleOutputV3, wantReason: contracts.ReasonAttributionUnattributed},
+		{name: "introduced", schemaVersion: contracts.RoleOutputV4, attribution: contracts.FindingAttributionIntroduced, wantBatchCount: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, mode := range []struct {
+				name          string
+				changeSurface ChangeSurfaceInput
+				preflight     PreflightBinding
+			}{
+				{name: "whole tree"},
+				{name: "delta", changeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest}, preflight: PreflightBinding{SnapshotDigest: headDigest}},
+			} {
+				t.Run(mode.name, func(t *testing.T) {
+					finding := planningTestFinding("finding", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+					finding.Attribution = test.attribution
+					scopePath := "internal/unchanged.go"
+					if test.wantReason == "" {
+						scopePath = "internal/changed.go"
+					}
+					finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: scopePath}}
+					roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+					roleOutput.SchemaVersion = test.schemaVersion
+					if test.schemaVersion == contracts.RoleOutputV3 {
+						roleOutput.Findings[0].Attribution = ""
+					}
+					if mode.preflight.SnapshotDigest != "" {
+						roleOutput.ArtifactDigest = mode.preflight.SnapshotDigest
+					}
+					result, err := Run(Options{
+						FrozenCharter: frozen,
+						RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+						Preflight:     mode.preflight,
+						ChangeSurface: mode.changeSurface,
+					})
+					if err != nil {
+						t.Fatalf("Run: %v", err)
+					}
+					if len(result.Plan.Batches) != test.wantBatchCount {
+						t.Fatalf("batches = %#v, want %d", result.Plan.Batches, test.wantBatchCount)
+					}
+					if test.wantReason == "" {
+						if len(result.Plan.ExcludedFindings) != 0 {
+							t.Fatalf("excluded findings = %#v, want none", result.Plan.ExcludedFindings)
+						}
+						return
+					}
+					if len(result.Plan.ExcludedFindings) != 1 {
+						t.Fatalf("excluded findings = %#v, want one attribution exclusion", result.Plan.ExcludedFindings)
+					}
+					excluded := result.Plan.ExcludedFindings[0]
+					if excluded.Disposition != DispositionAdvisory || excluded.Reason != test.wantReason {
+						t.Fatalf("excluded finding = %#v, want advisory %s", excluded, test.wantReason)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestPlanningChangeSurfaceRejectsPartialManifestInput(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	_, headManifest, _ := planningDeltaManifests(t)
@@ -370,8 +441,17 @@ func TestVersionStampsForPlanManifestAndChangeSurface(t *testing.T) {
 	if result.Plan.SchemaVersion != SchemaVersion {
 		t.Fatalf("plan schema_version = %s, want %s", result.Plan.SchemaVersion, SchemaVersion)
 	}
-	if SchemaVersion != "witness-verification-plan-v3" {
-		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v3", SchemaVersion)
+	if SchemaVersion != "witness-verification-plan-v4" {
+		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v4", SchemaVersion)
+	}
+	if ManifestSkeletonSchemaVersion != "witness-verification-manifest-skeleton-v3" {
+		t.Fatalf("planning ManifestSkeletonSchemaVersion = %s, want witness-verification-manifest-skeleton-v3", ManifestSkeletonSchemaVersion)
+	}
+	if AssembleResultSchemaVersion != "witness-verification-assemble-result-v2" {
+		t.Fatalf("planning AssembleResultSchemaVersion = %s, want witness-verification-assemble-result-v2", AssembleResultSchemaVersion)
+	}
+	if contracts.VerificationManifestV6 != "review-verification-manifest-v6" {
+		t.Fatalf("contracts VerificationManifestV6 = %s, want review-verification-manifest-v6", contracts.VerificationManifestV6)
 	}
 	if contracts.DecisionRulesVersion != "witness-decision-rules-v1" {
 		t.Fatalf("decision rules version = %s, want witness-decision-rules-v1", contracts.DecisionRulesVersion)
@@ -387,46 +467,80 @@ func TestVersionStampsForPlanManifestAndChangeSurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if assembled.Manifest.SchemaVersion != contracts.VerificationManifestV5 {
-		t.Fatalf("manifest schema_version = %s, want %s", assembled.Manifest.SchemaVersion, contracts.VerificationManifestV5)
+	if assembled.Manifest.SchemaVersion != contracts.VerificationManifestV6 {
+		t.Fatalf("manifest schema_version = %s, want %s", assembled.Manifest.SchemaVersion, contracts.VerificationManifestV6)
+	}
+	if assembled.SchemaVersion != AssembleResultSchemaVersion {
+		t.Fatalf("assemble result schema_version = %s, want %s", assembled.SchemaVersion, AssembleResultSchemaVersion)
 	}
 	if result.ManifestSkeleton.SchemaVersion != ManifestSkeletonSchemaVersion {
 		t.Fatalf("manifest skeleton schema_version = %s, want %s", result.ManifestSkeleton.SchemaVersion, ManifestSkeletonSchemaVersion)
 	}
 }
 
-func TestReadPlanDocumentBytesRejectsV2BeforeStrictDecode(t *testing.T) {
-	_, err := ReadPlanDocumentBytes([]byte(`{"schema_version":"witness-verification-plan-v2","legacy_shape_field":true}`))
-	if err == nil {
-		t.Fatal("ReadPlanDocumentBytes accepted a v2 plan")
-	}
-	diagnostic := diag.FromError(err)
-	if diagnostic.Code != CodeInvalidPlanDigest || diagnostic.Path != "/schema_version" {
-		t.Fatalf("diagnostic = %#v, want explicit unsupported plan schema diagnostic", diagnostic)
-	}
-	if strings.Contains(diagnostic.Message, "unknown_json_field") {
-		t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
-	}
-	if diagnostic.Details["actual"] != "witness-verification-plan-v2" || diagnostic.Details["expected"] != SchemaVersion {
-		t.Fatalf("schema diagnostic details = %#v, want v2 and %s", diagnostic.Details, SchemaVersion)
+func TestPlanningReadersRefuseActualSchemaVersion(t *testing.T) {
+	for _, reader := range []struct {
+		name     string
+		read     func([]byte) error
+		code     string
+		expected string
+		stale    []string
+	}{
+		{
+			name:     "plan",
+			read:     func(data []byte) error { _, err := ReadPlanDocumentBytes(data); return err },
+			code:     CodeInvalidPlanDigest,
+			expected: SchemaVersion,
+			stale:    []string{"witness-verification-plan-v3"},
+		},
+		{
+			name:     "manifest skeleton",
+			read:     func(data []byte) error { _, err := ReadManifestSkeletonBytes(data); return err },
+			code:     CodeUnsupportedManifestSkeletonSchema,
+			expected: ManifestSkeletonSchemaVersion,
+			stale:    []string{"witness-verification-manifest-skeleton-v2"},
+		},
+	} {
+		t.Run(reader.name, func(t *testing.T) {
+			versions := append(append([]string(nil), reader.stale...), "", "future-version")
+			for _, actual := range versions {
+				t.Run(schemaVersionTestName(actual), func(t *testing.T) {
+					data := []byte(`{"legacy_shape_field":true}`)
+					if actual != "" {
+						data = []byte(fmt.Sprintf(`{"schema_version":%q,"legacy_shape_field":true}`, actual))
+					}
+					err := reader.read(data)
+					if err == nil {
+						t.Fatalf("reader accepted %q", actual)
+					}
+					diagnostic := diag.FromError(err)
+					if diagnostic.Code != reader.code || diagnostic.Path != "/schema_version" {
+						t.Fatalf("diagnostic = %#v", diagnostic)
+					}
+					if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, reader.expected) {
+						t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+					}
+					if actual == "" {
+						if !strings.Contains(diagnostic.Message, "missing or unversioned") {
+							t.Fatalf("diagnostic = %#v, want missing-version wording", diagnostic)
+						}
+					} else if !strings.Contains(diagnostic.Message, actual) {
+						t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
+					}
+					if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != reader.expected {
+						t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
+					}
+				})
+			}
+		})
 	}
 }
 
-func TestReadManifestSkeletonBytesRejectsV1BeforeStrictDecode(t *testing.T) {
-	_, err := ReadManifestSkeletonBytes([]byte(`{"schema_version":"witness-verification-manifest-skeleton-v1","legacy_shape_field":true}`))
-	if err == nil {
-		t.Fatal("ReadManifestSkeletonBytes accepted a v1 manifest skeleton")
+func schemaVersionTestName(version string) string {
+	if version == "" {
+		return "missing"
 	}
-	diagnostic := diag.FromError(err)
-	if diagnostic.Code != CodeUnsupportedManifestSkeletonSchema || diagnostic.Path != "/schema_version" {
-		t.Fatalf("diagnostic = %#v, want explicit unsupported manifest skeleton schema diagnostic", diagnostic)
-	}
-	if strings.Contains(diagnostic.Message, "unknown_json_field") {
-		t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
-	}
-	if diagnostic.Details["actual"] != "witness-verification-manifest-skeleton-v1" || diagnostic.Details["expected"] != ManifestSkeletonSchemaVersion {
-		t.Fatalf("schema diagnostic details = %#v, want v1 and %s", diagnostic.Details, ManifestSkeletonSchemaVersion)
-	}
+	return version
 }
 
 func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
@@ -535,7 +649,7 @@ func planningErrorCode(err error) string {
 
 func planningTestRoleOutput(frozen *charter.FrozenCharter, role string, findings []contracts.Finding) contracts.RoleOutputDocument {
 	return contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV3,
+		SchemaVersion:  contracts.RoleOutputV4,
 		Role:           role,
 		CharterHash:    frozen.CharterHash,
 		ArtifactDigest: digest.RawBytes([]byte("artifact")),
@@ -568,6 +682,7 @@ func planningTestFinding(id string, severity string, strength string) contracts.
 		Title:           "Finding " + id,
 		CharterGoalIDs:  []string{"goal-cli"},
 		ClaimedSeverity: severity,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		ScopeAnchors:    []contracts.ScopeAnchor{{Dimension: charter.DimensionEntryPoints, EntryID: "cli"}},
 		Witness:         witness,
 		EstimatedDelta: contracts.SplitDeltaEstimate{

@@ -2,6 +2,7 @@ package adjudicate
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -704,21 +705,50 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 	assertErrorHasDiagnostic(t, err, CodeInvalidManifest, "/manifest/excluded_findings/0")
 }
 
-func TestReadResultBytesRejectsV4WithExplicitDiagnostic(t *testing.T) {
-	_, err := ReadResultBytes([]byte(`{"schema_version":"witness-adjudication-run-result-v4","policy_version":"review-policy-v3"}`))
-	if err == nil {
-		t.Fatal("ReadResultBytes accepted a v4 result")
+func TestReadResultBytesRefusesActualSchemaVersion(t *testing.T) {
+	for _, actual := range []string{
+		"witness-adjudication-run-result-v1",
+		"witness-adjudication-run-result-v2",
+		"witness-adjudication-run-result-v3",
+		"witness-adjudication-run-result-v4",
+		"",
+		"future-version",
+	} {
+		t.Run(adjudicationSchemaVersionTestName(actual), func(t *testing.T) {
+			data := []byte(`{"legacy_shape_field":true}`)
+			if actual != "" {
+				data = []byte(fmt.Sprintf(`{"schema_version":%q,"legacy_shape_field":true}`, actual))
+			}
+			_, err := ReadResultBytes(data)
+			if err == nil {
+				t.Fatalf("ReadResultBytes accepted %q", actual)
+			}
+			diagnostic := diag.FromError(err)
+			if diagnostic.Code != CodeUnsupportedResultSchema || diagnostic.Path != "/schema_version" {
+				t.Fatalf("diagnostic = %#v", diagnostic)
+			}
+			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, ResultSchemaVersion) {
+				t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+			}
+			if actual == "" {
+				if !strings.Contains(diagnostic.Message, "missing or unversioned") {
+					t.Fatalf("diagnostic = %#v, want missing-version wording", diagnostic)
+				}
+			} else if !strings.Contains(diagnostic.Message, actual) {
+				t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
+			}
+			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != ResultSchemaVersion {
+				t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
+			}
+		})
 	}
-	diagnostic := diag.FromError(err)
-	if diagnostic.Code != CodeUnsupportedResultSchema || diagnostic.Path != "/schema_version" {
-		t.Fatalf("diagnostic = %#v, want explicit unsupported schema diagnostic", diagnostic)
+}
+
+func adjudicationSchemaVersionTestName(version string) string {
+	if version == "" {
+		return "missing"
 	}
-	if actual, _ := diagnostic.Details["actual"].(string); actual != "witness-adjudication-run-result-v4" {
-		t.Fatalf("actual = %#v, want v4", diagnostic.Details["actual"])
-	}
-	if expected, _ := diagnostic.Details["expected"].(string); expected != ResultSchemaVersion {
-		t.Fatalf("expected = %#v, want %s", diagnostic.Details["expected"], ResultSchemaVersion)
-	}
+	return version
 }
 
 func TestReadResultBytesRejectsLegacyV5RemovedFieldsBeforeStrictDecode(t *testing.T) {
@@ -737,6 +767,9 @@ func TestReadResultBytesRejectsLegacyV5RemovedFieldsBeforeStrictDecode(t *testin
 	}
 	if strings.Contains(diagnostic.Message, "unknown_json_field") {
 		t.Fatalf("diagnostic = %#v, want legacy-v5 refusal before strict decoding", diagnostic)
+	}
+	if !strings.Contains(diagnostic.Message, ResultSchemaVersion) {
+		t.Fatalf("diagnostic = %#v, want message to name the supplied version", diagnostic)
 	}
 	if actual, _ := diagnostic.Details["actual"].(string); actual != ResultSchemaVersion {
 		t.Fatalf("actual = %#v, want %s", diagnostic.Details["actual"], ResultSchemaVersion)
@@ -1199,7 +1232,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	exportRef := testArtifactRef("relay-root-portable-export", "batch-1", "export")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1225,7 +1258,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 func manifestWithDuplicateRelayBatches(t *testing.T, frozen charter.FrozenCharter, artifactDigest string, finding contracts.Finding) contracts.VerificationManifest {
 	t.Helper()
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1287,7 +1320,7 @@ func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contract
 func manifestWithRelayStatus(frozen charter.FrozenCharter, artifactDigest string, status string, failureReason string) contracts.VerificationManifest {
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,

@@ -167,7 +167,7 @@ func ReadResultBytes(data []byte) (Result, error) {
 	if actual != ResultSchemaVersion {
 		return Result{}, diag.New(
 			CodeUnsupportedResultSchema,
-			"adjudication result schema_version is unsupported; witness-adjudication-run-result-v4 is refused and witness-adjudication-run-result-v5 is required after application_class fields were removed.",
+			unsupportedSchemaVersionMessage("adjudication result", actual, ResultSchemaVersion, "witness-adjudication-run-result-v4", "after application_class fields were removed."),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", ResultSchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -176,7 +176,7 @@ func ReadResultBytes(data []byte) (Result, error) {
 	if resultCarriesRemovedFields(document) {
 		return Result{}, diag.New(
 			CodeUnsupportedResultSchema,
-			"adjudication result carries removed application_class fields; legacy witness-adjudication-run-result-v5 payloads are refused and a current v5 result is required.",
+			fmt.Sprintf("adjudication result carries removed application_class fields; supplied %s payload is refused and a current %s result is required.", actual, ResultSchemaVersion),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", ResultSchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -477,14 +477,14 @@ func validateManifestChangeSurfaceDerivation(manifest contracts.VerificationMani
 }
 
 func validateManifestExclusionChangeSurface(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
-	if len(manifest.ExcludedFindings) == 0 {
-		return nil
-	}
-	if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
-		return nil
-	}
-	diagnostics := make([]diag.Diagnostic, 0, len(manifest.ExcludedFindings))
-	for index := range manifest.ExcludedFindings {
+	var diagnostics []diag.Diagnostic
+	for index, excluded := range manifest.ExcludedFindings {
+		if excluded.Reason != contracts.ReasonOutOfDelta {
+			continue
+		}
+		if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
+			continue
+		}
 		diagnostics = append(diagnostics, diagnostic(
 			CodeInvalidManifest,
 			"excluded findings require delta_obligating scope policy with a derived change surface.",
@@ -538,11 +538,21 @@ func validateManifestExclusionCoverage(manifest contracts.VerificationManifest, 
 		if covered.role != record.Role {
 			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding role does not match its supplied source role-output.", path+"/role", map[string]any{"actual": record.Role, "expected": covered.role, "finding_id": record.FindingID}))
 		}
-		if manifest.ChangeSurface != nil && contracts.FindingInChangeSurface(covered.finding, *manifest.ChangeSurface) {
+		if record.Reason == contracts.ReasonOutOfDelta && manifest.ChangeSurface != nil && contracts.FindingInChangeSurface(covered.finding, *manifest.ChangeSurface) {
 			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded out-of-delta finding touches the verified change surface.", path+"/finding_id", map[string]any{"finding_id": record.FindingID, "reason": record.Reason}))
 		}
 	}
 	return diagnostics
+}
+
+func unsupportedSchemaVersionMessage(artifact string, actual string, expected string, predecessor string, migration string) string {
+	if strings.TrimSpace(actual) == "" {
+		return fmt.Sprintf("%s schema_version is unsupported; a missing or unversioned schema_version is refused and %s is required.", artifact, expected)
+	}
+	if actual == predecessor && migration != "" {
+		return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required %s", artifact, actual, expected, migration)
+	}
+	return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required.", artifact, actual, expected)
 }
 
 type loadedFinding struct {

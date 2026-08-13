@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"fmt"
 	"io"
 	"strings"
 
@@ -140,12 +141,12 @@ func ReadVerificationManifestBytes(data []byte) (VerificationManifest, error) {
 		return VerificationManifest{}, diag.New(CodeInvalidManifest, "verification manifest must be a JSON object.", diag.WithPath("/schema_version"))
 	}
 	actual, _ := document["schema_version"].(string)
-	if actual != VerificationManifestV5 {
+	if actual != VerificationManifestV6 {
 		return VerificationManifest{}, diag.New(
 			CodeInvalidManifest,
-			"verification manifest schema_version is unsupported; review-verification-manifest-v4 is refused and review-verification-manifest-v5 is required after application_class was removed from excluded findings.",
+			unsupportedSchemaVersionMessage("verification manifest", actual, VerificationManifestV6, VerificationManifestV5, "after exclusion reasons expanded."),
 			diag.WithPath("/schema_version"),
-			diag.WithDetail("expected", VerificationManifestV5),
+			diag.WithDetail("expected", VerificationManifestV6),
 			diag.WithDetail("actual", actual),
 		)
 	}
@@ -166,8 +167,8 @@ func RequireValidVerificationManifest(document VerificationManifest) error {
 
 func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != VerificationManifestV5 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v5.", "/schema_version", map[string]any{"expected": VerificationManifestV5, "actual": document.SchemaVersion}))
+	if document.SchemaVersion != VerificationManifestV6 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v6.", "/schema_version", map[string]any{"expected": VerificationManifestV6, "actual": document.SchemaVersion}))
 	}
 	requireDigest(&diagnostics, "/plan_digest", "plan_digest", document.PlanDigest)
 	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
@@ -431,13 +432,32 @@ func validateExcludedFindingRecord(record ExcludedFindingRecord, path string) []
 	if record.SourceRoleOutputRef.Digest != "" && record.SourceRoleOutputDigest != "" {
 		compareDigest(&diagnostics, path+"/source_role_output_ref/digest", "source role-output reference", record.SourceRoleOutputRef.Digest, record.SourceRoleOutputDigest)
 	}
-	if record.Reason != ReasonOutOfDelta {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding reason must be out_of_delta.", path+"/reason", map[string]any{"actual": record.Reason, "expected": ReasonOutOfDelta}))
+	if !excludedFindingReason(record.Reason) {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding reason must be out_of_delta, pre_existing, or attribution_unattributed.", path+"/reason", map[string]any{"actual": record.Reason, "expected": []string{ReasonOutOfDelta, ReasonPreExisting, ReasonAttributionUnattributed}}))
 	}
 	if record.Disposition != DispositionAdvisory {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding disposition must be advisory.", path+"/disposition", map[string]any{"actual": record.Disposition, "expected": DispositionAdvisory}))
 	}
 	return diagnostics
+}
+
+func excludedFindingReason(reason string) bool {
+	switch reason {
+	case ReasonOutOfDelta, ReasonPreExisting, ReasonAttributionUnattributed:
+		return true
+	default:
+		return false
+	}
+}
+
+func unsupportedSchemaVersionMessage(artifact string, actual string, expected string, predecessor string, migration string) string {
+	if strings.TrimSpace(actual) == "" {
+		return fmt.Sprintf("%s schema_version is unsupported; a missing or unversioned schema_version is refused and %s is required.", artifact, expected)
+	}
+	if actual == predecessor && migration != "" {
+		return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required %s", artifact, actual, expected, migration)
+	}
+	return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required.", artifact, actual, expected)
 }
 
 func RequireValidExecutionReceipt(document ExecutionReceipt) error {
