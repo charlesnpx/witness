@@ -1232,7 +1232,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	exportRef := testArtifactRef("relay-root-portable-export", "batch-1", "export")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1258,7 +1258,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 func manifestWithDuplicateRelayBatches(t *testing.T, frozen charter.FrozenCharter, artifactDigest string, finding contracts.Finding) contracts.VerificationManifest {
 	t.Helper()
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1320,7 +1320,7 @@ func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contract
 func manifestWithRelayStatus(frozen charter.FrozenCharter, artifactDigest string, status string, failureReason string) contracts.VerificationManifest {
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,

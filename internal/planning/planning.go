@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	SchemaVersion                 = "witness-verification-plan-v3"
-	ManifestSkeletonSchemaVersion = "witness-verification-manifest-skeleton-v2"
+	SchemaVersion                 = "witness-verification-plan-v4"
+	ManifestSkeletonSchemaVersion = "witness-verification-manifest-skeleton-v3"
 	MaxBatchFindings              = 8
 
 	CodeMissingFrozenCharter              = "planning_missing_frozen_charter"
@@ -421,7 +421,7 @@ func ReadPlanDocumentBytes(data []byte) (PlanDocument, error) {
 	if actual != SchemaVersion {
 		return PlanDocument{}, diag.New(
 			CodeInvalidPlanDigest,
-			unsupportedSchemaVersionMessage("verification plan", actual, SchemaVersion, "witness-verification-plan-v2", "after application_class was removed from excluded findings."),
+			unsupportedSchemaVersionMessage("verification plan", actual, SchemaVersion, "witness-verification-plan-v3", "after exclusion reasons expanded."),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", SchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -443,7 +443,7 @@ func ReadManifestSkeletonBytes(data []byte) (ManifestSkeleton, error) {
 	if actual != ManifestSkeletonSchemaVersion {
 		return ManifestSkeleton{}, diag.New(
 			CodeUnsupportedManifestSkeletonSchema,
-			unsupportedSchemaVersionMessage("verification manifest skeleton", actual, ManifestSkeletonSchemaVersion, "witness-verification-manifest-skeleton-v1", "after application_class was removed from excluded findings."),
+			unsupportedSchemaVersionMessage("verification manifest skeleton", actual, ManifestSkeletonSchemaVersion, "witness-verification-manifest-skeleton-v2", "after exclusion reasons expanded."),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", ManifestSkeletonSchemaVersion),
 			diag.WithDetail("actual", actual),

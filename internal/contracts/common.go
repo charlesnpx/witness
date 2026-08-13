@@ -21,6 +21,7 @@ const (
 	VerificationManifestV3         = "review-verification-manifest-v3"
 	VerificationManifestV4         = "review-verification-manifest-v4"
 	VerificationManifestV5         = "review-verification-manifest-v5"
+	VerificationManifestV6         = "review-verification-manifest-v6"
 	ExecutionReceiptV2             = "review-execution-receipt-v2"
 	RelayCompatibilityV3           = "review-relay-compatibility-v3"
 	DecisionRulesVersion           = "witness-decision-rules-v1"

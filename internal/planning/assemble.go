@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	AssembleResultSchemaVersion         = "witness-verification-assemble-result-v1"
+	AssembleResultSchemaVersion         = "witness-verification-assemble-result-v2"
 	CodeMissingEvidenceRef              = "assemble_missing_evidence_ref"
 	CodeMissingBatch                    = "assemble_missing_batch"
 	CodeInvalidAssembleBatch            = "assemble_invalid_batch"
@@ -104,7 +104,7 @@ func ReadAssembleResultBytes(data []byte) (AssembleResult, error) {
 	if actual != AssembleResultSchemaVersion {
 		return AssembleResult{}, diag.New(
 			CodeUnsupportedAssembleResultSchema,
-			unsupportedSchemaVersionMessage("verification assemble result", actual, AssembleResultSchemaVersion, "", ""),
+			unsupportedSchemaVersionMessage("verification assemble result", actual, AssembleResultSchemaVersion, "witness-verification-assemble-result-v1", "after the embedded verification manifest expanded its exclusion reasons."),
 			diag.WithPath("/schema_version"),
 			diag.WithDetail("expected", AssembleResultSchemaVersion),
 			diag.WithDetail("actual", actual),
@@ -126,7 +126,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	result := &AssembleResult{SchemaVersion: AssembleResultSchemaVersion}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV5,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            options.Plan.PlanDigest,
 		CharterHash:           options.Plan.CharterHash,
 		ArtifactDigest:        options.Plan.ArtifactDigest,

@@ -991,7 +991,7 @@ func TestAssembleRejectsV1PlanBeforeDigestAcceptance(t *testing.T) {
 }
 
 func TestReadAssembleResultBytesRefusesActualSchemaVersion(t *testing.T) {
-	for _, actual := range []string{"witness-verification-assemble-result-v0", "", "future-version"} {
+	for _, actual := range []string{"witness-verification-assemble-result-v1", "", "future-version"} {
 		t.Run(schemaVersionTestName(actual), func(t *testing.T) {
 			data := []byte(`{"manifest":{},"legacy_shape_field":true}`)
 			if actual != "" {

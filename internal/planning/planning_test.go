@@ -441,8 +441,17 @@ func TestVersionStampsForPlanManifestAndChangeSurface(t *testing.T) {
 	if result.Plan.SchemaVersion != SchemaVersion {
 		t.Fatalf("plan schema_version = %s, want %s", result.Plan.SchemaVersion, SchemaVersion)
 	}
-	if SchemaVersion != "witness-verification-plan-v3" {
-		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v3", SchemaVersion)
+	if SchemaVersion != "witness-verification-plan-v4" {
+		t.Fatalf("planning SchemaVersion = %s, want witness-verification-plan-v4", SchemaVersion)
+	}
+	if ManifestSkeletonSchemaVersion != "witness-verification-manifest-skeleton-v3" {
+		t.Fatalf("planning ManifestSkeletonSchemaVersion = %s, want witness-verification-manifest-skeleton-v3", ManifestSkeletonSchemaVersion)
+	}
+	if AssembleResultSchemaVersion != "witness-verification-assemble-result-v2" {
+		t.Fatalf("planning AssembleResultSchemaVersion = %s, want witness-verification-assemble-result-v2", AssembleResultSchemaVersion)
+	}
+	if contracts.VerificationManifestV6 != "review-verification-manifest-v6" {
+		t.Fatalf("contracts VerificationManifestV6 = %s, want review-verification-manifest-v6", contracts.VerificationManifestV6)
 	}
 	if contracts.DecisionRulesVersion != "witness-decision-rules-v1" {
 		t.Fatalf("decision rules version = %s, want witness-decision-rules-v1", contracts.DecisionRulesVersion)
@@ -458,8 +467,11 @@ func TestVersionStampsForPlanManifestAndChangeSurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if assembled.Manifest.SchemaVersion != contracts.VerificationManifestV5 {
-		t.Fatalf("manifest schema_version = %s, want %s", assembled.Manifest.SchemaVersion, contracts.VerificationManifestV5)
+	if assembled.Manifest.SchemaVersion != contracts.VerificationManifestV6 {
+		t.Fatalf("manifest schema_version = %s, want %s", assembled.Manifest.SchemaVersion, contracts.VerificationManifestV6)
+	}
+	if assembled.SchemaVersion != AssembleResultSchemaVersion {
+		t.Fatalf("assemble result schema_version = %s, want %s", assembled.SchemaVersion, AssembleResultSchemaVersion)
 	}
 	if result.ManifestSkeleton.SchemaVersion != ManifestSkeletonSchemaVersion {
 		t.Fatalf("manifest skeleton schema_version = %s, want %s", result.ManifestSkeleton.SchemaVersion, ManifestSkeletonSchemaVersion)
@@ -479,14 +491,14 @@ func TestPlanningReadersRefuseActualSchemaVersion(t *testing.T) {
 			read:     func(data []byte) error { _, err := ReadPlanDocumentBytes(data); return err },
 			code:     CodeInvalidPlanDigest,
 			expected: SchemaVersion,
-			stale:    []string{"witness-verification-plan-v1", "witness-verification-plan-v2"},
+			stale:    []string{"witness-verification-plan-v3"},
 		},
 		{
 			name:     "manifest skeleton",
 			read:     func(data []byte) error { _, err := ReadManifestSkeletonBytes(data); return err },
 			code:     CodeUnsupportedManifestSkeletonSchema,
 			expected: ManifestSkeletonSchemaVersion,
-			stale:    []string{"witness-verification-manifest-skeleton-v1"},
+			stale:    []string{"witness-verification-manifest-skeleton-v2"},
 		},
 	} {
 		t.Run(reader.name, func(t *testing.T) {

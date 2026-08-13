@@ -1648,7 +1648,7 @@ func TestAssembleSupplementaryRelationshipsPersistFullResultOutput(t *testing.T)
 	result := &planning.AssembleResult{
 		SchemaVersion: planning.AssembleResultSchemaVersion,
 		Manifest: contracts.VerificationManifest{
-			SchemaVersion: contracts.VerificationManifestV5,
+			SchemaVersion: contracts.VerificationManifestV6,
 			ConsumerIdentity: map[string]any{
 				"kind": "test",
 				"id":   "pass-test",

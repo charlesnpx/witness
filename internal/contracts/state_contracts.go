@@ -141,12 +141,12 @@ func ReadVerificationManifestBytes(data []byte) (VerificationManifest, error) {
 		return VerificationManifest{}, diag.New(CodeInvalidManifest, "verification manifest must be a JSON object.", diag.WithPath("/schema_version"))
 	}
 	actual, _ := document["schema_version"].(string)
-	if actual != VerificationManifestV5 {
+	if actual != VerificationManifestV6 {
 		return VerificationManifest{}, diag.New(
 			CodeInvalidManifest,
-			unsupportedSchemaVersionMessage("verification manifest", actual, VerificationManifestV5, VerificationManifestV4, "after application_class was removed from excluded findings."),
+			unsupportedSchemaVersionMessage("verification manifest", actual, VerificationManifestV6, VerificationManifestV5, "after exclusion reasons expanded."),
 			diag.WithPath("/schema_version"),
-			diag.WithDetail("expected", VerificationManifestV5),
+			diag.WithDetail("expected", VerificationManifestV6),
 			diag.WithDetail("actual", actual),
 		)
 	}
@@ -167,8 +167,8 @@ func RequireValidVerificationManifest(document VerificationManifest) error {
 
 func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != VerificationManifestV5 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v5.", "/schema_version", map[string]any{"expected": VerificationManifestV5, "actual": document.SchemaVersion}))
+	if document.SchemaVersion != VerificationManifestV6 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v6.", "/schema_version", map[string]any{"expected": VerificationManifestV6, "actual": document.SchemaVersion}))
 	}
 	requireDigest(&diagnostics, "/plan_digest", "plan_digest", document.PlanDigest)
 	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)

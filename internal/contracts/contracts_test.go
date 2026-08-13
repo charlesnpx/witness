@@ -453,7 +453,7 @@ func TestVerificationManifestRejectsInvalidRelayLaunchStatusMarkers(t *testing.T
 }
 
 func TestReadVerificationManifestBytesRefusesActualSchemaVersion(t *testing.T) {
-	for _, actual := range []string{VerificationManifestV3, VerificationManifestV4, "", "future-version"} {
+	for _, actual := range []string{VerificationManifestV5, "", "future-version"} {
 		t.Run(contractSchemaVersionTestName(actual), func(t *testing.T) {
 			data := []byte(`{"legacy_shape_field":true}`)
 			if actual != "" {
@@ -467,7 +467,7 @@ func TestReadVerificationManifestBytesRefusesActualSchemaVersion(t *testing.T) {
 			if diagnostic.Code != CodeInvalidManifest || diagnostic.Path != "/schema_version" {
 				t.Fatalf("diagnostic = %#v", diagnostic)
 			}
-			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, VerificationManifestV5) {
+			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, VerificationManifestV6) {
 				t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
 			}
 			if actual == "" {
@@ -477,7 +477,7 @@ func TestReadVerificationManifestBytesRefusesActualSchemaVersion(t *testing.T) {
 			} else if !strings.Contains(diagnostic.Message, actual) {
 				t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
 			}
-			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != VerificationManifestV5 {
+			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != VerificationManifestV6 {
 				t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
 			}
 		})
@@ -663,7 +663,7 @@ func validVerificationManifest(t *testing.T, batch VerificationBatchDocument, ve
 	portableExportDigest := testDigest("portable-export")
 	portableExportRef := testArtifactRef("portable-export", "portable-export-1", portableExportDigest)
 	return VerificationManifest{
-		SchemaVersion:         VerificationManifestV5,
+		SchemaVersion:         VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           batch.CharterHash,
 		ArtifactDigest:        batch.ArtifactDigest,
