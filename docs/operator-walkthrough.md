@@ -221,7 +221,7 @@ from another run:
 
 ```json
 {
-  "schema_version": "review-role-output-v3",
+  "schema_version": "review-role-output-v4",
   "role": "defect",
   "charter_hash": "<next_action.charter_hash>",
   "artifact_digest": "<next_action.snapshot_digest>",
@@ -256,7 +256,7 @@ current pass before filing it.
 
 ```json
 {
-  "schema_version": "review-role-output-v3",
+  "schema_version": "review-role-output-v4",
   "role": "defect",
   "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -275,6 +275,7 @@ current pass before filing it.
       "title": "Illustrative reachable input is rejected",
       "charter_goal_ids": ["preserve-reviewed-behavior"],
       "claimed_severity": "medium",
+      "attribution": "introduced",
       "scope_anchors": [
         {
           "dimension": "entry_points",
@@ -355,7 +356,7 @@ the producer. Defect and economy role outputs require `findings` to be an
 array, including `[]` when there are no findings.
 
 Each `findings` entry has `id`, `kind`, `title`, `charter_goal_ids`,
-`claimed_severity`, `scope_anchors`, `witness`, `estimated_delta`,
+`claimed_severity`, `attribution`, `scope_anchors`, `witness`, `estimated_delta`,
 `smallest_sufficient_remedy`, and optional `proposed_tests` and `recurrence`.
 The `witness` fields are `kind`, `strength`, `content`, optional
 `artifact_refs`, optional `executable`, optional `entry_point`, and optional
@@ -383,10 +384,11 @@ Use these enum values exactly:
 - finding `kind`: `defect`, `economy`; witness `kind`: `defect`, `equivalence`
 - witness `strength`: `argued`, `constructed`, `executable`
 - `claimed_severity`: `critical`, `high`, `medium`, `low`
+- `attribution`: `introduced`, `worsened`, `pre-existing`, `unattributed`
 - delta `status`: `known`, `unknown`
 - remedy `direction`: `add`, `change`, `remove`
 
-For a `known` delta, provide the measured `lines` and `files`; an `unknown`
+For a `known` delta, provide estimated `lines` and `files`; an `unknown`
 delta must not provide either count. Economy findings use `kind: "economy"`,
 an `equivalence` witness, and a size-reducing `remove` or `change` remedy.
 
@@ -428,7 +430,7 @@ Each result is an `ok: true` document with `schema_version` and a
 The two completed files are `role-outputs/defect-output.json` and
 `role-outputs/economy-output.json` relative to `$STATE`.
 
-## 4. Finish planning, assembly, adjudication, and metrics
+## 4. Finish planning, assembly, and adjudication
 
 Resume one stage at a time, checking `stage_run` after each command:
 
@@ -457,7 +459,7 @@ witness verification assemble \
   -batch "$BATCH_PATH" \
   -artifact "$STATE/source-snapshot/manifest.json" \
   -integration-bundle "$STATE/integration-bundle.body.json" \
-  -out "$WORK/relay-launch/index.json"
+  -out "$RUN/relay-launch/index.json"
 ```
 
 `-out` must point outside the state directory: the state directory is a
@@ -485,9 +487,8 @@ and the record also states `provider_invoked` and `consumes_batch`.
 returning `caller_relay_batch`; fix the launch and rerun it. A consuming
 unavailable record is terminal for that batch instead. Return to the pass using
 only `witness pass resume -state-dir "$STATE"` for each remaining stage: it
-consumes that recorded run in its own assembly, adjudication, and metrics.
-Findings assigned to the unavailable batch end as `pending_verification`, and
-the metrics-stage response reports `complete: true`.
+consumes that recorded run in its own assembly and adjudication. Findings
+assigned to the unavailable batch end as `pending_verification`.
 
 ```sh
 witness pass resume -state-dir "$STATE"
@@ -502,14 +503,8 @@ witness pass resume -state-dir "$STATE"
 ```
 
 This runs the `adjudicate` stage, writes `verdict.json`, and appends the
-adjudication lineage to `$RUN/ledger.jsonl`.
-
-```sh
-witness pass resume -state-dir "$STATE"
-```
-
-This runs the `metrics` stage, writes `metrics.json`, and returns the terminal
-next action:
+adjudication lineage to `$RUN/ledger.jsonl`. It is the terminal stage and
+returns the terminal next action:
 
 ```json
 {
@@ -518,7 +513,7 @@ next action:
     "type": "complete",
     "summary": "pass complete"
   },
-  "stage_run": "metrics"
+  "stage_run": "adjudicate"
 }
 ```
 
@@ -529,21 +524,19 @@ witness ledger show -ledger "$RUN/ledger.jsonl"
 ```
 
 For the zero-findings role-output example, the terminal `verdict.json` has a
-zero-count summary, including `admitted: 0`, `advisory: 0`,
-`pending_verification: 0`, and `fixpoint_eligible: true`. In the current CLI,
-the terminal adjudication result serializes its zero-length `findings` field as
-`null`; this is distinct from the required `findings: []` in each role-output
-document:
+zero-count summary: `admitted: 0`, `advisory: 0`, and
+`pending_verification: 0`. In the current CLI, the terminal adjudication result
+serializes its zero-length `findings` field as `null`; this is distinct from the
+required `findings: []` in each role-output document:
 
 ```json
 {
-  "schema_version": "witness-adjudication-run-result-v2",
+  "schema_version": "witness-adjudication-run-result-v5",
   "findings": null,
   "summary": {
     "admitted": 0,
     "advisory": 0,
-    "pending_verification": 0,
-    "fixpoint_eligible": true
+    "pending_verification": 0
   }
 }
 ```
@@ -654,7 +647,7 @@ The complete run layout is:
 | Preflight compilation | `compile-reports/witness-falsify-v2.json`, `compile-reports/witness-falsify-v2-codex.json`, `compile-reports/witness-falsify-v2-claude.json`, `compile-reports/economy-equivalence-v2.json`, `compile-reports/economy-equivalence-v2-codex.json`, `compile-reports/economy-equivalence-v2-claude.json`; a relay that emits plans also retains `recipe-plans/<recipe-id>.json` |
 | Finders | `role-outputs/defect-output.json`, `role-outputs/economy-output.json` |
 | Plan and assembly | `verification-plan.json`, `verification/index.skeleton.json`, `verification/index.json`, and, when applicable, `verification/assemble-result.json` |
-| Adjudication and metrics | `verdict.json`, `metrics.json` (the ledger is `$RUN/ledger.jsonl`) |
+| Adjudication | `verdict.json` (the ledger is `$RUN/ledger.jsonl`) |
 
 ## Intentional boundaries
 

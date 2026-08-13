@@ -3,7 +3,8 @@
 Witness is a deterministic Go CLI for evidence-backed, single-pass software
 review. It freezes the reviewed source and an owner-authored Charter, validates
 finder output, plans independent verification, assembles retained evidence,
-adjudicates findings, and emits an append-only ledger and metrics.
+adjudicates findings, and appends the resulting lineage to an append-only
+ledger.
 
 Witness deliberately does not edit reviewed source, apply findings, retry
 models, add review roles, or own an iteration loop. Those decisions remain
@@ -25,12 +26,13 @@ versioned; compatibility changes are made explicitly rather than inferred.
 Build the two commands directly:
 
 ```sh
-go install github.com/charlesnpx/witness/cmd/witness@main
-go install github.com/charlesnpx/witness/cmd/witness-harness@main
+go install github.com/charlesnpx/witness/cmd/witness@v0.4.1
+go install github.com/charlesnpx/witness/cmd/witness-harness@v0.4.1
 ```
 
-The existing `v0.1.0` and `v0.2.0` tags predate the canonical GitHub module
-path. Use `@main` until a newer versioned release is published.
+Use the current supported `v0.x` release tag (shown: `v0.4.1`) for canonical
+GitHub module-path installs. The legacy `v0.1.0` and `v0.2.0` tags predate
+that path and are incompatible with those installs.
 
 Alternatively, clone the repository and use the delegated installer:
 
@@ -55,20 +57,32 @@ pass:
 witness charter init \
   -template minimal \
   -out charter.json
+```
 
+Before continuing, edit `charter.json` and replace its empty `goals` array
+with at least one owner-authorized goal, for example
+`{"id":"preserve-reviewed-behavior","statement":"Preserve the behavior intended for this reviewed change."}`.
+
+```sh
 witness pass begin \
-  -state-dir witness-state \
+  -state-dir ../witness-state \
   -charter charter.json \
   -source-dir . \
-  -baseline-pass
+  -integration-bundle /absolute/path/to/relay-integration-bundle-v2.json \
+  -baseline-pass \
+  -allow-dirty-source
 ```
+
+The state directory must be outside the reviewed source tree; `charter.json`
+is an owner input in that tree, so this example also records its deliberate
+uncommitted state.
 
 `pass begin` and `pass resume` emit a machine-readable next-action document.
 The caller supplies the requested finder or relay artifacts, then resumes the
 same state directory:
 
 ```sh
-witness pass resume -state-dir witness-state
+witness pass resume -state-dir ../witness-state
 ```
 
 The lower-level workflow remains available for callers that need direct
@@ -81,11 +95,11 @@ control:
 5. Run the required relay verification batches and retain their exports.
 6. `witness verification assemble`
 7. `witness adjudicate`
-8. Inspect the ledger, policy decisions, pending verification, and metrics.
+8. Inspect the adjudication result, ledger, pending verification, and
+   Operational Envelope questions. Owner decisions use `witness ledger promote`
+   or `witness ledger accept-unverified`.
 
-See [skill/SKILL.md](skill/SKILL.md) for the complete orchestration procedure
-and [docs/witnessed-adversarial-review-spec-corrected.md](docs/witnessed-adversarial-review-spec-corrected.md)
-for the architecture and contract model.
+See [skill/SKILL.md](skill/SKILL.md) for the complete orchestration procedure.
 
 ## Operator walkthrough
 
