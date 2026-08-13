@@ -42,7 +42,7 @@ type installSkillFile struct {
 
 const witnessSkillPrefix = `---
 name: witness
-description: Run deterministic single-pass Witness reviews from a frozen source state and Charter. Use when Codex or Claude should orchestrate Witness review, verification planning, adjudication, policy checks, or metrics without mutating reviewed sources.
+description: Run deterministic single-pass Witness reviews from a frozen source state and Charter. Use when Codex or Claude should orchestrate Witness review, verification planning, adjudication, or ledger review without mutating reviewed sources.
 ---
 
 # Witness Single-Pass Review
