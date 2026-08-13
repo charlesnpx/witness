@@ -9,7 +9,7 @@ Use this skill to run Witness review from a frozen source state and frozen Chart
 
 Finder roles are exactly: defect, economy, and optional goal-fit.
 
-Use the shipped relay integration bundle at `skill/bundle/relay-integration-bundle-v2.json` for all Witness v2 relay verification recipes.
+Use the shipped relay integration bundle at `bundle/relay-integration-bundle-v2.json`, relative to this `SKILL.md`, for all Witness v2 relay verification recipes. In the repository source, it is `skill/bundle/relay-integration-bundle-v2.json`.
 
 ## Finder Guidance
 

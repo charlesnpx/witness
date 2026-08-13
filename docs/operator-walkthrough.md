@@ -388,7 +388,7 @@ Use these enum values exactly:
 - delta `status`: `known`, `unknown`
 - remedy `direction`: `add`, `change`, `remove`
 
-For a `known` delta, provide the measured `lines` and `files`; an `unknown`
+For a `known` delta, provide estimated `lines` and `files`; an `unknown`
 delta must not provide either count. Economy findings use `kind: "economy"`,
 an `equivalence` witness, and a size-reducing `remove` or `change` remedy.
 
@@ -459,7 +459,7 @@ witness verification assemble \
   -batch "$BATCH_PATH" \
   -artifact "$STATE/source-snapshot/manifest.json" \
   -integration-bundle "$STATE/integration-bundle.body.json" \
-  -out "$WORK/relay-launch/index.json"
+  -out "$RUN/relay-launch/index.json"
 ```
 
 `-out` must point outside the state directory: the state directory is a
