@@ -20,7 +20,6 @@ import (
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/preflight"
 )
 
@@ -31,18 +30,14 @@ type binaries struct {
 }
 
 type passResult struct {
-	dir             string
-	preflightPath   string
-	runResultPath   string
-	metricsPath     string
-	ledgerShowPath  string
-	runsIndexPath   string
-	policyCheckPath string
-	result          adjudicate.Result
-	metrics         metrics.Document
-	ledgerShow      ledger.ShowDocument
-	runs            relayRunsDocument
-	policyCheck     map[string]any
+	dir            string
+	preflightPath  string
+	runResultPath  string
+	ledgerShowPath string
+	runsIndexPath  string
+	result         adjudicate.Result
+	ledgerShow     ledger.ShowDocument
+	runs           relayRunsDocument
 }
 
 type relayRunsDocument struct {
@@ -118,16 +113,10 @@ func TestFakeProviderEndToEndPasses(t *testing.T) {
 			"economy-equivalence-v2-codex",
 			"witness-falsify-v2-codex",
 		})
-		if pass.metrics.PendingVerification.Total != 2 {
-			t.Fatalf("pending metrics total = %d, want 2", pass.metrics.PendingVerification.Total)
-		}
-		assertPendingStratum(t, pass.metrics, "codex", metrics.BackendAuthStatusInstalledAuthUnknown, 2)
 		assertLedgerKinds(t, pass.ledgerShow, map[string]int{
 			ledger.EventKindAdjudicationRun:     1,
 			ledger.EventKindVerdict:             2,
 			ledger.EventKindPendingVerification: 2,
-			ledger.EventKindPolicyDecision:      3,
-			ledger.EventKindMeasuredDelta:       1,
 		})
 	})
 }
@@ -137,16 +126,13 @@ func assertSuccessfulPass(t *testing.T, pass passResult, wantRelayBackend string
 	if pass.result.Summary.Admitted != 2 || pass.result.Summary.PendingVerification != 0 || pass.result.Summary.Advisory != 0 {
 		t.Fatalf("summary = %#v, want 2 admitted and no pending/advisory", pass.result.Summary)
 	}
-	if pass.result.Summary.AutomaticCandidate != 1 || pass.result.Summary.CallerDecision != 1 {
-		t.Fatalf("application summary = %#v, want 1 automatic and 1 caller decision", pass.result.Summary)
-	}
 	findings := findingsByID(pass.result)
 	defect := findings["defect-exec"]
 	if defect.FindingID == "" {
 		t.Fatal("missing defect-exec verdict")
 	}
-	if defect.Disposition != contracts.DispositionAdmitted || defect.ApplicationClass != contracts.ApplicationClassCallerDecision {
-		t.Fatalf("defect verdict = %#v, want admitted/caller_decision", defect)
+	if defect.Disposition != contracts.DispositionAdmitted {
+		t.Fatalf("defect verdict = %#v, want admitted", defect)
 	}
 	if defect.Execution == nil || defect.Execution.VerificationClassification != harness.ClassificationValid {
 		t.Fatalf("defect execution = %#v, want valid receipt", defect.Execution)
@@ -158,24 +144,16 @@ func assertSuccessfulPass(t *testing.T, pass passResult, wantRelayBackend string
 	if economy.FindingID == "" {
 		t.Fatal("missing economy-remove verdict")
 	}
-	if economy.Disposition != contracts.DispositionAdmitted || economy.ApplicationClass != contracts.ApplicationClassAutomaticCandidate {
-		t.Fatalf("economy verdict = %#v, want admitted/automatic_candidate", economy)
+	if economy.Disposition != contracts.DispositionAdmitted {
+		t.Fatalf("economy verdict = %#v, want admitted", economy)
 	}
 	assertRelay(t, economy, "economy-equivalence-v2", wantRelayBackend)
 
-	if pass.metrics.Verdicts.Survived != 2 || pass.metrics.PendingVerification.Total != 0 {
-		t.Fatalf("metrics verdicts=%#v pending=%#v, want 2 survived and 0 pending", pass.metrics.Verdicts, pass.metrics.PendingVerification)
-	}
 	assertRunRecipeIDs(t, pass.runs, wantRecipeIDs)
 	assertLedgerKinds(t, pass.ledgerShow, map[string]int{
 		ledger.EventKindAdjudicationRun: 1,
 		ledger.EventKindVerdict:         2,
-		ledger.EventKindPolicyDecision:  3,
-		ledger.EventKindMeasuredDelta:   1,
 	})
-	if allow, _ := pass.policyCheck["allow"].(bool); allow {
-		t.Fatalf("policy check allow = true, want false under caller-decision defect change")
-	}
 }
 
 func assertRelay(t *testing.T, finding adjudicate.FindingVerdict, recipeFamily string, backend string) {
@@ -309,48 +287,18 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		"-out", runResultPath,
 	)
 
-	policyCheckPath := filepath.Join(resultsDir, "policy-check.json")
-	runOK(t, nil, bins.witness,
-		"policy", "check-application",
-		"-ledger", ledgerPath,
-		"-charter-freeze", frozenPath,
-		"-role", contracts.RoleDefect,
-		"-remedy-direction", contracts.RemedyDirectionChange,
-		"-remedy-sign", "positive",
-		"-estimated-production-status", contracts.DeltaStatusKnown,
-		"-estimated-production-lines", "2",
-		"-estimated-test-status", contracts.DeltaStatusKnown,
-		"-estimated-test-lines", "4",
-		"-measured-production", "2",
-		"-measured-test", "4",
-		"-finding-id", "defect-exec",
-		"-out", policyCheckPath,
-	)
-
-	metricsPath := filepath.Join(resultsDir, "metrics.json")
-	runOK(t, nil, bins.witness,
-		"metrics",
-		"-ledger", ledgerPath,
-		"-preflight", preflightPath,
-		"-run-result", runResultPath,
-		"-out", metricsPath,
-	)
 	ledgerShowPath := filepath.Join(resultsDir, "ledger-show.json")
 	runOK(t, nil, bins.witness, "ledger", "show", "-ledger", ledgerPath, "-out", ledgerShowPath)
 
 	return passResult{
-		dir:             passDir,
-		preflightPath:   preflightPath,
-		runResultPath:   runResultPath,
-		metricsPath:     metricsPath,
-		ledgerShowPath:  ledgerShowPath,
-		runsIndexPath:   filepath.Join(passDir, "verification", "runs", "index.json"),
-		policyCheckPath: policyCheckPath,
-		result:          readJSON[adjudicate.Result](t, runResultPath),
-		metrics:         readJSON[metrics.Document](t, metricsPath),
-		ledgerShow:      readJSON[ledger.ShowDocument](t, ledgerShowPath),
-		runs:            readJSON[relayRunsDocument](t, filepath.Join(passDir, "verification", "runs", "index.json")),
-		policyCheck:     readJSON[map[string]any](t, policyCheckPath),
+		dir:            passDir,
+		preflightPath:  preflightPath,
+		runResultPath:  runResultPath,
+		ledgerShowPath: ledgerShowPath,
+		runsIndexPath:  filepath.Join(passDir, "verification", "runs", "index.json"),
+		result:         readJSON[adjudicate.Result](t, runResultPath),
+		ledgerShow:     readJSON[ledger.ShowDocument](t, ledgerShowPath),
+		runs:           readJSON[relayRunsDocument](t, filepath.Join(passDir, "verification", "runs", "index.json")),
 	}
 }
 
@@ -406,7 +354,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 	identity := map[string]any{"kind": "e2e", "id": "fake-provider"}
 	source := map[string]any{"kind": "source-snapshot", "id": "snapshot", "digest": artifactDigest}
 	defect := contracts.RoleOutputDocument{
-		SchemaVersion:    contracts.RoleOutputV3,
+		SchemaVersion:    contracts.RoleOutputV4,
 		Role:             contracts.RoleDefect,
 		CharterHash:      frozen.CharterHash,
 		ArtifactDigest:   artifactDigest,
@@ -418,6 +366,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 			Title:           "CLI executable witness reports accepted input",
 			CharterGoalIDs:  []string{"goal-cli"},
 			ClaimedSeverity: contracts.SeverityCritical,
+			Attribution:     contracts.FindingAttributionIntroduced,
 			ScopeAnchors: []contracts.ScopeAnchor{{
 				Dimension: "entry_points",
 				EntryID:   "cli",
@@ -457,7 +406,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 		}},
 	}
 	economy := contracts.RoleOutputDocument{
-		SchemaVersion:    contracts.RoleOutputV3,
+		SchemaVersion:    contracts.RoleOutputV4,
 		Role:             contracts.RoleEconomy,
 		CharterHash:      frozen.CharterHash,
 		ArtifactDigest:   artifactDigest,
@@ -469,6 +418,7 @@ func writeRoleOutputs(t *testing.T, frozen charter.FrozenCharter, artifactDigest
 			Title:           "Remove duplicate accepted marker branch",
 			CharterGoalIDs:  []string{"goal-cli"},
 			ClaimedSeverity: contracts.SeverityHigh,
+			Attribution:     contracts.FindingAttributionIntroduced,
 			Witness: contracts.Witness{
 				Kind:     contracts.WitnessKindEquivalence,
 				Strength: contracts.WitnessStrengthConstructed,
@@ -655,19 +605,6 @@ func assertLedgerKinds(t *testing.T, show ledger.ShowDocument, want map[string]i
 			t.Fatalf("ledger kind %s count = %d, want %d; all counts %#v", kind, got[kind], count, got)
 		}
 	}
-}
-
-func assertPendingStratum(t *testing.T, document metrics.Document, backend string, status string, count int) {
-	t.Helper()
-	for _, stratum := range document.PendingVerification.Strata {
-		if stratum.Backend == backend && stratum.BackendAuthStatus == status {
-			if stratum.Count != count {
-				t.Fatalf("pending stratum %#v count = %d, want %d", stratum, stratum.Count, count)
-			}
-			return
-		}
-	}
-	t.Fatalf("missing pending stratum backend=%s status=%s in %#v", backend, status, document.PendingVerification.Strata)
 }
 
 func assertStringSliceContains(t *testing.T, values []string, want string) {

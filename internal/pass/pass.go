@@ -1,9 +1,7 @@
 package pass
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,15 +18,13 @@ import (
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/planning"
-	"github.com/charlesnpx/witness/internal/policy"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (
-	StateSchemaVersion      = "witness-pass-state-v2"
+	StateSchemaVersion      = "witness-pass-state-v5"
 	InvocationSchemaVersion = "witness-pass-next-action-v2"
 
 	StateFileName = "pass-state.json"
@@ -59,7 +55,6 @@ const (
 	stagePlan       = "plan"
 	stageAssemble   = "assemble"
 	stageAdjudicate = "adjudicate"
-	stageMetrics    = "metrics"
 
 	statusComplete    = "complete"
 	statusPending     = "pending"
@@ -83,7 +78,6 @@ var orderedStages = []string{
 	stagePlan,
 	stageAssemble,
 	stageAdjudicate,
-	stageMetrics,
 }
 
 type BeginOptions struct {
@@ -98,8 +92,6 @@ type BeginOptions struct {
 	RelayPath             string
 	IntegrationBundlePath string
 	Backend               string
-	PolicyPath            string
-	RulesPath             string
 	LedgerPath            string
 	BaseManifestPath      string
 	HeadManifestPath      string
@@ -133,8 +125,6 @@ type Config struct {
 	RelayPath             string           `json:"relay_path,omitempty"`
 	IntegrationBundlePath string           `json:"integration_bundle_path"`
 	Backend               string           `json:"backend,omitempty"`
-	PolicyPath            string           `json:"policy_path,omitempty"`
-	RulesPath             string           `json:"rules_path,omitempty"`
 	LedgerPath            string           `json:"ledger_path,omitempty"`
 	BaseManifestPath      string           `json:"base_manifest_path,omitempty"`
 	HeadManifestPath      string           `json:"head_manifest_path,omitempty"`
@@ -156,7 +146,6 @@ type Outputs struct {
 	AssembleResultPath          string `json:"assemble_result_path,omitempty"`
 	RoleOutputChangeSurfacePath string `json:"role_output_change_surface_path,omitempty"`
 	RunResultPath               string `json:"run_result_path"`
-	MetricsPath                 string `json:"metrics_path"`
 }
 
 type State struct {
@@ -415,12 +404,6 @@ func advance(ctx context.Context, state *State) (*Invocation, error) {
 		}
 		return saveAndReport(state, stageAdjudicate)
 	}
-	if !stageComplete(state, stageMetrics) {
-		if err := runMetrics(state); err != nil {
-			return nil, err
-		}
-		return saveAndReport(state, stageMetrics)
-	}
 	state.Complete = true
 	setCompleteAction(state)
 	return saveAndReport(state, "")
@@ -600,10 +583,6 @@ func runPlan(state *State) error {
 	if err := validatePlanningPreflight(preflightResult); err != nil {
 		return err
 	}
-	policyDocument, err := readReviewPolicy(config.PolicyPath)
-	if err != nil {
-		return err
-	}
 	changeSurface, err := readDriverChangeSurfaceInput(config, config.BaselinePass)
 	if err != nil {
 		return err
@@ -629,7 +608,6 @@ func runPlan(state *State) error {
 		CharterDigest: digest.RawBytes(frozenBytes),
 		RoleOutputs:   roleOutputs,
 		StateDir:      config.StateDir,
-		Policy:        policyDocument,
 		Preflight:     preflightBinding(preflightResult),
 		ChangeSurface: changeSurface,
 	})
@@ -642,7 +620,6 @@ func runPlan(state *State) error {
 	inputSpecs := []artifactInput{
 		{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digest.ClassRawBytes},
 		{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes},
-		{role: "policy", path: config.PolicyPath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
 		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
 	}
@@ -826,25 +803,18 @@ func runAdjudicate(state *State) error {
 			return err
 		}
 	}
-	effective, err := loadEffectivePolicy(config)
-	if err != nil {
-		return err
-	}
 	service, err := RunAdjudicationService(AdjudicationOptions{
-		FrozenCharter:                frozen,
-		RoleOutputs:                  roleOutputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurface.BaseManifest,
-		HeadManifest:                 changeSurface.HeadManifest,
-		LedgerPath:                   config.LedgerPath,
-		ReceiptOutputDir:             config.ReceiptOutputDir,
-		ReceiptHMACKeyFile:           config.ReceiptHMACKeyFile,
-		Rules:                        effective.Rules,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
-		PriorLineage:                 priorLineage,
-		PriorLineageProvided:         priorProvided,
-		DriverResumeMode:             true,
+		FrozenCharter:        frozen,
+		RoleOutputs:          roleOutputs,
+		Manifest:             manifest,
+		BaseManifest:         changeSurface.BaseManifest,
+		HeadManifest:         changeSurface.HeadManifest,
+		LedgerPath:           config.LedgerPath,
+		ReceiptOutputDir:     config.ReceiptOutputDir,
+		ReceiptHMACKeyFile:   config.ReceiptHMACKeyFile,
+		PriorLineage:         priorLineage,
+		PriorLineageProvided: priorProvided,
+		DriverResumeMode:     true,
 	})
 	if err != nil {
 		return err
@@ -864,8 +834,6 @@ func runAdjudicate(state *State) error {
 	inputSpecs := []artifactInput{
 		{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digest.ClassRawBytes},
 		{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digest.ClassRawBytes},
-		{role: "policy", path: config.PolicyPath, digestClass: digest.ClassRawBytes},
-		{role: "rules", path: config.RulesPath, digestClass: digest.ClassRawBytes},
 		{role: "ledger", path: config.LedgerPath, digestClass: digest.ClassRawBytes},
 		{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
@@ -890,41 +858,6 @@ func runAdjudicate(state *State) error {
 		Details: map[string]any{
 			"result_digest": result.ResultDigest,
 		},
-	})
-	return nil
-}
-
-func runMetrics(state *State) error {
-	config := state.Config
-	document, err := metrics.Run(metrics.Options{
-		LedgerPath:     config.LedgerPath,
-		PreflightPath:  config.Outputs.PreflightPath,
-		RunResultPaths: []string{config.Outputs.RunResultPath},
-	})
-	if err != nil {
-		return err
-	}
-	if err := writeJSONFile(config.Outputs.MetricsPath, document); err != nil {
-		return err
-	}
-	inputSpecs := []artifactInput{
-		{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digest.ClassRawBytes},
-		{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digest.ClassRawBytes},
-		{role: "ledger", path: config.LedgerPath, digestClass: digest.ClassRawBytes},
-	}
-	inputs, err := artifactRecordsForExistingFiles(inputSpecs)
-	if err != nil {
-		return err
-	}
-	outputs, err := artifactRecordsForExistingFiles([]artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digest.ClassRawBytes}})
-	if err != nil {
-		return err
-	}
-	markStageComplete(state, StageRecord{
-		Name:    stageMetrics,
-		Status:  statusComplete,
-		Inputs:  inputs,
-		Outputs: outputs,
 	})
 	state.Complete = true
 	return nil
@@ -985,7 +918,6 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 			ManifestPath:       filepath.Join(stateDir, "verification", "index.json"),
 			AssembleResultPath: filepath.Join(stateDir, "verification", "assemble-result.json"),
 			RunResultPath:      filepath.Join(stateDir, "verdict.json"),
-			MetricsPath:        filepath.Join(stateDir, "metrics.json"),
 		},
 	}
 	for _, assign := range []struct {
@@ -996,8 +928,6 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		{&config.AmendmentsPath, options.AmendmentsPath},
 		{&config.RelayPath, options.RelayPath},
 		{&config.IntegrationBundlePath, options.IntegrationBundlePath},
-		{&config.PolicyPath, options.PolicyPath},
-		{&config.RulesPath, options.RulesPath},
 		{&config.LedgerPath, options.LedgerPath},
 		{&config.BaseManifestPath, options.BaseManifestPath},
 		{&config.HeadManifestPath, options.HeadManifestPath},
@@ -1096,8 +1026,7 @@ func setNextAction(state *State) error {
 		!stageComplete(state, stagePreflight) ||
 		!stageComplete(state, stagePlan) ||
 		!stageComplete(state, stageAssemble) ||
-		!stageComplete(state, stageAdjudicate) ||
-		!stageComplete(state, stageMetrics) {
+		!stageComplete(state, stageAdjudicate) {
 		if missing := missingRoleOutputs(state); len(missing) > 0 && stageComplete(state, stagePreflight) {
 			return setRoleOutputAction(state, missing)
 		}
@@ -1132,7 +1061,7 @@ func setRoleOutputAction(state *State, missing []RoleOutputSpec) error {
 	for _, item := range missing {
 		requests = append(requests, RoleOutputRequest{Role: item.Role, Path: item.Path})
 	}
-	scopePolicy, err := nextActionScopePolicy(state.Config)
+	scopePolicy, err := nextActionScope(state.Config)
 	if err != nil {
 		return err
 	}
@@ -1162,7 +1091,7 @@ func validatePendingRoleOutputAction(state *State) error {
 	if state == nil || state.NextAction.Type != actionCallerRoleOutputs {
 		return nil
 	}
-	scopePolicy, err := nextActionScopePolicy(state.Config)
+	scopePolicy, err := nextActionScope(state.Config)
 	if err != nil {
 		return err
 	}
@@ -1178,7 +1107,7 @@ func validatePendingRoleOutputAction(state *State) error {
 	}
 	return validationError(
 		CodeNextActionDrift,
-		"pending caller role-output action no longer matches the current review policy and change surface.",
+		"pending caller role-output action no longer matches the current change-surface inputs.",
 		"/next_action",
 		map[string]any{
 			"persisted": map[string]any{
@@ -1524,12 +1453,21 @@ func readState(path string) (*State, error) {
 	if err != nil {
 		return nil, fileError(err, path, "open pass state")
 	}
-	state, err := strictjson.DecodeBytes[State](data, strictjson.DefaultMaxBytes*8)
+	outer, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
 	if err != nil {
 		return nil, err
 	}
-	if state.SchemaVersion != StateSchemaVersion {
-		return nil, validationError(CodeStateUnsupported, "pass state schema_version is unsupported.", "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": state.SchemaVersion})
+	document, ok := outer.(map[string]any)
+	if !ok {
+		return nil, validationError(CodeStateUnsupported, "pass state schema_version is unsupported.", "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": ""})
+	}
+	schemaVersion, _ := document["schema_version"].(string)
+	if schemaVersion != StateSchemaVersion {
+		return nil, validationError(CodeStateUnsupported, fmt.Sprintf("pass state schema_version %q is unsupported; it predates the metrics-stage removal and %q is required.", schemaVersion, StateSchemaVersion), "/schema_version", map[string]any{"expected": StateSchemaVersion, "actual": schemaVersion})
+	}
+	state, err := strictjson.DecodeBytes[State](data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return nil, err
 	}
 	if state.DigestProfile != digest.Profile {
 		return nil, validationError(CodeStateUnsupported, "pass state digest_profile is unsupported.", "/digest_profile", map[string]any{"expected": digest.Profile, "actual": state.DigestProfile})
@@ -1877,39 +1815,6 @@ func selectedContractRefsAndEvidenceForFile(path string) ([]contracts.ArtifactRe
 	return refs, evidence, nil
 }
 
-func loadEffectivePolicy(config Config) (policy.Effective, error) {
-	policyDocument, err := readReviewPolicy(config.PolicyPath)
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	rules, err := readReviewRules(config.RulesPath)
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	records, err := ledger.ReadFile(config.LedgerPath)
-	if config.LedgerPath == "" {
-		records = nil
-		err = nil
-	}
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	releases, err := ledger.CapReleases(records)
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	frozen, _, err := readFrozenCharter(config.Outputs.CharterFreezePath)
-	if err != nil {
-		return policy.Effective{}, err
-	}
-	return policy.Load(policy.LoadOptions{
-		Policy:      policyDocument,
-		Rules:       rules,
-		CharterHash: frozen.CharterHash,
-		CapReleases: releases,
-	})
-}
-
 func readFrozenCharter(path string) (charter.FrozenCharter, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1935,7 +1840,7 @@ func readPlan(path string) (planning.PlanDocument, error) {
 	if err != nil {
 		return planning.PlanDocument{}, fileError(err, path, "open verification plan")
 	}
-	return strictjson.DecodeBytes[planning.PlanDocument](data, strictjson.DefaultMaxBytes*4)
+	return planning.ReadPlanDocumentBytes(data)
 }
 
 func readVerificationManifest(path string) (contracts.VerificationManifest, error) {
@@ -1954,50 +1859,19 @@ func readPreflightResult(path string) (preflight.Result, error) {
 	return strictjson.DecodeBytes[preflight.Result](data, strictjson.DefaultMaxBytes*4)
 }
 
-func readReviewPolicy(path string) (contracts.ReviewPolicy, error) {
-	if strings.TrimSpace(path) == "" {
-		return contracts.DefaultReviewPolicy(), nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.ReviewPolicy{}, fileError(err, path, "open review policy")
-	}
-	return contracts.ReadReviewPolicyBytes(data)
-}
-
-func readReviewRules(path string) (contracts.ReviewRules, error) {
-	if strings.TrimSpace(path) == "" {
-		return contracts.DefaultReviewRules(), nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.ReviewRules{}, fileError(err, path, "open review rules")
-	}
-	return contracts.ReadReviewRulesBytes(data)
-}
-
-func nextActionScopePolicy(config Config) (string, error) {
-	policyDocument, err := readReviewPolicy(config.PolicyPath)
+func nextActionScope(config Config) (string, error) {
+	input, err := readDriverChangeSurfaceInput(config, config.BaselinePass)
 	if err != nil {
 		return "", err
 	}
-	switch strings.TrimSpace(policyDocument.ScopePolicy) {
-	case "", contracts.ScopePolicyWholeTree:
-		return contracts.ScopePolicyWholeTree, nil
-	case contracts.ScopePolicyDeltaObligating:
-		return contracts.ScopePolicyDeltaObligating, nil
-	default:
-		return "", diag.New(
-			contracts.CodeInvalidPolicy,
-			"scope_policy must be delta_obligating or whole_tree when set.",
-			diag.WithPath("/scope_policy"),
-			diag.WithDetail("value", policyDocument.ScopePolicy),
-		)
+	if input.BaseManifest != nil && input.HeadManifest != nil {
+		return changesurface.ScopePolicyDeltaObligating, nil
 	}
+	return changesurface.ScopePolicyWholeTree, nil
 }
 
 func roleOutputChangeSurfaceActionRef(state *State, scopePolicy string) (string, string, error) {
-	if state == nil || scopePolicy != contracts.ScopePolicyDeltaObligating || state.Config.BaselinePass {
+	if state == nil || scopePolicy != changesurface.ScopePolicyDeltaObligating || state.Config.BaselinePass {
 		return "", "", nil
 	}
 	input, err := readDriverChangeSurfaceInput(state.Config, false)
@@ -2189,22 +2063,6 @@ func writeCanonicalFile(path string, value any) error {
 		return fileError(err, filepath.Dir(path), "create output directory")
 	}
 	if err := atomicWriteFile(path, append(encoded, '\n'), 0o644); err != nil {
-		return fileError(err, path, "write output")
-	}
-	return nil
-}
-
-func writeJSONFile(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fileError(err, filepath.Dir(path), "create output directory")
-	}
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
-		return err
-	}
-	if err := atomicWriteFile(path, buffer.Bytes(), 0o644); err != nil {
 		return fileError(err, path, "write output")
 	}
 	return nil

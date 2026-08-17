@@ -19,15 +19,13 @@ import (
 )
 
 const (
-	ResultSchemaVersionV1 = "witness-adjudication-run-result-v1"
-	ResultSchemaVersion   = "witness-adjudication-run-result-v2"
+	ResultSchemaVersion = "witness-adjudication-run-result-v5"
 
 	CodeInvalidInput              = "adjudicate_invalid_input"
 	CodeInvalidFrozenCharter      = "adjudicate_invalid_frozen_charter"
 	CodeInvalidRoleOutput         = "adjudicate_invalid_role_output"
 	CodeInvalidManifest           = "adjudicate_invalid_manifest"
-	CodeInvalidRules              = "adjudicate_invalid_rules"
-	CodeInvalidPolicy             = "adjudicate_invalid_policy"
+	CodeUnsupportedResultSchema   = "adjudicate_unsupported_result_schema"
 	CodeInvalidRecurrenceLineage  = "adjudicate_invalid_recurrence_lineage"
 	CodeReceiptLoadFailed         = "adjudicate_receipt_load_failed"
 	CodeReceiptRelationshipFailed = "adjudicate_receipt_relationship_failed"
@@ -49,6 +47,8 @@ const (
 	ReasonRelayBroken                  = "relay_broken"
 	ReasonWitnessWeakenedBelowFloor    = "witness_weakened_below_floor"
 	ReasonOutOfDelta                   = contracts.ReasonOutOfDelta
+	ReasonPreExisting                  = contracts.ReasonPreExisting
+	ReasonAttributionUnattributed      = contracts.ReasonAttributionUnattributed
 )
 
 type Options struct {
@@ -61,10 +61,6 @@ type Options struct {
 	ReceiptOutputDir   string
 	ReceiptHMACKey     []byte
 	ReceiptHMACKeyFile string
-
-	Rules                        contracts.ReviewRules
-	Policy                       contracts.ReviewPolicy
-	PolicyCapReleaseLedgerBacked bool
 
 	PriorLineage         []PriorLineageRecord
 	PriorLineageProvided bool
@@ -93,43 +89,28 @@ type PriorLineageResolutionEvent struct {
 }
 
 type Result struct {
-	SchemaVersion             string            `json:"schema_version"`
-	DigestProfile             string            `json:"digest_profile"`
-	ResultDigest              string            `json:"result_digest,omitempty"`
-	RulesVersion              string            `json:"rules_version"`
-	RulesID                   string            `json:"rules_id"`
-	PolicyVersion             string            `json:"policy_version"`
-	PolicyID                  string            `json:"policy_id"`
-	PolicyDigest              string            `json:"policy_digest,omitempty"`
-	RulesDigest               string            `json:"rules_digest,omitempty"`
-	CapReleaseCharterMismatch bool              `json:"cap_release_charter_mismatch"`
-	CapReleaseUnit            string            `json:"cap_release_unit,omitempty"`
-	CharterHash               string            `json:"charter_hash"`
-	ArtifactDigest            string            `json:"artifact_digest"`
-	ManifestDigest            string            `json:"manifest_digest"`
-	Findings                  []FindingVerdict  `json:"findings"`
-	Summary                   Summary           `json:"summary"`
-	Diagnostics               []diag.Diagnostic `json:"diagnostics,omitempty"`
+	SchemaVersion        string            `json:"schema_version"`
+	DigestProfile        string            `json:"digest_profile"`
+	ResultDigest         string            `json:"result_digest,omitempty"`
+	DecisionRulesVersion string            `json:"decision_rules_version"`
+	CharterHash          string            `json:"charter_hash"`
+	ArtifactDigest       string            `json:"artifact_digest"`
+	ManifestDigest       string            `json:"manifest_digest"`
+	Findings             []FindingVerdict  `json:"findings"`
+	Summary              Summary           `json:"summary"`
+	Diagnostics          []diag.Diagnostic `json:"diagnostics,omitempty"`
 }
 
 type Summary struct {
-	Admitted            int  `json:"admitted"`
-	Advisory            int  `json:"advisory"`
-	PendingVerification int  `json:"pending_verification"`
-	AutomaticCandidate  int  `json:"automatic_candidate"`
-	CallerDecision      int  `json:"caller_decision"`
-	None                int  `json:"none"`
-	FixpointEligible    bool `json:"fixpoint_eligible"`
+	Admitted            int `json:"admitted"`
+	Advisory            int `json:"advisory"`
+	PendingVerification int `json:"pending_verification"`
 }
 
 type summaryJSON struct {
 	Admitted            strictjson.Int `json:"admitted"`
 	Advisory            strictjson.Int `json:"advisory"`
 	PendingVerification strictjson.Int `json:"pending_verification"`
-	AutomaticCandidate  strictjson.Int `json:"automatic_candidate"`
-	CallerDecision      strictjson.Int `json:"caller_decision"`
-	None                strictjson.Int `json:"none"`
-	FixpointEligible    bool           `json:"fixpoint_eligible"`
 }
 
 func (summary *Summary) UnmarshalJSON(data []byte) error {
@@ -141,10 +122,6 @@ func (summary *Summary) UnmarshalJSON(data []byte) error {
 		Admitted:            int(decoded.Admitted),
 		Advisory:            int(decoded.Advisory),
 		PendingVerification: int(decoded.PendingVerification),
-		AutomaticCandidate:  int(decoded.AutomaticCandidate),
-		CallerDecision:      int(decoded.CallerDecision),
-		None:                int(decoded.None),
-		FixpointEligible:    decoded.FixpointEligible,
 	}
 	return nil
 }
@@ -152,16 +129,15 @@ func (summary *Summary) UnmarshalJSON(data []byte) error {
 type FindingVerdict struct {
 	FindingID string `json:"finding_id"`
 	// FindingKey and EstimatedDelta are in-memory transport only (populated in
-	// adjudicateFinding, consumed by cmd/witness when emitting `finding` ledger
-	// events). They are json:"-" so they do NOT enter the witness-adjudication-run-
-	// result-v1 wire schema or the result SemanticDigest: adding them would break
-	// strict decoding by older binaries and change the run digest (ContainsRunDigest
-	// duplicate detection). finding_digest already binds the source finding (incl.
-	// recurrence and estimated delta).
+	// adjudicateFinding and consumed by ledger emission). Attribution is persisted
+	// in run results because it is required to explain whether stack scoring was
+	// blocked. finding_digest already binds the source finding, including its
+	// attribution, recurrence, and estimated delta.
 	FindingKey         string                       `json:"-"`
 	Role               string                       `json:"role"`
 	Kind               string                       `json:"kind"`
 	Title              string                       `json:"title"`
+	Attribution        string                       `json:"attribution"`
 	SourceRoleOutput   string                       `json:"source_role_output,omitempty"`
 	FindingDigest      string                       `json:"finding_digest,omitempty"`
 	WitnessDigest      string                       `json:"witness_digest,omitempty"`
@@ -170,13 +146,88 @@ type FindingVerdict struct {
 	EffectiveSeverity  string                       `json:"effective_severity,omitempty"`
 	SeverityCap        string                       `json:"severity_cap,omitempty"`
 	Disposition        string                       `json:"disposition"`
-	ApplicationClass   string                       `json:"application_class"`
 	Reasons            []string                     `json:"reasons,omitempty"`
 	StrengthTrajectory []StrengthStep               `json:"strength_trajectory,omitempty"`
 	Execution          *ExecutionMetadata           `json:"execution,omitempty"`
 	Relay              *RelayMetadata               `json:"relay,omitempty"`
 	VerdictClass       *string                      `json:"verdict_class"`
 	Diagnostics        []diag.Diagnostic            `json:"diagnostics,omitempty"`
+}
+
+func ReadResultBytes(data []byte) (Result, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return Result{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return Result{}, diag.New(CodeUnsupportedResultSchema, "adjudication result must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != ResultSchemaVersion {
+		return Result{}, diag.New(
+			CodeUnsupportedResultSchema,
+			unsupportedSchemaVersionMessage("adjudication result", actual, ResultSchemaVersion, "witness-adjudication-run-result-v4", "after application_class fields were removed."),
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", ResultSchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	if resultCarriesRemovedFields(document) {
+		return Result{}, diag.New(
+			CodeUnsupportedResultSchema,
+			fmt.Sprintf("adjudication result carries removed application_class fields; supplied %s payload is refused and a current %s result is required.", actual, ResultSchemaVersion),
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", ResultSchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	decisionRulesVersion, _ := document["decision_rules_version"].(string)
+	if decisionRulesVersion != contracts.DecisionRulesVersion {
+		return Result{}, diag.New(
+			CodeUnsupportedResultSchema,
+			"adjudication result decision_rules_version is unsupported.",
+			diag.WithPath("/decision_rules_version"),
+			diag.WithDetail("expected", contracts.DecisionRulesVersion),
+			diag.WithDetail("actual", decisionRulesVersion),
+		)
+	}
+	return strictjson.DecodeBytes[Result](data, strictjson.DefaultMaxBytes*8)
+}
+
+func resultCarriesRemovedFields(document map[string]any) bool {
+	if _, found := document["automatic_candidate"]; found {
+		return true
+	}
+	if _, found := document["caller_decision"]; found {
+		return true
+	}
+	if _, found := document["none"]; found {
+		return true
+	}
+	summary, _ := document["summary"].(map[string]any)
+	if summary != nil {
+		if _, found := summary["automatic_candidate"]; found {
+			return true
+		}
+		if _, found := summary["caller_decision"]; found {
+			return true
+		}
+		if _, found := summary["none"]; found {
+			return true
+		}
+	}
+	findings, _ := document["findings"].([]any)
+	for _, value := range findings {
+		finding, _ := value.(map[string]any)
+		if finding == nil {
+			continue
+		}
+		if _, found := finding["application_class"]; found {
+			return true
+		}
+	}
+	return false
 }
 
 type StrengthStep struct {
@@ -222,39 +273,7 @@ func (err *ValidationError) Error() string {
 }
 
 func Run(options Options) (*Result, error) {
-	rules := options.Rules
-	if rules.SchemaVersion == "" {
-		rules = contracts.DefaultReviewRules()
-	}
-	if diagnostics := contracts.ValidateReviewRules(rules); len(diagnostics) > 0 {
-		return nil, validationError(CodeInvalidRules, diagnostics)
-	}
-	policy := options.Policy
-	if policy.SchemaVersion == "" {
-		policy = contracts.DefaultReviewPolicy()
-	}
-	if !options.PolicyCapReleaseLedgerBacked {
-		policy.CapRelease = nil
-	}
-	scopePolicy := contracts.EffectiveScopePolicy(policy)
-	if scopePolicy == contracts.ScopePolicyDeltaObligating {
-		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
-			return nil, validationError(CodeInvalidPolicy, []diag.Diagnostic{diagnostic(contracts.CodeInvalidPolicy, "delta_obligating scope policy requires review-policy-v3.", "/schema_version", map[string]any{"actual": policy.SchemaVersion, "expected": contracts.ReviewPolicyV3})})
-		}
-		if rules.SchemaVersion != contracts.ReviewRulesV3 {
-			return nil, validationError(CodeInvalidRules, []diag.Diagnostic{diagnostic(contracts.CodeInvalidRules, "delta_obligating scope policy requires review-rules-v3.", "/schema_version", map[string]any{"actual": rules.SchemaVersion, "expected": contracts.ReviewRulesV3})})
-		}
-	}
-	validationContext := policyContext(rules, policy, options.FrozenCharter)
-	policyValidation := contracts.ValidateReviewPolicy(policy, validationContext)
-	if len(policyValidation.Diagnostics) > 0 {
-		return nil, validationError(CodeInvalidPolicy, policyValidation.Diagnostics)
-	}
-	capReleaseUnit := ""
-	if policy.CapRelease != nil {
-		capReleaseUnit = policy.CapRelease.Unit
-	}
-
+	scopePolicy := changesurface.ScopePolicy(options.Manifest.ScopePolicy)
 	var global []diag.Diagnostic
 	if options.FrozenCharter == nil {
 		global = append(global, diagnostic(CodeInvalidInput, "adjudication requires a frozen Charter.", "/charter", nil))
@@ -286,23 +305,16 @@ func Run(options Options) (*Result, error) {
 	relay := indexRelay(options.Manifest)
 
 	result := &Result{
-		SchemaVersion:             ResultSchemaVersion,
-		DigestProfile:             digest.Profile,
-		RulesVersion:              rules.SchemaVersion,
-		RulesID:                   rules.RulesID,
-		PolicyVersion:             policy.SchemaVersion,
-		PolicyID:                  policy.PolicyID,
-		PolicyDigest:              validationContext.PolicyDigest,
-		RulesDigest:               validationContext.RulesDigest,
-		CapReleaseCharterMismatch: policyValidation.CapReleaseCharterMismatch,
-		CapReleaseUnit:            capReleaseUnit,
-		CharterHash:               options.Manifest.CharterHash,
-		ArtifactDigest:            options.Manifest.ArtifactDigest,
-		ManifestDigest:            manifestDigest,
-		Diagnostics:               append([]diag.Diagnostic(nil), documentDiagnostics...),
+		SchemaVersion:        ResultSchemaVersion,
+		DigestProfile:        digest.Profile,
+		DecisionRulesVersion: contracts.DecisionRulesVersion,
+		CharterHash:          options.Manifest.CharterHash,
+		ArtifactDigest:       options.Manifest.ArtifactDigest,
+		ManifestDigest:       manifestDigest,
+		Diagnostics:          append([]diag.Diagnostic(nil), documentDiagnostics...),
 	}
 	for _, finding := range loadedFindings {
-		verdict := adjudicateFinding(finding, receipts, relay, options, rules, policy, scopePolicy)
+		verdict := adjudicateFinding(finding, receipts, relay, options, scopePolicy)
 		result.Findings = append(result.Findings, verdict)
 		result.Diagnostics = append(result.Diagnostics, verdict.Diagnostics...)
 	}
@@ -379,21 +391,6 @@ func ValidatePriorLineage(records []PriorLineageRecord) []diag.Diagnostic {
 	return diagnostics
 }
 
-func policyContext(rules contracts.ReviewRules, policy contracts.ReviewPolicy, frozen *charter.FrozenCharter) *contracts.PolicyValidationContext {
-	rulesDigest, _ := contracts.ReviewRulesDigest(rules)
-	policyForDigest := policy
-	policyForDigest.CapRelease = nil
-	policyDigest, _ := contracts.ReviewPolicyDigest(policyForDigest)
-	context := &contracts.PolicyValidationContext{
-		RulesDigest:  rulesDigest,
-		PolicyDigest: policyDigest,
-	}
-	if frozen != nil {
-		context.CharterHash = frozen.CharterHash
-	}
-	return context
-}
-
 func validateFrozenCharter(frozen charter.FrozenCharter) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if frozen.SchemaVersion != charter.FrozenSchemaVersion {
@@ -458,14 +455,14 @@ func validateManifestEnvelope(manifest contracts.VerificationManifest, frozen *c
 
 func validateManifestScopePolicy(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	manifestScopePolicy := contracts.EffectiveScopePolicy(contracts.ReviewPolicy{ScopePolicy: manifest.ScopePolicy})
+	manifestScopePolicy := changesurface.ScopePolicy(manifest.ScopePolicy)
 	if manifest.ScopePolicy != "" && manifestScopePolicy != scopePolicy {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest scope_policy does not match the loaded review policy.", "/manifest/scope_policy", map[string]any{"actual": manifestScopePolicy, "expected": scopePolicy}))
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest scope_policy is unsupported.", "/manifest/scope_policy", map[string]any{"actual": manifest.ScopePolicy, "expected": scopePolicy}))
 	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ScopePolicy == "" {
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ScopePolicy == "" {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires the verification manifest to declare scope_policy.", "/manifest/scope_policy", map[string]any{"expected": scopePolicy}))
 	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface == nil && manifest.BaselinePass == nil {
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ChangeSurface == nil && manifest.BaselinePass == nil {
 		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating adjudication requires a verification manifest with a change_surface or explicit baseline_pass.", "/manifest/change_surface", map[string]any{"scope_policy": scopePolicy}))
 	}
 	return diagnostics
@@ -480,14 +477,14 @@ func validateManifestChangeSurfaceDerivation(manifest contracts.VerificationMani
 }
 
 func validateManifestExclusionChangeSurface(manifest contracts.VerificationManifest, scopePolicy string) []diag.Diagnostic {
-	if len(manifest.ExcludedFindings) == 0 {
-		return nil
-	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
-		return nil
-	}
-	diagnostics := make([]diag.Diagnostic, 0, len(manifest.ExcludedFindings))
-	for index := range manifest.ExcludedFindings {
+	var diagnostics []diag.Diagnostic
+	for index, excluded := range manifest.ExcludedFindings {
+		if excluded.Reason != contracts.ReasonOutOfDelta {
+			continue
+		}
+		if scopePolicy == changesurface.ScopePolicyDeltaObligating && manifest.ChangeSurface != nil {
+			continue
+		}
 		diagnostics = append(diagnostics, diagnostic(
 			CodeInvalidManifest,
 			"excluded findings require delta_obligating scope policy with a derived change surface.",
@@ -541,11 +538,21 @@ func validateManifestExclusionCoverage(manifest contracts.VerificationManifest, 
 		if covered.role != record.Role {
 			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding role does not match its supplied source role-output.", path+"/role", map[string]any{"actual": record.Role, "expected": covered.role, "finding_id": record.FindingID}))
 		}
-		if manifest.ChangeSurface != nil && contracts.FindingInChangeSurface(covered.finding, *manifest.ChangeSurface) {
+		if record.Reason == contracts.ReasonOutOfDelta && manifest.ChangeSurface != nil && contracts.FindingInChangeSurface(covered.finding, *manifest.ChangeSurface) {
 			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded out-of-delta finding touches the verified change surface.", path+"/finding_id", map[string]any{"finding_id": record.FindingID, "reason": record.Reason}))
 		}
 	}
 	return diagnostics
+}
+
+func unsupportedSchemaVersionMessage(artifact string, actual string, expected string, predecessor string, migration string) string {
+	if strings.TrimSpace(actual) == "" {
+		return fmt.Sprintf("%s schema_version is unsupported; a missing or unversioned schema_version is refused and %s is required.", artifact, expected)
+	}
+	if actual == predecessor && migration != "" {
+		return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required %s", artifact, actual, expected, migration)
+	}
+	return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required.", artifact, actual, expected)
 }
 
 type loadedFinding struct {
@@ -842,7 +849,7 @@ func stringMapValue(object map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, rules contracts.ReviewRules, policy contracts.ReviewPolicy, scopePolicy string) FindingVerdict {
+func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, relay relayIndex, options Options, scopePolicy string) FindingVerdict {
 	finding := item.finding
 	verdict := FindingVerdict{
 		FindingID:        finding.ID,
@@ -850,6 +857,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		Role:             item.role,
 		Kind:             finding.Kind,
 		Title:            finding.Title,
+		Attribution:      item.document.EffectiveFindingAttribution(finding),
 		SourceRoleOutput: item.sourceRoleOutput,
 		FindingDigest:    item.findingDigest,
 		WitnessDigest:    item.witnessDigest,
@@ -863,21 +871,33 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 
 	if len(item.diagnostics) > 0 {
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassNone
 		verdict.Reasons = appendValidationReasons(verdict.Reasons, item.diagnostics)
 		return verdict
 	}
 
 	if excluded, ok := manifestExcludedFinding(options.Manifest, item); ok {
 		verdict.Disposition = excluded.Disposition
-		verdict.ApplicationClass = excluded.ApplicationClass
 		verdict.Reasons = appendReason(verdict.Reasons, excluded.Reason)
 		return verdict
 	}
 
-	if scopePolicy == contracts.ScopePolicyDeltaObligating && options.Manifest.ChangeSurface != nil && !contracts.FindingInChangeSurface(finding, *options.Manifest.ChangeSurface) {
+	// Attribution is evaluated after a manifest exclusion (which is already a
+	// verified, explicit operator decision) and before change-surface scope. This
+	// gives a finding one deterministic advisory reason and avoids consuming
+	// receipt or relay verification for a finding that cannot score the stack.
+	switch verdict.Attribution {
+	case contracts.FindingAttributionPreExisting:
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassCallerDecision
+		verdict.Reasons = appendReason(verdict.Reasons, ReasonPreExisting)
+		return verdict
+	case contracts.FindingAttributionUnattributed:
+		verdict.Disposition = contracts.DispositionAdvisory
+		verdict.Reasons = appendReason(verdict.Reasons, ReasonAttributionUnattributed)
+		return verdict
+	}
+
+	if scopePolicy == changesurface.ScopePolicyDeltaObligating && options.Manifest.ChangeSurface != nil && !contracts.FindingInChangeSurface(finding, *options.Manifest.ChangeSurface) {
+		verdict.Disposition = contracts.DispositionAdvisory
 		verdict.Reasons = appendReason(verdict.Reasons, ReasonOutOfDelta)
 		return verdict
 	}
@@ -890,7 +910,6 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		case "contradicted":
 			verdict.StrengthTrajectory = append(verdict.StrengthTrajectory, StrengthStep{Step: "execution_receipt", Reason: ReasonExecutionReceiptContradicted})
 			verdict.Disposition = contracts.DispositionAdvisory
-			verdict.ApplicationClass = contracts.ApplicationClassNone
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonExecutionReceiptContradicted)
 			verdict.Diagnostics = append(verdict.Diagnostics, execution.metadata.Diagnostics...)
 			return verdict
@@ -902,10 +921,9 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		}
 	}
 
-	effective, capSeverity, capped := applySeverityCap(finding.ClaimedSeverity, currentStrength, rules)
+	effective, capSeverity, capped := applySeverityCap(finding.ClaimedSeverity, currentStrength)
 	if capSeverity == "" {
 		verdict.Disposition = contracts.DispositionAdvisory
-		verdict.ApplicationClass = contracts.ApplicationClassNone
 		verdict.Reasons = appendReason(verdict.Reasons, ReasonValidationFailed)
 		return verdict
 	}
@@ -920,7 +938,6 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 	verdict.Diagnostics = append(verdict.Diagnostics, relayResult.diagnostics...)
 	if relayResult.pending {
 		verdict.Disposition = contracts.DispositionPendingVerification
-		verdict.ApplicationClass = classifyApplication(item.role, finding, verdict.Disposition, verdict.EffectiveSeverity, options.FrozenCharter, policy)
 		verdict.Reasons = appendReason(verdict.Reasons, relayResult.reason)
 		return verdict
 	}
@@ -934,7 +951,6 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 			if currentStrength == "" {
 				verdict.StrengthTrajectory = append(verdict.StrengthTrajectory, StrengthStep{Step: "relay_result", Reason: ReasonWitnessWeakenedBelowFloor})
 				verdict.Disposition = contracts.DispositionAdvisory
-				verdict.ApplicationClass = contracts.ApplicationClassNone
 				verdict.EffectiveSeverity = ""
 				verdict.SeverityCap = ""
 				verdict.Reasons = appendReason(verdict.Reasons, ReasonWitnessWeakenedBelowFloor)
@@ -942,7 +958,7 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 			}
 			verdict.StrengthTrajectory = append(verdict.StrengthTrajectory, StrengthStep{Step: "relay_result", Strength: currentStrength, Reason: ReasonRelayWeakened})
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonRelayWeakened)
-			effective, capSeverity, capped = applySeverityCap(finding.ClaimedSeverity, currentStrength, rules)
+			effective, capSeverity, capped = applySeverityCap(finding.ClaimedSeverity, currentStrength)
 			verdict.EffectiveSeverity = effective
 			verdict.SeverityCap = capSeverity
 			if capped {
@@ -951,21 +967,18 @@ func adjudicateFinding(item loadedFinding, receipts map[string]receiptRecord, re
 		case contracts.VerdictBroken:
 			verdict.VerdictClass = relayResult.verdict.VerdictClass
 			verdict.Disposition = contracts.DispositionAdvisory
-			verdict.ApplicationClass = contracts.ApplicationClassNone
 			verdict.EffectiveSeverity = ""
 			verdict.SeverityCap = ""
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonRelayBroken)
 			return verdict
 		default:
 			verdict.Disposition = contracts.DispositionPendingVerification
-			verdict.ApplicationClass = classifyApplication(item.role, finding, verdict.Disposition, verdict.EffectiveSeverity, options.FrozenCharter, policy)
 			verdict.Reasons = appendReason(verdict.Reasons, ReasonRelayVerificationInvalid)
 			return verdict
 		}
 	}
 
 	verdict.Disposition = contracts.DispositionAdmitted
-	verdict.ApplicationClass = classifyApplication(item.role, finding, verdict.Disposition, verdict.EffectiveSeverity, options.FrozenCharter, policy)
 	return verdict
 }
 
@@ -1197,8 +1210,8 @@ func duplicateRelayBatchDiagnostics(findingID string, selectedBatchID string, ba
 	)}
 }
 
-func applySeverityCap(claimed string, strength string, rules contracts.ReviewRules) (string, string, bool) {
-	capSeverity := rules.SeverityCaps[strength]
+func applySeverityCap(claimed string, strength string) (string, string, bool) {
+	capSeverity := severityCap(strength)
 	if capSeverity == "" {
 		return "", "", false
 	}
@@ -1206,6 +1219,19 @@ func applySeverityCap(claimed string, strength string, rules contracts.ReviewRul
 		return capSeverity, capSeverity, true
 	}
 	return claimed, capSeverity, false
+}
+
+func severityCap(strength string) string {
+	switch strength {
+	case contracts.WitnessStrengthExecutable:
+		return contracts.SeverityCritical
+	case contracts.WitnessStrengthConstructed:
+		return contracts.SeverityHigh
+	case contracts.WitnessStrengthArgued:
+		return contracts.SeverityMedium
+	default:
+		return ""
+	}
 }
 
 func downgradeStrength(strength string) string {
@@ -1221,65 +1247,6 @@ func downgradeStrength(strength string) string {
 	}
 }
 
-func classifyApplication(role string, finding contracts.Finding, disposition string, severity string, frozen *charter.FrozenCharter, policy contracts.ReviewPolicy) string {
-	if disposition == contracts.DispositionAdvisory {
-		return contracts.ApplicationClassNone
-	}
-	if disposition == contracts.DispositionPendingVerification {
-		return contracts.ApplicationClassCallerDecision
-	}
-	if severity == "" {
-		return contracts.ApplicationClassNone
-	}
-	if severity == contracts.SeverityMedium || severity == contracts.SeverityLow {
-		return contracts.ApplicationClassCallerDecision
-	}
-	if role == contracts.RoleDefect && finding.SmallestSufficientRemedy.Direction == contracts.RemedyDirectionAdd {
-		if !policy.DefectAdditiveAutoApplyEnabled || policy.CapRelease == nil || frozen == nil || frozen.Charter.OperationalEnvelope == nil {
-			return contracts.ApplicationClassCallerDecision
-		}
-		productionEstimate, productionKnown := estimatedDeltaValueForUnit(finding.EstimatedDelta.Production, policy.CapRelease.Unit)
-		testEstimate, testKnown := estimatedDeltaValueForUnit(finding.EstimatedDelta.Test, policy.CapRelease.Unit)
-		if !productionKnown || !testKnown || policy.ProductionCap == nil || policy.TestCap == nil {
-			return contracts.ApplicationClassCallerDecision
-		}
-		if productionEstimate > *policy.ProductionCap || testEstimate > *policy.TestCap {
-			return contracts.ApplicationClassCallerDecision
-		}
-		return contracts.ApplicationClassAutomaticCandidate
-	}
-	if nonPositiveDelta(finding.EstimatedDelta) {
-		return contracts.ApplicationClassAutomaticCandidate
-	}
-	return contracts.ApplicationClassCallerDecision
-}
-
-func deltaKnown(delta contracts.SplitDeltaEstimate) bool {
-	return delta.Production.Status == contracts.DeltaStatusKnown && delta.Test.Status == contracts.DeltaStatusKnown
-}
-
-func estimatedDeltaValueForUnit(delta contracts.DeltaEstimate, unit string) (int, bool) {
-	if delta.Status != contracts.DeltaStatusKnown {
-		return 0, false
-	}
-	switch strings.TrimSpace(unit) {
-	case "files":
-		if !delta.FilesPresent() {
-			return 0, false
-		}
-		return delta.Files, true
-	default:
-		if !delta.LinesPresent() {
-			return 0, false
-		}
-		return delta.Lines, true
-	}
-}
-
-func nonPositiveDelta(delta contracts.SplitDeltaEstimate) bool {
-	return deltaKnown(delta) && delta.Production.Lines <= 0 && delta.Test.Lines <= 0
-}
-
 func summarize(findings []FindingVerdict) Summary {
 	var summary Summary
 	for _, finding := range findings {
@@ -1291,20 +1258,7 @@ func summarize(findings []FindingVerdict) Summary {
 		case contracts.DispositionPendingVerification:
 			summary.PendingVerification++
 		}
-		switch finding.ApplicationClass {
-		case contracts.ApplicationClassAutomaticCandidate:
-			summary.AutomaticCandidate++
-		case contracts.ApplicationClassCallerDecision:
-			summary.CallerDecision++
-		case contracts.ApplicationClassNone:
-			summary.None++
-		}
 	}
-	summary.FixpointEligible = summary.Admitted == 0 &&
-		summary.Advisory == 0 &&
-		summary.PendingVerification == 0 &&
-		summary.AutomaticCandidate == 0 &&
-		summary.CallerDecision == 0
 	return summary
 }
 

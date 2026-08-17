@@ -24,9 +24,6 @@ func TestAppendReplayRoundTripAndFilteredShow(t *testing.T) {
 		{Kind: EventKindQuestion, Payload: validQuestionEvent()},
 		{Kind: EventKindPendingVerification, Payload: validPendingVerificationEvent()},
 		{Kind: EventKindOwnerOverride, Payload: validOwnerOverrideEvent()},
-		{Kind: EventKindCapRelease, Payload: CapReleaseEvent{Release: validCapRelease()}},
-		{Kind: EventKindMeasuredDelta, Payload: validMeasuredDeltaEvent()},
-		{Kind: EventKindPolicyDecision, Payload: validPolicyDecisionEvent()},
 		{Kind: EventKindPromotion, Payload: validPromotionEvent()},
 		{Kind: EventKindAcceptUnverified, Payload: validAcceptUnverifiedEvent()},
 	}
@@ -52,19 +49,61 @@ func TestAppendReplayRoundTripAndFilteredShow(t *testing.T) {
 			t.Fatalf("record %d missing digest", index)
 		}
 	}
-	releases, err := CapReleases(replayed)
-	if err != nil {
-		t.Fatalf("CapReleases: %v", err)
-	}
-	if len(releases) != 1 || releases[0].Actor != "owner" {
-		t.Fatalf("cap releases = %#v", releases)
-	}
-	show, err := Show(path, ShowOptions{Kinds: []string{EventKindPolicyDecision}})
+	show, err := Show(path, ShowOptions{Kinds: []string{EventKindVerdict}})
 	if err != nil {
 		t.Fatalf("Show: %v", err)
 	}
-	if len(show.Records) != 1 || show.Records[0].EventKind != EventKindPolicyDecision {
+	if show.SchemaVersion != ShowSchemaVersion {
+		t.Fatalf("show schema_version = %q, want %q", show.SchemaVersion, ShowSchemaVersion)
+	}
+	if len(show.Records) != 1 || show.Records[0].EventKind != EventKindVerdict {
 		t.Fatalf("filtered show = %#v", show.Records)
+	}
+	if show.Records[0].SchemaVersion != RecordSchemaVersion {
+		t.Fatalf("shown record schema_version = %q, want %q", show.Records[0].SchemaVersion, RecordSchemaVersion)
+	}
+}
+
+func TestReadFileRejectsV3LedgerBeforeDecodingLegacyEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	legacy := Record{
+		SchemaVersion: "witness-ledger-record-v3",
+		Sequence:      1,
+		EventKind:     "removed_legacy_event",
+		Event: json.RawMessage(`{
+			"legacy": true
+		}`),
+	}
+	var err error
+	legacy.Digest, err = recordDigest(legacy)
+	if err != nil {
+		t.Fatalf("recordDigest: %v", err)
+	}
+	encoded, err := marshalRecord(legacy)
+	if err != nil {
+		t.Fatalf("marshalRecord: %v", err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ReadFile(path)
+	if err == nil {
+		t.Fatal("ReadFile accepted a v1 ledger")
+	}
+	var validation *ValidationError
+	if !errors.As(err, &validation) || len(validation.Diagnostics) != 1 {
+		t.Fatalf("error = %#v, want one explicit version diagnostic", err)
+	}
+	diagnostic := validation.Diagnostics[0]
+	if diagnostic.Code != CodeInvalidLedger || diagnostic.Path != "/records/0/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported ledger version", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want version refusal rather than field decode error", diagnostic)
+	}
+	if diagnostic.Details["actual"] != "witness-ledger-record-v3" || diagnostic.Details["expected"] != RecordSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want v3 and %s", diagnostic.Details, RecordSchemaVersion)
 	}
 }
 
@@ -96,14 +135,14 @@ func TestContainsRunDigest(t *testing.T) {
 
 func TestDigestChainTamperDetection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
-	if _, err := AppendEvent(path, EventKindMeasuredDelta, validMeasuredDeltaEvent()); err != nil {
+	if _, err := AppendEvent(path, EventKindVerdict, validVerdictEvent()); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered := strings.Replace(string(data), `"production":1`, `"production":2`, 1)
+	tampered := strings.Replace(string(data), `"finding_id":"finding-1"`, `"finding_id":"finding-2"`, 1)
 	if tampered == string(data) {
 		t.Fatal("test did not tamper ledger content")
 	}
@@ -220,18 +259,6 @@ func TestEventKindRequiredFields(t *testing.T) {
 		{name: "question", kind: EventKindQuestion, payload: QuestionEvent{FindingID: "finding-1", CharterHash: td("charter"), Statement: "Should this be a goal?"}},
 		{name: "pending verification", kind: EventKindPendingVerification, payload: PendingVerificationEvent{FindingID: "finding-1", Status: "unavailable"}},
 		{name: "owner override", kind: EventKindOwnerOverride, payload: OwnerOverrideEvent{FindingID: "finding-1", Actor: "owner"}},
-		{name: "cap release", kind: EventKindCapRelease, payload: CapReleaseEvent{Release: contracts.CapReleaseRecord{
-			Unit:          "lines",
-			ProductionCap: 1,
-			TestCap:       1,
-			Basis:         contracts.CapReleaseBasisOwnerJudgment,
-			Rationale:     "Owner accepted caps.",
-			PolicyDigest:  td("policy"),
-			RulesDigest:   td("rules"),
-			CharterHash:   td("charter"),
-		}}},
-		{name: "measured delta", kind: EventKindMeasuredDelta, payload: MeasuredDeltaEvent{Test: IntPtr(1), Unit: "lines"}},
-		{name: "policy decision", kind: EventKindPolicyDecision, payload: PolicyDecisionEvent{Allow: BoolPtr(false), PolicyID: "policy-1", PolicyDigest: td("policy"), RulesDigest: td("rules")}},
 		{name: "promotion", kind: EventKindPromotion, payload: PromotionEvent{QuestionID: "question-1", Actor: "owner", Rationale: "Promote to goal."}},
 		{name: "accept unverified", kind: EventKindAcceptUnverified, payload: AcceptUnverifiedEvent{FindingID: "finding-1", Actor: "owner", Rationale: "Risk accepted."}},
 	}
@@ -254,16 +281,13 @@ func TestEventKindRequiredFields(t *testing.T) {
 
 func validAdjudicationRunEvent() AdjudicationRunEvent {
 	return AdjudicationRunEvent{
-		RunDigest:                 td("run"),
-		ResultSchemaVersion:       "witness-adjudication-run-result-v1",
-		PolicyID:                  "policy-1",
-		PolicyDigest:              td("policy"),
-		RulesDigest:               td("rules"),
-		CharterHash:               td("charter"),
-		ArtifactDigest:            td("artifact"),
-		ManifestDigest:            td("manifest"),
-		FindingCount:              1,
-		PolicyDecisionRecordCount: 1,
+		RunDigest:            td("run"),
+		ResultSchemaVersion:  "witness-adjudication-run-result-v5",
+		DecisionRulesVersion: "witness-decision-rules-v1",
+		CharterHash:          td("charter"),
+		ArtifactDigest:       td("artifact"),
+		ManifestDigest:       td("manifest"),
+		FindingCount:         1,
 	}
 }
 
@@ -285,7 +309,6 @@ func validVerdictEvent() VerdictEvent {
 		Role:              contracts.RoleDefect,
 		Kind:              contracts.FindingKindDefect,
 		Disposition:       contracts.DispositionAdmitted,
-		ApplicationClass:  contracts.ApplicationClassCallerDecision,
 		ClaimedSeverity:   contracts.SeverityHigh,
 		EffectiveSeverity: contracts.SeverityHigh,
 		SeverityCap:       contracts.SeverityHigh,
@@ -319,45 +342,6 @@ func validOwnerOverrideEvent() OwnerOverrideEvent {
 		FindingID: "finding-1",
 		Actor:     "owner",
 		Rationale: "Owner override for this finding.",
-	}
-}
-
-func validCapRelease() contracts.CapReleaseRecord {
-	return contracts.CapReleaseRecord{
-		Unit:          "lines",
-		ProductionCap: 5,
-		TestCap:       5,
-		Basis:         contracts.CapReleaseBasisOwnerJudgment,
-		Rationale:     "Owner accepted conservative caps.",
-		Actor:         "owner",
-		PolicyDigest:  td("policy"),
-		RulesDigest:   td("rules"),
-		CharterHash:   td("charter"),
-	}
-}
-
-func validMeasuredDeltaEvent() MeasuredDeltaEvent {
-	return MeasuredDeltaEvent{
-		Production: IntPtr(1),
-		Test:       IntPtr(1),
-		Unit:       "lines",
-		FindingID:  "finding-1",
-	}
-}
-
-func validPolicyDecisionEvent() PolicyDecisionEvent {
-	return PolicyDecisionEvent{
-		RunDigest:                  td("run"),
-		Allow:                      BoolPtr(true),
-		Reasons:                    []string{"allowed"},
-		PolicyID:                   "policy-1",
-		PolicyDigest:               td("policy"),
-		RulesDigest:                td("rules"),
-		CharterHash:                td("charter"),
-		CapReleaseUnit:             UnitLines,
-		Unit:                       UnitLines,
-		PositiveCapAllowanceUsed:   true,
-		OperationalEnvelopePresent: true,
 	}
 }
 

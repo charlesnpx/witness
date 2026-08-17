@@ -26,7 +26,6 @@ import (
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/relayrun"
@@ -55,8 +54,7 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	}{
 		{stage: stagePlan},
 		{stage: stageAssemble},
-		{stage: stageAdjudicate},
-		{stage: stageMetrics, complete: true},
+		{stage: stageAdjudicate, complete: true},
 	} {
 		invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 		if err != nil {
@@ -73,6 +71,9 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	if !state.Complete {
 		t.Fatal("final pass state is not complete")
 	}
+	if len(state.Stages) != 5 {
+		t.Fatalf("stage count = %d, want 5 after metrics-stage removal", len(state.Stages))
+	}
 	for _, stage := range orderedStages {
 		if !stageComplete(state, stage) {
 			t.Fatalf("stage %s not complete in final state", stage)
@@ -80,6 +81,33 @@ func TestDriverWalkAdvancesOneStagePerInvocation(t *testing.T) {
 	}
 	if state.NextAction.Type != actionComplete {
 		t.Fatalf("next action = %s, want complete", state.NextAction.Type)
+	}
+	stateBytes, err := os.ReadFile(filepath.Join(options.StateDir, StateFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(stateBytes, []byte(`"metrics"`)) || bytes.Contains(stateBytes, []byte(`"metrics_path"`)) {
+		t.Fatalf("pass state still persists metrics fields or stage: %s", stateBytes)
+	}
+}
+
+func TestDeltaEstimatePayloadPreservesExplicitZero(t *testing.T) {
+	// An explicit zero must remain distinguishable from an omitted value in the
+	// durable finding payload, even though measured-delta comparison is gone.
+	estimate := contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown}
+	if err := estimate.UnmarshalJSON([]byte(`{"status":"known","lines":0}`)); err != nil {
+		t.Fatalf("unmarshal explicit-zero delta: %v", err)
+	}
+	payload := deltaEstimatePayload(estimate)
+	lines, ok := payload["lines"]
+	if !ok {
+		t.Fatalf("explicit-zero lines dropped from ledger payload: %#v", payload)
+	}
+	if lines != 0 {
+		t.Fatalf("lines = %v, want explicit 0", lines)
+	}
+	if _, ok := payload["files"]; ok {
+		t.Fatalf("omitted files must stay omitted: %#v", payload)
 	}
 }
 
@@ -403,17 +431,21 @@ func TestBeginResumeRejectsStateIdentityMismatch(t *testing.T) {
 	})
 }
 
-func TestResumeRejectsV1PassStateSchema(t *testing.T) {
+func TestResumeRejectsPreMetricsPassStateBeforeStageValidation(t *testing.T) {
 	stateDir := t.TempDir()
-	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), State{
-		SchemaVersion: "witness-pass-state-v1",
-		DigestProfile: digest.Profile,
-		StateDigest:   digest.Prefix + strings.Repeat("0", 64),
+	writeCanonicalForTest(t, filepath.Join(stateDir, StateFileName), map[string]any{
+		"schema_version": "witness-pass-state-v4",
+		"config": map[string]any{
+			"outputs": map[string]any{
+				"metrics_path": "metrics.json",
+			},
+		},
+		"stages": []any{map[string]any{"name": "metrics", "status": statusComplete}},
 	})
 
 	_, err := Resume(context.Background(), ResumeOptions{StateDir: stateDir})
 	if err == nil {
-		t.Fatal("resume accepted a v1 pass state")
+		t.Fatal("resume accepted a pre-metrics-removal pass state")
 	}
 	assertValidationCode(t, err, CodeStateUnsupported)
 
@@ -421,9 +453,12 @@ func TestResumeRejectsV1PassStateSchema(t *testing.T) {
 	if !errors.As(err, &validation) || len(validation.Diagnostics) == 0 {
 		t.Fatalf("error = %T, want ValidationError with diagnostics: %v", err, err)
 	}
+	if strings.Contains(validation.Diagnostics[0].Message, "unknown_json_field") || strings.Contains(validation.Diagnostics[0].Message, "unknown recorded stage") || !strings.Contains(validation.Diagnostics[0].Message, "metrics-stage removal") {
+		t.Fatalf("schema diagnostic message = %q, want explicit metrics-stage legacy refusal before stage validation", validation.Diagnostics[0].Message)
+	}
 	details := validation.Diagnostics[0].Details
-	if details["actual"] != "witness-pass-state-v1" || details["expected"] != StateSchemaVersion {
-		t.Fatalf("schema diagnostic details = %#v, want actual v1 and expected %s", details, StateSchemaVersion)
+	if details["actual"] != "witness-pass-state-v4" || details["expected"] != StateSchemaVersion {
+		t.Fatalf("schema diagnostic details = %#v, want actual v4 and expected %s", details, StateSchemaVersion)
 	}
 }
 
@@ -432,14 +467,8 @@ func TestResumeRejectsExplicitHeadManifestSnapshotMismatch(t *testing.T) {
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
 	headPath := filepath.Join(root, "head-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
 	options.HeadManifestPath = headPath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -872,14 +901,8 @@ func TestResumeRejectsSelfConsistentTamperedChangeSurface(t *testing.T) {
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
 	headPath := filepath.Join(root, "head-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
 	options.HeadManifestPath = headPath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -928,8 +951,8 @@ func TestCallerRoleOutputsDeltaActionCarriesEarlyChangeSurface(t *testing.T) {
 	if invocation.SchemaVersion != InvocationSchemaVersion {
 		t.Fatalf("schema_version = %s, want %s", invocation.SchemaVersion, InvocationSchemaVersion)
 	}
-	if action.ScopePolicy != contracts.ScopePolicyDeltaObligating {
-		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, contracts.ScopePolicyDeltaObligating)
+	if action.ScopePolicy != changesurface.ScopePolicyDeltaObligating {
+		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, changesurface.ScopePolicyDeltaObligating)
 	}
 	if action.ChangeSurfacePath == "" || !filepath.IsAbs(action.ChangeSurfacePath) {
 		t.Fatalf("change_surface_path = %q, want absolute path", action.ChangeSurfacePath)
@@ -970,21 +993,24 @@ func TestCallerRoleOutputsDeltaActionCarriesEarlyChangeSurface(t *testing.T) {
 	}
 }
 
-func TestResumeRejectsRoleOutputActionPolicyDriftBeforePlanning(t *testing.T) {
+func TestResumeRejectsTamperedRoleOutputActionChangeSurfaceBeforePlanning(t *testing.T) {
 	options, invocation, _, _ := beginDeltaRoleOutputWaitForTest(t)
-	if invocation.NextAction.ScopePolicy != contracts.ScopePolicyDeltaObligating {
-		t.Fatalf("scope_policy = %s, want %s", invocation.NextAction.ScopePolicy, contracts.ScopePolicyDeltaObligating)
+	if invocation.NextAction.ScopePolicy != changesurface.ScopePolicyDeltaObligating {
+		t.Fatalf("scope_policy = %s, want %s", invocation.NextAction.ScopePolicy, changesurface.ScopePolicyDeltaObligating)
 	}
 	writeRoleOutputsForState(t, options.StateDir, false)
 
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "whole-tree-policy"
-	policy.ScopePolicy = contracts.ScopePolicyWholeTree
-	writeCanonicalForTest(t, options.PolicyPath, policy)
+	state := readPassStateForTest(t, options.StateDir)
+	state.NextAction.ScopePolicy = changesurface.ScopePolicyWholeTree
+	state.NextAction.ChangeSurfacePath = ""
+	state.NextAction.ChangeSurfaceDigest = ""
+	if err := writeState(state); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 	if err == nil {
-		t.Fatal("resume accepted role-output files after action policy drift")
+		t.Fatal("resume accepted a tampered role-output action")
 	}
 	assertValidationCode(t, err, CodeNextActionDrift)
 	var validation *ValidationError
@@ -1000,37 +1026,15 @@ func TestResumeRejectsRoleOutputActionPolicyDriftBeforePlanning(t *testing.T) {
 	if !ok {
 		t.Fatalf("rederived details = %#v, want object", details["rederived"])
 	}
-	if persisted["scope_policy"] != contracts.ScopePolicyDeltaObligating || rederived["scope_policy"] != contracts.ScopePolicyWholeTree {
-		t.Fatalf("drift details = %#v, want delta persisted and whole-tree rederived", details)
+	if persisted["scope_policy"] != changesurface.ScopePolicyWholeTree || rederived["scope_policy"] != changesurface.ScopePolicyDeltaObligating {
+		t.Fatalf("drift details = %#v, want whole-tree persisted and delta rederived", details)
 	}
-	if strings.TrimSpace(persisted["change_surface_digest"].(string)) == "" || rederived["change_surface_digest"] != "" {
-		t.Fatalf("change-surface drift details = %#v, want persisted digest and empty rederived digest", details)
+	if persisted["change_surface_digest"] != "" || strings.TrimSpace(rederived["change_surface_digest"].(string)) == "" {
+		t.Fatalf("change-surface drift details = %#v, want empty persisted digest and a rederived digest", details)
 	}
-	state := readPassStateForTest(t, options.StateDir)
+	state = readPassStateForTest(t, options.StateDir)
 	if _, statErr := os.Stat(state.Config.Outputs.PlanPath); !os.IsNotExist(statErr) {
 		t.Fatalf("plan was written before action drift failure: %v", statErr)
-	}
-}
-
-func TestCallerRoleOutputsDeltaActionFailsWithoutDerivableChangeSurface(t *testing.T) {
-	options := newBeginOptions(t)
-	root := filepath.Dir(options.StateDir)
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
-	options.PolicyPath = policyPath
-
-	if _, err := Begin(context.Background(), options); err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	_, err := Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
-	if err == nil {
-		t.Fatal("resume emitted a delta role-output action without a derivable change surface")
-	}
-	if got := diagCode(err); got != planning.CodeMissingChangeSurface {
-		t.Fatalf("error code = %s, want %s: %v", got, planning.CodeMissingChangeSurface, err)
 	}
 }
 
@@ -1039,14 +1043,8 @@ func TestPreflightRecordIncludesEarlyChangeSurfaceInputs(t *testing.T) {
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
 	headPath := filepath.Join(root, "head-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
 	options.HeadManifestPath = headPath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -1114,8 +1112,8 @@ func TestCallerRoleOutputsWholeTreeActionOmitsChangeSurface(t *testing.T) {
 		t.Fatalf("resume preflight: %v", err)
 	}
 	action := invocation.NextAction
-	if action.ScopePolicy != contracts.ScopePolicyWholeTree {
-		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, contracts.ScopePolicyWholeTree)
+	if action.ScopePolicy != changesurface.ScopePolicyWholeTree {
+		t.Fatalf("scope_policy = %s, want %s", action.ScopePolicy, changesurface.ScopePolicyWholeTree)
 	}
 	if action.ChangeSurfacePath != "" || action.ChangeSurfaceDigest != "" {
 		t.Fatalf("whole-tree action carried change surface fields: %#v", action)
@@ -1158,7 +1156,6 @@ func TestResumeRejectsSelfConsistentTamperedAdjudicationResult(t *testing.T) {
 		t.Fatal("test pass produced no adjudication findings")
 	}
 	result.Findings[0].Disposition = contracts.DispositionAdvisory
-	result.Findings[0].ApplicationClass = contracts.ApplicationClassCallerDecision
 	result.Findings[0].Reasons = []string{"tampered"}
 	result.Summary = adjudicationSummaryForTest(result.Findings)
 	result.ResultDigest = ""
@@ -1169,19 +1166,7 @@ func TestResumeRejectsSelfConsistentTamperedAdjudicationResult(t *testing.T) {
 	result.ResultDigest = resultDigest
 	writeCanonicalForTest(t, resultPath, result)
 
-	metricsDocument, err := metrics.Run(metrics.Options{
-		LedgerPath:     state.Config.LedgerPath,
-		PreflightPath:  state.Config.Outputs.PreflightPath,
-		RunResultPaths: []string{resultPath},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeJSONFile(state.Config.Outputs.MetricsPath, metricsDocument); err != nil {
-		t.Fatal(err)
-	}
 	refreshArtifactDigestForTest(t, state, "run-result", state.Config.Outputs.RunResultPath)
-	refreshArtifactDigestForTest(t, state, "metrics", state.Config.Outputs.MetricsPath)
 	for index := range state.Stages {
 		if state.Stages[index].Name == stageAdjudicate {
 			state.Stages[index].Details["result_digest"] = result.ResultDigest
@@ -1481,10 +1466,6 @@ func TestDriverLedgerAppendsSameLineageKindsAsSharedAdjudicationService(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	effective, err := loadEffectivePolicy(stateBeforeAdjudicate.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
 	roleOutputs := make([]adjudicate.RoleOutputInput, 0, len(stateBeforeAdjudicate.Config.RoleOutputs))
 	for _, item := range stateBeforeAdjudicate.Config.RoleOutputs {
 		document, err := readRoleOutput(item.Path)
@@ -1494,15 +1475,12 @@ func TestDriverLedgerAppendsSameLineageKindsAsSharedAdjudicationService(t *testi
 		roleOutputs = append(roleOutputs, adjudicate.RoleOutputInput{Path: item.Path, Document: document})
 	}
 	service, err := RunAdjudicationService(AdjudicationOptions{
-		FrozenCharter:                frozen,
-		RoleOutputs:                  roleOutputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurface.BaseManifest,
-		HeadManifest:                 changeSurface.HeadManifest,
-		LedgerPath:                   serviceLedgerPath,
-		Rules:                        effective.Rules,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
+		FrozenCharter: frozen,
+		RoleOutputs:   roleOutputs,
+		Manifest:      manifest,
+		BaseManifest:  changeSurface.BaseManifest,
+		HeadManifest:  changeSurface.HeadManifest,
+		LedgerPath:    serviceLedgerPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1668,8 +1646,9 @@ func TestAssembleSupplementaryRelationshipsPersistFullResultOutput(t *testing.T)
 	config := Config{StateDir: stateDir}
 	applyOutputDefaults(&config)
 	result := &planning.AssembleResult{
+		SchemaVersion: planning.AssembleResultSchemaVersion,
 		Manifest: contracts.VerificationManifest{
-			SchemaVersion: contracts.VerificationManifestV4,
+			SchemaVersion: contracts.VerificationManifestV6,
 			ConsumerIdentity: map[string]any{
 				"kind": "test",
 				"id":   "pass-test",
@@ -1693,7 +1672,14 @@ func TestAssembleSupplementaryRelationshipsPersistFullResultOutput(t *testing.T)
 	if _, ok := findArtifactRecord(outputs, "assemble-result", assembleResultPath(config)); !ok {
 		t.Fatalf("assemble-result output missing from records: %#v", outputs)
 	}
-	persisted := readJSONForTest[planning.AssembleResult](t, assembleResultPath(config))
+	persistedBytes, err := os.ReadFile(assembleResultPath(config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := planning.ReadAssembleResultBytes(persistedBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(persisted.UnverifiedRelationships) != 1 {
 		t.Fatalf("unverified relationships = %#v, want persisted relationship", persisted.UnverifiedRelationships)
 	}
@@ -1789,14 +1775,25 @@ func TestRelayBatchActionCarriesBoundDigestsAndRetainedBundle(t *testing.T) {
 			{Name: stagePlan, Status: statusComplete},
 		},
 	}
-	writeCanonicalForTest(t, config.Outputs.PlanPath, planning.PlanDocument{
+	plan := planning.PlanDocument{
+		SchemaVersion:  planning.SchemaVersion,
+		DigestProfile:  digest.Profile,
+		CharterHash:    digest.RawBytes([]byte("charter-hash")),
+		ArtifactDigest: snapshotDigest,
 		Batches: []planning.BatchPlan{{
 			BatchID:      "batch-1",
 			TaskShape:    contracts.BatchTaskDefect,
 			RecipeFamily: "witness-falsify-v2",
 			BatchDigest:  batchDigest,
 		}},
-	})
+	}
+	unstampedPlan := plan
+	planDigest, err := contracts.SemanticDigest(unstampedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = planDigest
+	writeCanonicalForTest(t, config.Outputs.PlanPath, plan)
 	action, err := nextRelayBatchAction(state)
 	if err != nil {
 		t.Fatalf("nextRelayBatchAction: %v", err)
@@ -1939,17 +1936,15 @@ func TestPassResumeConsumesRecordedUnavailableRelayRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume adjudicate: %v", err)
 	}
-	assertInvocation(t, invocation, stageAdjudicate, actionWitnessCommand, false)
+	assertInvocation(t, invocation, stageAdjudicate, actionComplete, true)
 	verdict := readJSONForTest[adjudicate.Result](t, state.Config.Outputs.RunResultPath)
-	if len(verdict.Findings) != 1 || verdict.Findings[0].Disposition != contracts.DispositionPendingVerification || verdict.Summary.PendingVerification != 1 || verdict.Summary.FixpointEligible {
-		t.Fatalf("verdict = %#v, want one pending, fixpoint-ineligible finding", verdict)
+	if len(verdict.Findings) != 1 || verdict.Findings[0].Disposition != contracts.DispositionPendingVerification || verdict.Summary.PendingVerification != 1 {
+		t.Fatalf("verdict = %#v, want one pending finding", verdict)
 	}
 
-	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
-	if err != nil {
-		t.Fatalf("resume metrics: %v", err)
+	if !invocation.Complete || invocation.NextAction.Type != actionComplete {
+		t.Fatalf("adjudication invocation = %#v, want completed pass", invocation)
 	}
-	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
 }
 
 func TestRunBatchesRecordPassesConsumingBindingValidation(t *testing.T) {
@@ -2537,12 +2532,10 @@ func TestPassResumeAssemblesReadyPortableExportAfterLaunchFailure(t *testing.T) 
 	if err != nil {
 		t.Fatalf("resume adjudicate: %v", err)
 	}
-	assertInvocation(t, invocation, stageAdjudicate, actionWitnessCommand, false)
-	invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
-	if err != nil {
-		t.Fatalf("resume metrics: %v", err)
+	assertInvocation(t, invocation, stageAdjudicate, actionComplete, true)
+	if !invocation.Complete || invocation.NextAction.Type != actionComplete {
+		t.Fatalf("adjudication invocation = %#v, want completed pass", invocation)
 	}
-	assertInvocation(t, invocation, stageMetrics, actionComplete, true)
 }
 
 func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
@@ -2579,7 +2572,7 @@ func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
 		t.Fatalf("relay batches = %#v, want one not-required degraded batch", state.RelayBatches)
 	}
 
-	for _, stage := range []string{stageAssemble, stageAdjudicate, stageMetrics} {
+	for _, stage := range []string{stageAssemble, stageAdjudicate} {
 		invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 		if err != nil {
 			t.Fatalf("resume %s: %v", stage, err)
@@ -2595,15 +2588,8 @@ func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
 	if result.Summary.PendingVerification != 1 {
 		t.Fatalf("adjudication summary = %#v, want one pending verification", result.Summary)
 	}
-	metricsDocument := readJSONForTest[map[string]any](t, filepath.Join(options.StateDir, "metrics.json"))
-	pending, _ := metricsDocument["pending_verification"].(map[string]any)
-	strata, _ := pending["strata"].([]any)
-	if len(strata) != 1 {
-		t.Fatalf("metrics pending strata = %#v, want one relay_absent stratum", pending["strata"])
-	}
-	stratum, _ := strata[0].(map[string]any)
-	if stratum["backend_auth_status"] != "relay_absent" {
-		t.Fatalf("metrics stratum = %#v, want relay_absent", stratum)
+	if !invocation.Complete || invocation.NextAction.Type != actionComplete {
+		t.Fatalf("adjudication invocation = %#v, want completed degraded pass", invocation)
 	}
 }
 
@@ -3194,6 +3180,7 @@ func economyFindingForTest() contracts.Finding {
 		Title:           "Remove redundant verification branch",
 		CharterGoalIDs:  []string{"goal-1"},
 		ClaimedSeverity: contracts.SeverityMedium,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		Witness: contracts.Witness{
 			Kind:     contracts.WitnessKindEquivalence,
 			Strength: contracts.WitnessStrengthArgued,
@@ -3269,13 +3256,7 @@ func beginDeltaRoleOutputWaitForTest(t *testing.T) (BeginOptions, *Invocation, f
 	options := newBeginOptions(t)
 	root := filepath.Dir(options.StateDir)
 	basePath := filepath.Join(root, "base-manifest.json")
-	policyPath := filepath.Join(root, "policy.json")
-	policy := contracts.DefaultReviewPolicy()
-	policy.PolicyID = "delta-policy"
-	policy.ScopePolicy = contracts.ScopePolicyDeltaObligating
-	writeCanonicalForTest(t, policyPath, policy)
 	options.BaseManifestPath = basePath
-	options.PolicyPath = policyPath
 
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -3307,7 +3288,7 @@ func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {
 	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
 	for _, request := range state.Config.RoleOutputs {
 		document := contracts.RoleOutputDocument{
-			SchemaVersion:    contracts.RoleOutputV3,
+			SchemaVersion:    contracts.RoleOutputV4,
 			Role:             request.Role,
 			CharterHash:      frozen.CharterHash,
 			ArtifactDigest:   preflightResult.SnapshotDigest,
@@ -3322,6 +3303,7 @@ func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {
 				Title:           "Defect survives only with relay verification",
 				CharterGoalIDs:  []string{"goal-1"},
 				ClaimedSeverity: contracts.SeverityMedium,
+				Attribution:     contracts.FindingAttributionIntroduced,
 				Witness: contracts.Witness{
 					Kind:     contracts.WitnessKindDefect,
 					Strength: contracts.WitnessStrengthArgued,
@@ -3349,7 +3331,7 @@ func writeRoleOutputsForStateWithScopeAnchor(t *testing.T, stateDir string, path
 	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
 	for _, request := range state.Config.RoleOutputs {
 		document := contracts.RoleOutputDocument{
-			SchemaVersion:    contracts.RoleOutputV3,
+			SchemaVersion:    contracts.RoleOutputV4,
 			Role:             request.Role,
 			CharterHash:      frozen.CharterHash,
 			ArtifactDigest:   preflightResult.SnapshotDigest,
@@ -3364,6 +3346,7 @@ func writeRoleOutputsForStateWithScopeAnchor(t *testing.T, stateDir string, path
 				Title:           "Defect in changed file",
 				CharterGoalIDs:  []string{"goal-1"},
 				ClaimedSeverity: contracts.SeverityMedium,
+				Attribution:     contracts.FindingAttributionIntroduced,
 				ScopeAnchors: []contracts.ScopeAnchor{{
 					Dimension: charter.DimensionInputSurface,
 					Value:     path,
@@ -3595,7 +3578,7 @@ func runPassToCompletion(t *testing.T, options BeginOptions, withFinding bool) *
 		t.Fatalf("resume preflight: %v", err)
 	}
 	writeRoleOutputsForState(t, options.StateDir, withFinding)
-	for _, stage := range []string{stagePlan, stageAssemble, stageAdjudicate, stageMetrics} {
+	for _, stage := range []string{stagePlan, stageAssemble, stageAdjudicate} {
 		invocation, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
 		if err != nil {
 			t.Fatalf("resume %s: %v", stage, err)
@@ -3618,20 +3601,7 @@ func adjudicationSummaryForTest(findings []adjudicate.FindingVerdict) adjudicate
 		case contracts.DispositionPendingVerification:
 			summary.PendingVerification++
 		}
-		switch finding.ApplicationClass {
-		case contracts.ApplicationClassAutomaticCandidate:
-			summary.AutomaticCandidate++
-		case contracts.ApplicationClassCallerDecision:
-			summary.CallerDecision++
-		case contracts.ApplicationClassNone:
-			summary.None++
-		}
 	}
-	summary.FixpointEligible = summary.Admitted == 0 &&
-		summary.Advisory == 0 &&
-		summary.PendingVerification == 0 &&
-		summary.AutomaticCandidate == 0 &&
-		summary.CallerDecision == 0
 	return summary
 }
 
@@ -3692,10 +3662,6 @@ func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	effective, err := loadEffectivePolicy(state.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
 	roleOutputs := make([]adjudicate.RoleOutputInput, 0, len(state.Config.RoleOutputs))
 	for _, item := range state.Config.RoleOutputs {
 		document, err := readRoleOutput(item.Path)
@@ -3705,15 +3671,12 @@ func runAdjudicationServiceForState(t *testing.T, state *State, ledgerPath strin
 		roleOutputs = append(roleOutputs, adjudicate.RoleOutputInput{Path: item.Path, Document: document})
 	}
 	return RunAdjudicationService(AdjudicationOptions{
-		FrozenCharter:                frozen,
-		RoleOutputs:                  roleOutputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurface.BaseManifest,
-		HeadManifest:                 changeSurface.HeadManifest,
-		LedgerPath:                   ledgerPath,
-		Rules:                        effective.Rules,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
+		FrozenCharter: frozen,
+		RoleOutputs:   roleOutputs,
+		Manifest:      manifest,
+		BaseManifest:  changeSurface.BaseManifest,
+		HeadManifest:  changeSurface.HeadManifest,
+		LedgerPath:    ledgerPath,
 	})
 }
 

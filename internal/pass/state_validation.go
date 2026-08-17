@@ -16,7 +16,6 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
-	"github.com/charlesnpx/witness/internal/metrics"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/strictjson"
@@ -167,7 +166,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
 			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
-			{role: "policy", path: config.PolicyPath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
 			{role: "head-manifest", path: effectiveHeadManifestPathUnchecked(config), digestClass: digestClassFreezeManifest},
 		}
@@ -234,8 +232,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 		inputs := []artifactInput{
 			{role: "charter-freeze", path: config.Outputs.CharterFreezePath, digestClass: digestClassRaw()},
 			{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digestClassRaw()},
-			{role: "policy", path: config.PolicyPath, digestClass: digestClassRaw()},
-			{role: "rules", path: config.RulesPath, digestClass: digestClassRaw()},
 			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
 			{role: "prior-lineage", path: config.PriorLineagePath, digestClass: digestClassRaw()},
 			{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
@@ -245,12 +241,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			inputs = append(inputs, artifactInput{role: "role-output:" + item.Role, path: item.Path, digestClass: digestClassRaw()})
 		}
 		return inputs, []artifactInput{{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()}}, nil
-	case stageMetrics:
-		return []artifactInput{
-			{role: "preflight", path: config.Outputs.PreflightPath, digestClass: digestClassRaw()},
-			{role: "run-result", path: config.Outputs.RunResultPath, digestClass: digestClassRaw()},
-			{role: "ledger", path: config.LedgerPath, digestClass: digestClassRaw()},
-		}, []artifactInput{{role: "metrics", path: config.Outputs.MetricsPath, digestClass: digestClassRaw()}}, nil
 	default:
 		return nil, nil, nil
 	}
@@ -378,8 +368,6 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 		err = validateAssembleStageOutputs(state, artifact.Role)
 	case artifact.Role == "run-result":
 		err = validateAdjudicateOutput(state)
-	case artifact.Role == "metrics":
-		err = validateMetricsOutput(state)
 	default:
 		err = diag.New(CodeStateInvalid, "recorded pass stage output has no authoritative validator.", diag.WithDetail("role", artifact.Role))
 	}
@@ -1485,10 +1473,6 @@ func expectedPlanningResult(state *State) (*planning.Result, error) {
 	if err := validatePlanningPreflight(preflightResult); err != nil {
 		return nil, err
 	}
-	policyDocument, err := readReviewPolicy(config.PolicyPath)
-	if err != nil {
-		return nil, err
-	}
 	changeSurface, err := readDriverChangeSurfaceInput(config, config.BaselinePass)
 	if err != nil {
 		return nil, err
@@ -1509,7 +1493,6 @@ func expectedPlanningResult(state *State) (*planning.Result, error) {
 		FrozenCharter: &frozen,
 		CharterDigest: digest.RawBytes(frozenBytes),
 		RoleOutputs:   roleOutputs,
-		Policy:        policyDocument,
 		Preflight:     preflightBinding(preflightResult),
 		ChangeSurface: changeSurface,
 	})
@@ -1543,7 +1526,7 @@ func validateAssembleStageOutputs(state *State, role string) error {
 		if err != nil {
 			return err
 		}
-		actual, err := strictjson.DecodeBytes[planning.AssembleResult](data, strictjson.DefaultMaxBytes*8)
+		actual, err := planning.ReadAssembleResultBytes(data)
 		if err != nil {
 			return err
 		}
@@ -1608,12 +1591,9 @@ func validateAdjudicateOutput(state *State) error {
 	if err != nil {
 		return err
 	}
-	actual, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes*4)
+	actual, err := adjudicate.ReadResultBytes(data)
 	if err != nil {
 		return err
-	}
-	if actual.SchemaVersion != adjudicate.ResultSchemaVersion {
-		return diag.New(CodeStateInvalid, "adjudication result schema_version is unsupported.", diag.WithDetail("actual", actual.SchemaVersion), diag.WithDetail("expected", adjudicate.ResultSchemaVersion))
 	}
 	actualDigest, err := adjudicationResultDigest(actual)
 	if err != nil {
@@ -1659,23 +1639,16 @@ func expectedAdjudicationResult(state *State) (*adjudicate.Result, error) {
 			return nil, err
 		}
 	}
-	effective, err := loadEffectivePolicy(config)
-	if err != nil {
-		return nil, err
-	}
 	result, runErr := adjudicate.Run(adjudicate.Options{
-		FrozenCharter:                &frozen,
-		RoleOutputs:                  roleOutputs,
-		Manifest:                     manifest,
-		BaseManifest:                 changeSurface.BaseManifest,
-		HeadManifest:                 changeSurface.HeadManifest,
-		ReceiptOutputDir:             config.ReceiptOutputDir,
-		ReceiptHMACKeyFile:           config.ReceiptHMACKeyFile,
-		Rules:                        effective.Rules,
-		Policy:                       effective.Policy,
-		PolicyCapReleaseLedgerBacked: effective.CapRelease != nil,
-		PriorLineage:                 priorLineage,
-		PriorLineageProvided:         priorProvided,
+		FrozenCharter:        &frozen,
+		RoleOutputs:          roleOutputs,
+		Manifest:             manifest,
+		BaseManifest:         changeSurface.BaseManifest,
+		HeadManifest:         changeSurface.HeadManifest,
+		ReceiptOutputDir:     config.ReceiptOutputDir,
+		ReceiptHMACKeyFile:   config.ReceiptHMACKeyFile,
+		PriorLineage:         priorLineage,
+		PriorLineageProvided: priorProvided,
 	})
 	if runErr != nil {
 		return nil, runErr
@@ -1684,29 +1657,6 @@ func expectedAdjudicationResult(state *State) (*adjudicate.Result, error) {
 		return nil, diag.New(CodeStateInvalid, "adjudication did not produce a run result.")
 	}
 	return result, nil
-}
-
-func validateMetricsOutput(state *State) error {
-	data, err := os.ReadFile(state.Config.Outputs.MetricsPath)
-	if err != nil {
-		return err
-	}
-	actual, err := strictjson.DecodeBytes[metrics.Document](data, strictjson.DefaultMaxBytes*8)
-	if err != nil {
-		return err
-	}
-	if actual.SchemaVersion != metrics.SchemaVersion {
-		return diag.New(CodeStateInvalid, "metrics result schema_version is unsupported.", diag.WithDetail("actual", actual.SchemaVersion), diag.WithDetail("expected", metrics.SchemaVersion))
-	}
-	expected, err := metrics.Run(metrics.Options{
-		LedgerPath:     state.Config.LedgerPath,
-		PreflightPath:  state.Config.Outputs.PreflightPath,
-		RunResultPaths: []string{state.Config.Outputs.RunResultPath},
-	})
-	if err != nil {
-		return err
-	}
-	return requireSemanticMatch("metrics", actual, expected)
 }
 
 func adjudicationResultDigest(result adjudicate.Result) (string, error) {

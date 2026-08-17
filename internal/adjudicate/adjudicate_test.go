@@ -2,7 +2,7 @@ package adjudicate
 
 import (
 	"bytes"
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +11,7 @@ import (
 	"github.com/charlesnpx/witness/internal/changesurface"
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
@@ -76,7 +77,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonRecurrenceLineageUnavailable)
 	})
 
@@ -183,7 +183,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonExecutionReceiptContradicted)
 	})
 
@@ -208,7 +207,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonExecutionReceiptContradicted)
 		if got.Execution == nil || got.Execution.Reason != ReasonExecutionReceiptContradicted || got.Execution.VerificationClassification != harness.ClassificationContradictory {
 			t.Fatalf("execution metadata = %#v, want sticky contradicted classification", got.Execution)
@@ -234,6 +232,25 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertHasReason(t, got, ReasonSeverityCapped)
 	})
 
+	t.Run("introduced constructed high additive zero deltas survived relay remains admitted", func(t *testing.T) {
+		frozen := testFrozenCharter(t)
+		artifactDigest := testDigest("artifact")
+		finding := defectFinding("finding-additive-zero-delta", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+		finding.EstimatedDelta = contracts.SplitDeltaEstimate{
+			Production: contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 0, Files: 0},
+			Test:       contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 0, Files: 0},
+		}
+		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
+		finding.SmallestSufficientRemedy.Summary = "Add the missing guard."
+		result := runAdjudication(t, runInput{
+			frozen:      frozen,
+			roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})}},
+			manifest:    manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
+		})
+		got := onlyFinding(t, result)
+		assertDisposition(t, got, contracts.DispositionAdmitted)
+	})
+
 	t.Run("relay absent high severity cannot forge a clean pass", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
@@ -250,8 +267,8 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertDisposition(t, got, contracts.DispositionPendingVerification)
 		assertSeverity(t, got, contracts.SeverityHigh)
 		assertHasReason(t, got, ReasonRelayVerificationUnavailable)
-		if result.Summary.PendingVerification != 1 || result.Summary.FixpointEligible {
-			t.Fatalf("summary = %#v, want pending_verification=1 and fixpoint_eligible=false", result.Summary)
+		if result.Summary.PendingVerification != 1 {
+			t.Fatalf("summary = %#v, want pending_verification=1", result.Summary)
 		}
 	})
 
@@ -302,7 +319,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdvisory)
-		assertApplicationClass(t, got, contracts.ApplicationClassNone)
 		assertHasReason(t, got, ReasonWitnessWeakenedBelowFloor)
 	})
 
@@ -340,7 +356,7 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		assertResultHasDiagnostic(t, result, CodeDuplicateRelayBatch, "/manifest/batches")
 	})
 
-	t.Run("executable missing receipt weakened chain ends argued medium caller decision", func(t *testing.T) {
+	t.Run("executable missing receipt weakened chain ends argued medium", func(t *testing.T) {
 		frozen := testFrozenCharter(t)
 		artifactDigest := testDigest("artifact")
 		finding := defectExecutableFinding("finding-chain", contracts.SeverityCritical, executableCommand("stdout_contains=ok"))
@@ -352,7 +368,6 @@ func TestAdjudicationBranchTable(t *testing.T) {
 		})
 		got := onlyFinding(t, result)
 		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
 		assertStrengthStep(t, got, "execution_receipt", contracts.WitnessStrengthConstructed)
 		assertStrengthStep(t, got, "relay_result", contracts.WitnessStrengthArgued)
 		assertSeverity(t, got, contracts.SeverityMedium)
@@ -449,7 +464,7 @@ func TestAdjudicationEmptyInvalidRoleOutputReturnsResultAndError(t *testing.T) {
 	assertErrorHasDiagnostic(t, err, contracts.CodeInvalidRoleOutput, "/role_outputs/0/schema_version")
 }
 
-func TestApplicationClassIsIndependentFromDisposition(t *testing.T) {
+func TestAdmittedFindingsRetainTheirDisposition(t *testing.T) {
 	frozen := testFrozenCharter(t)
 	artifactDigest := testDigest("artifact")
 	defect := defectFinding("finding-caller", contracts.WitnessStrengthArgued, contracts.SeverityMedium)
@@ -473,8 +488,6 @@ func TestApplicationClassIsIndependentFromDisposition(t *testing.T) {
 	byID := findingsByID(result)
 	assertDisposition(t, byID["finding-caller"], contracts.DispositionAdmitted)
 	assertDisposition(t, byID["finding-auto"], contracts.DispositionAdmitted)
-	assertApplicationClass(t, byID["finding-caller"], contracts.ApplicationClassCallerDecision)
-	assertApplicationClass(t, byID["finding-auto"], contracts.ApplicationClassAutomaticCandidate)
 }
 
 func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
@@ -496,12 +509,9 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
 	manifest.ChangeSurface = &surface
 	manifest.ChangeSurfaceDigest = surfaceDigest
-	policyDocument := contracts.DefaultReviewPolicy()
-	policyDocument.PolicyID = "delta-policy"
-	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
 
 	result := runAdjudication(t, runInput{
 		frozen:       frozen,
@@ -509,17 +519,114 @@ func TestAdjudicationDeltaScopeRoutesOutOfDeltaFindings(t *testing.T) {
 		manifest:     manifest,
 		baseManifest: &baseManifest,
 		headManifest: &headManifest,
-		policy:       policyDocument,
 	})
 	byID := findingsByID(result)
 	assertDisposition(t, byID["in-delta"], contracts.DispositionAdmitted)
 	assertDisposition(t, byID["deleted"], contracts.DispositionAdmitted)
 	assertDisposition(t, byID["out-of-delta"], contracts.DispositionAdvisory)
-	assertApplicationClass(t, byID["out-of-delta"], contracts.ApplicationClassCallerDecision)
 	assertHasReason(t, byID["out-of-delta"], contracts.ReasonOutOfDelta)
 	if result.Summary.Advisory != 1 {
 		t.Fatalf("summary = %#v, want one advisory finding", result.Summary)
 	}
+}
+
+func TestAdjudicationFindingAttributionGate(t *testing.T) {
+	frozen := testFrozenCharter(t)
+	artifactDigest := testDigest("artifact")
+	introduced := defectFinding("introduced", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	introduced.Attribution = contracts.FindingAttributionIntroduced
+	worsened := defectFinding("worsened", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	worsened.Attribution = contracts.FindingAttributionWorsened
+	preExisting := defectExecutableFinding("pre-existing", contracts.SeverityCritical, executableCommand("stdout_contains=ok"))
+	preExisting.Attribution = contracts.FindingAttributionPreExisting
+	unattributed := defectFinding("unattributed", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	unattributed.Attribution = contracts.FindingAttributionUnattributed
+	roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{introduced, worsened, preExisting, unattributed})
+	roleOutput.SchemaVersion = contracts.RoleOutputV4
+	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{
+		survivedVerdict(t, introduced),
+		survivedVerdict(t, worsened),
+		survivedVerdict(t, preExisting),
+		survivedVerdict(t, unattributed),
+	}, nil)
+
+	result := runAdjudication(t, runInput{
+		frozen:      frozen,
+		roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		manifest:    manifest,
+	})
+	byID := findingsByID(result)
+	for _, id := range []string{"introduced", "worsened"} {
+		assertDisposition(t, byID[id], contracts.DispositionAdmitted)
+		if byID[id].Attribution != id {
+			t.Fatalf("%s attribution = %q, want %q", id, byID[id].Attribution, id)
+		}
+	}
+	assertDisposition(t, byID["pre-existing"], contracts.DispositionAdvisory)
+	assertHasReason(t, byID["pre-existing"], ReasonPreExisting)
+	assertSeverity(t, byID["pre-existing"], "")
+	if byID["pre-existing"].Execution != nil || byID["pre-existing"].Relay != nil {
+		t.Fatalf("pre-existing finding consumed verification: %#v", byID["pre-existing"])
+	}
+	assertDisposition(t, byID["unattributed"], contracts.DispositionAdvisory)
+	assertHasReason(t, byID["unattributed"], ReasonAttributionUnattributed)
+	assertSeverity(t, byID["unattributed"], "")
+	if byID["unattributed"].Relay != nil {
+		t.Fatalf("unattributed finding consumed relay verification: %#v", byID["unattributed"])
+	}
+	if result.Summary.Admitted != 2 || result.Summary.Advisory != 2 {
+		t.Fatalf("summary = %#v, want two admitted and two attribution advisories", result.Summary)
+	}
+
+	canonical, err := contracts.CanonicalBytes(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again := runAdjudication(t, runInput{
+		frozen:      frozen,
+		roleOutputs: []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		manifest:    manifest,
+	})
+	againCanonical, err := contracts.CanonicalBytes(again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(canonical, againCanonical) {
+		t.Fatalf("identical inputs produced different result bytes:\nfirst=%s\nsecond=%s", canonical, againCanonical)
+	}
+}
+
+func TestAdjudicationV3FindingIsUnattributedAndAttributionPrecedesDeltaScope(t *testing.T) {
+	frozen := testFrozenCharter(t)
+	baseManifest, headManifest, artifactDigest := adjudicationDeltaManifests(t)
+	finding := defectFinding("legacy", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/other.go"}}
+	roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
+	roleOutput.SchemaVersion = contracts.RoleOutputV3
+	roleOutput.Findings[0].Attribution = ""
+	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil)
+	surface, surfaceDigest, err := changesurface.Derive(baseManifest, headManifest, artifactDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
+	manifest.ChangeSurface = &surface
+	manifest.ChangeSurfaceDigest = surfaceDigest
+
+	result := runAdjudication(t, runInput{
+		frozen:       frozen,
+		roleOutputs:  []RoleOutputInput{{Path: "legacy.json", Document: roleOutput}},
+		manifest:     manifest,
+		baseManifest: &baseManifest,
+		headManifest: &headManifest,
+	})
+	got := onlyFinding(t, result)
+	if got.Attribution != contracts.FindingAttributionUnattributed {
+		t.Fatalf("v3 attribution = %q, want %q", got.Attribution, contracts.FindingAttributionUnattributed)
+	}
+	assertDisposition(t, got, contracts.DispositionAdvisory)
+	assertHasReason(t, got, ReasonAttributionUnattributed)
+	assertMissingReason(t, got, ReasonOutOfDelta)
 }
 
 func TestAdjudicationRederivesDeclaredChangeSurface(t *testing.T) {
@@ -538,18 +645,14 @@ func TestAdjudicationRederivesDeclaredChangeSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
 	manifest.ChangeSurface = &surface
 	manifest.ChangeSurfaceDigest = surfaceDigest
-	policyDocument := contracts.DefaultReviewPolicy()
-	policyDocument.PolicyID = "delta-policy"
-	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
 
 	result, err := Run(Options{
 		FrozenCharter: &frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 		Manifest:      manifest,
-		Policy:        policyDocument,
 		BaseManifest:  &baseManifest,
 		HeadManifest:  &headManifest,
 	})
@@ -569,7 +672,7 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 		t.Fatal(err)
 	}
 	manifest := manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil)
-	manifest.ScopePolicy = contracts.ScopePolicyDeltaObligating
+	manifest.ScopePolicy = changesurface.ScopePolicyDeltaObligating
 	manifest.BaselinePass = &changesurface.BaselinePass{
 		Declared: true,
 		Reason:   changesurface.BaselinePassReasonExplicit,
@@ -587,17 +690,11 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 		SourceRoleOutputDigest: roleOutputDigest,
 		Reason:                 contracts.ReasonOutOfDelta,
 		Disposition:            contracts.DispositionAdvisory,
-		ApplicationClass:       contracts.ApplicationClassCallerDecision,
 	}}
-	policyDocument := contracts.DefaultReviewPolicy()
-	policyDocument.PolicyID = "delta-policy"
-	policyDocument.ScopePolicy = contracts.ScopePolicyDeltaObligating
-
 	result, err := Run(Options{
 		FrozenCharter: &frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
 		Manifest:      manifest,
-		Policy:        policyDocument,
 	})
 	if err == nil {
 		t.Fatalf("Run result=%#v err=nil, want baseline-pass exclusion rejection", result)
@@ -608,116 +705,120 @@ func TestAdjudicationRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *t
 	assertErrorHasDiagnostic(t, err, CodeInvalidManifest, "/manifest/excluded_findings/0")
 }
 
-func TestAdditiveApplicationClassUsesCapReleaseUnit(t *testing.T) {
-	frozen := testFrozenCharter(t)
-	artifactDigest := testDigest("artifact")
-	productionCap := 5
-	testCap := 5
-	rules, policyDocument := filesReleasePolicy(t, frozen, productionCap, testCap)
+func TestReadResultBytesRefusesActualSchemaVersion(t *testing.T) {
+	for _, actual := range []string{
+		"witness-adjudication-run-result-v1",
+		"witness-adjudication-run-result-v2",
+		"witness-adjudication-run-result-v3",
+		"witness-adjudication-run-result-v4",
+		"",
+		"future-version",
+	} {
+		t.Run(adjudicationSchemaVersionTestName(actual), func(t *testing.T) {
+			data := []byte(`{"legacy_shape_field":true}`)
+			if actual != "" {
+				data = []byte(fmt.Sprintf(`{"schema_version":%q,"legacy_shape_field":true}`, actual))
+			}
+			_, err := ReadResultBytes(data)
+			if err == nil {
+				t.Fatalf("ReadResultBytes accepted %q", actual)
+			}
+			diagnostic := diag.FromError(err)
+			if diagnostic.Code != CodeUnsupportedResultSchema || diagnostic.Path != "/schema_version" {
+				t.Fatalf("diagnostic = %#v", diagnostic)
+			}
+			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, ResultSchemaVersion) {
+				t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+			}
+			if actual == "" {
+				if !strings.Contains(diagnostic.Message, "missing or unversioned") {
+					t.Fatalf("diagnostic = %#v, want missing-version wording", diagnostic)
+				}
+			} else if !strings.Contains(diagnostic.Message, actual) {
+				t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
+			}
+			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != ResultSchemaVersion {
+				t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
+			}
+		})
+	}
+}
 
-	t.Run("line estimate does not satisfy files release", func(t *testing.T) {
-		finding := defectFinding("finding-files-release", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
-		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
-		finding.EstimatedDelta = contracts.SplitDeltaEstimate{
-			Production: contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 1},
-			Test:       contracts.DeltaEstimate{Status: contracts.DeltaStatusKnown, Lines: 1},
+func adjudicationSchemaVersionTestName(version string) string {
+	if version == "" {
+		return "missing"
+	}
+	return version
+}
+
+func TestReadResultBytesRejectsLegacyV5RemovedFieldsBeforeStrictDecode(t *testing.T) {
+	_, err := ReadResultBytes([]byte(`{
+		"schema_version":"witness-adjudication-run-result-v5",
+		"summary":{"automatic_candidate":1},
+		"findings":[{"application_class":"automatic_candidate"}],
+		"legacy_shape_field":true
+	}`))
+	if err == nil {
+		t.Fatal("ReadResultBytes accepted a legacy v5 application-class result")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != CodeUnsupportedResultSchema || diagnostic.Path != "/schema_version" {
+		t.Fatalf("diagnostic = %#v, want explicit unsupported result schema diagnostic", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "unknown_json_field") {
+		t.Fatalf("diagnostic = %#v, want legacy-v5 refusal before strict decoding", diagnostic)
+	}
+	if !strings.Contains(diagnostic.Message, ResultSchemaVersion) {
+		t.Fatalf("diagnostic = %#v, want message to name the supplied version", diagnostic)
+	}
+	if actual, _ := diagnostic.Details["actual"].(string); actual != ResultSchemaVersion {
+		t.Fatalf("actual = %#v, want %s", diagnostic.Details["actual"], ResultSchemaVersion)
+	}
+	if expected, _ := diagnostic.Details["expected"].(string); expected != ResultSchemaVersion {
+		t.Fatalf("expected = %#v, want %s", diagnostic.Details["expected"], ResultSchemaVersion)
+	}
+}
+
+func TestDecisionRulesSeverityCaps(t *testing.T) {
+	tests := []struct {
+		strength string
+		want     string
+	}{
+		{strength: contracts.WitnessStrengthExecutable, want: contracts.SeverityCritical},
+		{strength: contracts.WitnessStrengthConstructed, want: contracts.SeverityHigh},
+		{strength: contracts.WitnessStrengthArgued, want: contracts.SeverityMedium},
+	}
+	for _, test := range tests {
+		if got := severityCap(test.strength); got != test.want {
+			t.Fatalf("severityCap(%q) = %q, want %q", test.strength, got, test.want)
 		}
-		roleOutput := roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding})
-
-		result := runAdjudication(t, runInput{
-			frozen:                       frozen,
-			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			rules:                        rules,
-			policy:                       policyDocument,
-			policyCapReleaseLedgerBacked: true,
-		})
-		got := onlyFinding(t, result)
-		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
-	})
-
-	t.Run("omitted counts do not satisfy files release", func(t *testing.T) {
-		finding := defectFinding("finding-files-release-omitted", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
-		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
-		roleOutput := roleOutputWithEstimatedDelta(t,
-			roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding}),
-			map[string]any{
-				"production": map[string]any{"status": contracts.DeltaStatusKnown},
-				"test":       map[string]any{"status": contracts.DeltaStatusKnown},
-			},
-		)
-		finding = roleOutput.Findings[0]
-
-		result := runAdjudication(t, runInput{
-			frozen:                       frozen,
-			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			rules:                        rules,
-			policy:                       policyDocument,
-			policyCapReleaseLedgerBacked: true,
-		})
-		got := onlyFinding(t, result)
-		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassCallerDecision)
-	})
-
-	t.Run("explicit files zero satisfies files release", func(t *testing.T) {
-		finding := defectFinding("finding-files-release-zero", contracts.WitnessStrengthConstructed, contracts.SeverityHigh)
-		finding.SmallestSufficientRemedy.Direction = contracts.RemedyDirectionAdd
-		roleOutput := roleOutputWithEstimatedDelta(t,
-			roleOutputFor(frozen, contracts.RoleDefect, artifactDigest, []contracts.Finding{finding}),
-			map[string]any{
-				"production": map[string]any{"status": contracts.DeltaStatusKnown, "files": 0},
-				"test":       map[string]any{"status": contracts.DeltaStatusKnown, "files": 0},
-			},
-		)
-		finding = roleOutput.Findings[0]
-
-		result := runAdjudication(t, runInput{
-			frozen:                       frozen,
-			roleOutputs:                  []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-			manifest:                     manifestWithVerdicts(t, frozen, artifactDigest, []contracts.WitnessVerdict{survivedVerdict(t, finding)}, nil),
-			rules:                        rules,
-			policy:                       policyDocument,
-			policyCapReleaseLedgerBacked: true,
-		})
-		got := onlyFinding(t, result)
-		assertDisposition(t, got, contracts.DispositionAdmitted)
-		assertApplicationClass(t, got, contracts.ApplicationClassAutomaticCandidate)
-	})
+	}
 }
 
 type runInput struct {
-	frozen                       charter.FrozenCharter
-	roleOutputs                  []RoleOutputInput
-	manifest                     contracts.VerificationManifest
-	baseManifest                 *freeze.Manifest
-	headManifest                 *freeze.Manifest
-	receiptDir                   string
-	receiptKey                   []byte
-	rules                        contracts.ReviewRules
-	policy                       contracts.ReviewPolicy
-	policyCapReleaseLedgerBacked bool
-	priorLineage                 []PriorLineageRecord
-	priorLineageProvided         bool
+	frozen               charter.FrozenCharter
+	roleOutputs          []RoleOutputInput
+	manifest             contracts.VerificationManifest
+	baseManifest         *freeze.Manifest
+	headManifest         *freeze.Manifest
+	receiptDir           string
+	receiptKey           []byte
+	priorLineage         []PriorLineageRecord
+	priorLineageProvided bool
 }
 
 func runAdjudication(t *testing.T, input runInput) *Result {
 	t.Helper()
 	result, err := Run(Options{
-		FrozenCharter:                &input.frozen,
-		RoleOutputs:                  input.roleOutputs,
-		Manifest:                     input.manifest,
-		BaseManifest:                 input.baseManifest,
-		HeadManifest:                 input.headManifest,
-		ReceiptOutputDir:             input.receiptDir,
-		ReceiptHMACKey:               input.receiptKey,
-		Rules:                        input.rules,
-		Policy:                       input.policy,
-		PolicyCapReleaseLedgerBacked: input.policyCapReleaseLedgerBacked,
-		PriorLineage:                 input.priorLineage,
-		PriorLineageProvided:         input.priorLineageProvided,
+		FrozenCharter:        &input.frozen,
+		RoleOutputs:          input.roleOutputs,
+		Manifest:             input.manifest,
+		BaseManifest:         input.baseManifest,
+		HeadManifest:         input.headManifest,
+		ReceiptOutputDir:     input.receiptDir,
+		ReceiptHMACKey:       input.receiptKey,
+		PriorLineage:         input.priorLineage,
+		PriorLineageProvided: input.priorLineageProvided,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -725,72 +826,10 @@ func runAdjudication(t *testing.T, input runInput) *Result {
 	if result.SchemaVersion != ResultSchemaVersion {
 		t.Fatalf("schema_version = %s, want %s", result.SchemaVersion, ResultSchemaVersion)
 	}
+	if result.DecisionRulesVersion != contracts.DecisionRulesVersion {
+		t.Fatalf("decision_rules_version = %s, want %s", result.DecisionRulesVersion, contracts.DecisionRulesVersion)
+	}
 	return result
-}
-
-func filesReleasePolicy(t *testing.T, frozen charter.FrozenCharter, productionCap int, testCap int) (contracts.ReviewRules, contracts.ReviewPolicy) {
-	t.Helper()
-	rules := contracts.DefaultReviewRules()
-	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV3,
-		PolicyID:                       "policy-files-release",
-		ScopePolicy:                    contracts.ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-	}
-	policyDigest, err := contracts.ReviewPolicyDigest(policyDocument)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rulesDigest, err := contracts.ReviewRulesDigest(rules)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policyDocument.CapRelease = &contracts.CapReleaseRecord{
-		Unit:          "files",
-		ProductionCap: productionCap,
-		TestCap:       testCap,
-		Basis:         contracts.CapReleaseBasisOwnerJudgment,
-		Rationale:     "Owner accepted file caps.",
-		Actor:         "owner",
-		PolicyDigest:  policyDigest,
-		RulesDigest:   rulesDigest,
-		CharterHash:   frozen.CharterHash,
-	}
-	return rules, policyDocument
-}
-
-func roleOutputWithEstimatedDelta(t *testing.T, document contracts.RoleOutputDocument, estimatedDelta map[string]any) contracts.RoleOutputDocument {
-	t.Helper()
-	data, err := contracts.CanonicalBytes(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	var value map[string]any
-	if err := decoder.Decode(&value); err != nil {
-		t.Fatal(err)
-	}
-	findings, ok := value["findings"].([]any)
-	if !ok || len(findings) != 1 {
-		t.Fatalf("findings = %#v, want exactly one finding", value["findings"])
-	}
-	finding, ok := findings[0].(map[string]any)
-	if !ok {
-		t.Fatalf("finding = %#v, want object", findings[0])
-	}
-	finding["estimated_delta"] = estimatedDelta
-	mutated, err := contracts.CanonicalBytes(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := contracts.ReadRoleOutputBytes(mutated)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return decoded
 }
 
 func onlyFinding(t *testing.T, result *Result) FindingVerdict {
@@ -861,7 +900,7 @@ func testFrozenCharter(t *testing.T) charter.FrozenCharter {
 
 func roleOutputFor(frozen charter.FrozenCharter, role string, artifactDigest string, findings []contracts.Finding) contracts.RoleOutputDocument {
 	return contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV3,
+		SchemaVersion:  contracts.RoleOutputV4,
 		Role:           role,
 		CharterHash:    frozen.CharterHash,
 		ArtifactDigest: artifactDigest,
@@ -918,6 +957,7 @@ func defectFinding(id string, strength string, severity string) contracts.Findin
 		Title:           "Defect " + id,
 		CharterGoalIDs:  []string{"goal-1"},
 		ClaimedSeverity: severity,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		ScopeAnchors:    []contracts.ScopeAnchor{{Dimension: charter.DimensionEntryPoints, EntryID: "cli"}},
 		Witness: contracts.Witness{
 			Kind:     contracts.WitnessKindDefect,
@@ -965,6 +1005,7 @@ func economyFinding(id string, severity string) contracts.Finding {
 		Title:           "Economy " + id,
 		CharterGoalIDs:  []string{"goal-1"},
 		ClaimedSeverity: severity,
+		Attribution:     contracts.FindingAttributionIntroduced,
 		Witness: contracts.Witness{
 			Kind:     contracts.WitnessKindEquivalence,
 			Strength: contracts.WitnessStrengthConstructed,
@@ -1191,7 +1232,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	exportRef := testArtifactRef("relay-root-portable-export", "batch-1", "export")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1217,7 +1258,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 func manifestWithDuplicateRelayBatches(t *testing.T, frozen charter.FrozenCharter, artifactDigest string, finding contracts.Finding) contracts.VerificationManifest {
 	t.Helper()
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1279,7 +1320,7 @@ func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contract
 func manifestWithRelayStatus(frozen charter.FrozenCharter, artifactDigest string, status string, failureReason string) contracts.VerificationManifest {
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        artifactDigest,
@@ -1316,13 +1357,6 @@ func assertDisposition(t *testing.T, finding FindingVerdict, want string) {
 	t.Helper()
 	if finding.Disposition != want {
 		t.Fatalf("%s disposition = %s, want %s; finding=%#v", finding.FindingID, finding.Disposition, want, finding)
-	}
-}
-
-func assertApplicationClass(t *testing.T, finding FindingVerdict, want string) {
-	t.Helper()
-	if finding.ApplicationClass != want {
-		t.Fatalf("%s application_class = %s, want %s; finding=%#v", finding.FindingID, finding.ApplicationClass, want, finding)
 	}
 }
 

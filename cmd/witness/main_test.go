@@ -8,7 +8,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -19,9 +21,8 @@ import (
 	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/ledger"
-	"github.com/charlesnpx/witness/internal/metrics"
+	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
-	"github.com/charlesnpx/witness/internal/policy"
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/relayrun"
@@ -83,6 +84,159 @@ func TestRouteHelp(t *testing.T) {
 	}
 }
 
+func TestPolicyCommandGroupIsAbsent(t *testing.T) {
+	output, err := captureRouteStdout(t, []string{"--help"})
+	if err != nil {
+		t.Fatalf("top-level help: %v", err)
+	}
+	if strings.Contains(output, "policy <subcommand>") {
+		t.Fatalf("top-level help still advertises policy commands: %q", output)
+	}
+
+	err = route([]string{"policy", "show"})
+	if err == nil {
+		t.Fatal("policy command group is still routed")
+	}
+	if got := diag.FromError(err).Code; got != diag.CodeInvalidCommand {
+		t.Fatalf("policy route diagnostic = %s, want %s; err=%v", got, diag.CodeInvalidCommand, err)
+	}
+}
+
+func TestMetricsCommandIsAbsent(t *testing.T) {
+	output, err := captureRouteStdout(t, []string{"--help"})
+	if err != nil {
+		t.Fatalf("top-level help: %v", err)
+	}
+	if strings.Contains(output, "metrics") {
+		t.Fatalf("top-level help still advertises metrics: %q", output)
+	}
+
+	err = route([]string{"metrics"})
+	if err == nil {
+		t.Fatal("metrics command is still routed")
+	}
+	if got := diag.FromError(err).Code; got != diag.CodeInvalidCommand {
+		t.Fatalf("metrics route diagnostic = %s, want %s; err=%v", got, diag.CodeInvalidCommand, err)
+	}
+}
+
+func TestSkillLint(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "skill", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read skill: %v", err)
+	}
+	text := string(data)
+	required := []string{
+		"Finder roles are exactly: defect, economy, and optional goal-fit.",
+		"smallest sufficient remedy",
+		"at most one test per distinct reachable behavioral partition",
+		"unreachable states",
+		"runtime guarantees",
+		"repeated internal layers",
+		"unsupported Cartesian combinations",
+		"implementation-only details",
+		"unbounded fuzz/property work",
+		"role-output document",
+		"verification-batch documents",
+		"run-result document",
+		"Operational Envelope",
+		"existing code, tests, defenses, and review machinery create no goals",
+	}
+	for _, want := range required {
+		if !strings.Contains(text, want) {
+			t.Fatalf("skill missing %q", want)
+		}
+	}
+	forbidden := []string{
+		"arbiter role",
+		"judge role",
+		"approver role",
+		"approval gate",
+		"new model role",
+	}
+	lower := strings.ToLower(text)
+	for _, phrase := range forbidden {
+		if strings.Contains(lower, phrase) {
+			t.Fatalf("skill contains forbidden role/gate addition phrase %q", phrase)
+		}
+	}
+}
+
+func TestLedgerAppendOutputsUseV2Envelopes(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantSchema    string
+		ledgerEvent   ledger.EventToAppend
+		additionalArg []string
+	}{
+		{
+			name:       "promote",
+			wantSchema: "witness-ledger-promote-v2",
+			ledgerEvent: ledger.EventToAppend{
+				Kind: ledger.EventKindQuestion,
+				Payload: ledger.QuestionEvent{
+					QuestionID:  "question-1",
+					CharterHash: digest.RawBytes([]byte("charter")),
+					Statement:   "Should this become a goal?",
+				},
+			},
+			additionalArg: []string{"-question-id", "question-1", "-goal-ref", "goal-1"},
+		},
+		{
+			name:       "accept unverified",
+			wantSchema: "witness-ledger-accept-unverified-v2",
+			ledgerEvent: ledger.EventToAppend{
+				Kind: ledger.EventKindPendingVerification,
+				Payload: ledger.PendingVerificationEvent{
+					FindingID:      "finding-1",
+					VerificationID: "pending-1",
+					Status:         contracts.DispositionPendingVerification,
+				},
+			},
+			additionalArg: []string{"-finding-id", "finding-1", "-pending-verification-id", "pending-1"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ledgerPath := filepath.Join(dir, "ledger.jsonl")
+			if _, err := ledger.AppendEvent(ledgerPath, test.ledgerEvent.Kind, test.ledgerEvent.Payload); err != nil {
+				t.Fatalf("seed ledger: %v", err)
+			}
+			out := filepath.Join(dir, "out.json")
+			args := append([]string{"ledger"}, "")
+			if test.name == "promote" {
+				args[1] = "promote"
+			} else {
+				args[1] = "accept-unverified"
+			}
+			args = append(args, "-ledger", ledgerPath)
+			args = append(args, test.additionalArg...)
+			args = append(args, "-actor", "owner", "-rationale", "explicit owner decision", "-out", out)
+			if err := route(args); err != nil {
+				t.Fatalf("route(%v): %v", args, err)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			document, ok := value.(map[string]any)
+			if !ok || document["schema_version"] != test.wantSchema {
+				t.Fatalf("output = %#v, want schema_version %q", value, test.wantSchema)
+			}
+			record, ok := document["record"].(map[string]any)
+			if !ok || record["schema_version"] != ledger.RecordSchemaVersion {
+				t.Fatalf("output record = %#v, want schema_version %q", document["record"], ledger.RecordSchemaVersion)
+			}
+		})
+	}
+}
+
 func TestRoleOutputValidate(t *testing.T) {
 	dir := t.TempDir()
 	initializedPath := filepath.Join(dir, "role-outputs", "initialized.json")
@@ -97,7 +251,7 @@ func TestRoleOutputValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read initialized role output: %v", err)
 	}
-	if initialized.SchemaVersion != contracts.RoleOutputV3 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
+	if initialized.SchemaVersion != contracts.RoleOutputV4 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
 		t.Fatalf("initialized role output = %#v, want an empty valid defect document", initialized)
 	}
 	if err := contracts.RequireValidRoleOutput(initialized, nil); err != nil {
@@ -206,7 +360,7 @@ func TestRoleOutputValidate(t *testing.T) {
 			if result, err = strictjson.DecodeBytes[roleOutputValidationResult]([]byte(output), strictjson.DefaultMaxBytes); err != nil {
 				t.Fatalf("decode validation output: %v", err)
 			}
-			if !result.OK || result.SchemaVersion != contracts.RoleOutputV3 || result.RoleOutputDigest != test.wantDigest {
+			if !result.OK || result.SchemaVersion != contracts.RoleOutputV4 || result.RoleOutputDigest != test.wantDigest {
 				t.Fatalf("validation result = %#v, want ok result with schema version and digest", result)
 			}
 		})
@@ -973,15 +1127,19 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes)
+	result, err := adjudicate.ReadResultBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.SchemaVersion != adjudicate.ResultSchemaVersion || result.ResultDigest == "" {
 		t.Fatalf("adjudication result header = %#v", result)
 	}
-	if len(result.Findings) != 1 || result.Findings[0].Disposition != contracts.DispositionAdmitted {
-		t.Fatalf("adjudication findings = %#v", result.Findings)
+	if len(result.Findings) != 1 ||
+		result.Findings[0].Attribution != contracts.FindingAttributionIntroduced ||
+		result.Findings[0].Disposition != contracts.DispositionAdmitted ||
+		len(result.Findings[0].Reasons) != 1 ||
+		result.Findings[0].Reasons[0] != adjudicate.ReasonRelaySurvived {
+		t.Fatalf("adjudication findings = %#v, want introduced admitted finding", result.Findings)
 	}
 }
 
@@ -1023,404 +1181,37 @@ func TestAdjudicationLedgerEventsEmitFindingPayloads(t *testing.T) {
 		if _, ok := event.Finding["estimated_delta"]; !ok {
 			t.Fatalf("finding payload = %#v, missing estimated_delta", event.Finding)
 		}
+		if event.Finding["attribution"] != contracts.FindingAttributionIntroduced {
+			t.Fatalf("finding payload = %#v, want introduced attribution", event.Finding)
+		}
+		reasons, ok := event.Finding["reasons"].([]string)
+		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonRelaySurvived {
+			t.Fatalf("finding payload = %#v, want relay-survived reason", event.Finding)
+		}
 	}
-	events = append(events, ledger.EventToAppend{
-		Kind: ledger.EventKindMeasuredDelta,
-		Payload: ledger.MeasuredDeltaEvent{
-			FindingID:  result.Findings[0].FindingID,
-			Production: ledger.IntPtr(1),
-			Test:       ledger.IntPtr(1),
-			Unit:       ledger.UnitLines,
-		},
-	})
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	if _, err := ledger.AppendEvents(ledgerPath, events); err != nil {
 		t.Fatalf("append ledger events: %v", err)
 	}
-	document, err := metrics.Run(metrics.Options{LedgerPath: ledgerPath})
+	records, err := ledger.ReadFile(ledgerPath)
 	if err != nil {
-		t.Fatalf("metrics Run: %v", err)
+		t.Fatalf("read ledger: %v", err)
 	}
-	if document.DeltaComparison.PairedFindings != 1 || document.DeltaComparison.Production.Equal != 1 || document.DeltaComparison.Test.Equal != 1 {
-		t.Fatalf("delta comparison = %#v, want one paired equal finding", document.DeltaComparison)
-	}
-}
-
-func TestDeltaEstimatePayloadPreservesExplicitZero(t *testing.T) {
-	// A known, explicit zero delta must survive into the finding ledger payload as
-	// lines:0, distinct from an omitted component. Dropping it (the pre-fix != 0 test)
-	// makes metrics treat the finding as estimate-missing instead of comparing zero.
-	var estimate contracts.DeltaEstimate
-	if err := json.Unmarshal([]byte(`{"status":"known","lines":0}`), &estimate); err != nil {
-		t.Fatalf("unmarshal explicit-zero delta: %v", err)
-	}
-	payload := deltaEstimatePayload(estimate)
-	lines, ok := payload["lines"]
-	if !ok {
-		t.Fatalf("explicit-zero lines dropped from ledger payload: %#v", payload)
-	}
-	if lines != 0 {
-		t.Fatalf("lines = %v, want explicit 0", lines)
-	}
-	if _, ok := payload["files"]; ok {
-		t.Fatalf("omitted files must stay omitted (distinct from explicit zero): %#v", payload)
-	}
-}
-
-func TestPolicyAndLedgerCLI(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	policyPath := filepath.Join(dir, "policy.json")
-	ledgerPath := filepath.Join(dir, "ledger.jsonl")
-	releaseOut := filepath.Join(dir, "release.json")
-	showOut := filepath.Join(dir, "policy-show.json")
-	checkOut := filepath.Join(dir, "policy-check.json")
-	ledgerShowOut := filepath.Join(dir, "ledger-show.json")
-	promoteOut := filepath.Join(dir, "promote.json")
-	acceptOut := filepath.Join(dir, "accept.json")
-
-	productionCap := 5
-	testCap := 5
-	document := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV3,
-		PolicyID:                       "policy-cli",
-		ScopePolicy:                    contracts.ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-	}
-	if err := writeCanonical(frozenPath, frozen); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeCanonical(policyPath, document); err != nil {
-		t.Fatal(err)
-	}
-	if err := route([]string{
-		"policy", "release-caps",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-production-cap", "5",
-		"-test-cap", "5",
-		"-basis", contracts.CapReleaseBasisOwnerJudgment,
-		"-rationale", "Owner accepted conservative caps.",
-		"-actor", "owner",
-		"-out", releaseOut,
-	}); err != nil {
-		t.Fatalf("policy release-caps: %v", err)
-	}
-	if err := route([]string{
-		"policy", "show",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-out", showOut,
-	}); err != nil {
-		t.Fatalf("policy show: %v", err)
-	}
-	showData, err := os.ReadFile(showOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	show, err := strictjson.DecodeBytes[policy.ShowDocument](showData, strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !show.PositiveCapAllowanceUsable || show.CapRelease == nil || show.CapReleaseCharterMismatch {
-		t.Fatalf("policy show = %#v", show)
-	}
-	if err := route([]string{
-		"policy", "check-application",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-estimated-production-lines", "1",
-		"-estimated-test-lines", "1",
-		"-measured-production", "1",
-		"-measured-test", "1",
-		"-finding-id", "finding-1",
-		"-out", checkOut,
-	}); err != nil {
-		t.Fatalf("policy check-application: %v", err)
-	}
-	checkData, err := os.ReadFile(checkOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check, err := strictjson.DecodeBytes[policyCheckApplicationOutput](checkData, strictjson.DefaultMaxBytes*2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !check.Allow || len(check.LedgerRecords) != 2 {
-		t.Fatalf("policy check output = %#v", check)
-	}
-	if err := route([]string{
-		"ledger", "promote",
-		"-ledger", ledgerPath,
-		"-question-id", "question-1",
-		"-goal-ref", "goal-cli",
-		"-actor", "owner",
-		"-rationale", "Owner promoted missing goal.",
-		"-out", promoteOut,
-	}); err != nil {
-		t.Fatalf("ledger promote: %v", err)
-	}
-	if err := route([]string{
-		"ledger", "accept-unverified",
-		"-ledger", ledgerPath,
-		"-finding-id", "finding-1",
-		"-pending-verification-id", "verify-1",
-		"-actor", "owner",
-		"-rationale", "Owner accepted pending risk.",
-		"-out", acceptOut,
-	}); err != nil {
-		t.Fatalf("ledger accept-unverified: %v", err)
-	}
-	if err := route([]string{
-		"ledger", "show",
-		"-ledger", ledgerPath,
-		"-kind", ledger.EventKindPolicyDecision,
-		"-out", ledgerShowOut,
-	}); err != nil {
-		t.Fatalf("ledger show: %v", err)
-	}
-	ledgerShowData, err := os.ReadFile(ledgerShowOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledgerShow, err := strictjson.DecodeBytes[ledger.ShowDocument](ledgerShowData, strictjson.DefaultMaxBytes*2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ledgerShow.Records) != 1 || ledgerShow.Records[0].EventKind != ledger.EventKindPolicyDecision {
-		t.Fatalf("filtered ledger show = %#v", ledgerShow)
-	}
-}
-
-func TestMetricsCLIWritesDocument(t *testing.T) {
-	outPath := filepath.Join(t.TempDir(), "metrics.json")
-	if err := route([]string{"metrics", "-out", outPath}); err != nil {
-		t.Fatalf("metrics: %v", err)
-	}
-	data, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	document, err := strictjson.DecodeBytes[metrics.Document](data, strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if document.SchemaVersion != metrics.SchemaVersion {
-		t.Fatalf("metrics schema_version = %s, want %s", document.SchemaVersion, metrics.SchemaVersion)
-	}
-	if len(document.PendingVerification.Strata) != 3 || document.PendingVerification.Strata[0].Reason != metrics.ReasonRunResultsMissing {
-		t.Fatalf("pending verification strata = %#v", document.PendingVerification.Strata)
-	}
-}
-
-func TestPolicyCheckApplicationDefaultsOmittedEstimatesUnknown(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	policyPath := filepath.Join(dir, "policy.json")
-	ledgerPath := filepath.Join(dir, "ledger.jsonl")
-	outPath := filepath.Join(dir, "policy-check.json")
-	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitLines)
-
-	if err := route([]string{
-		"policy", "check-application",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-measured-production", "1",
-		"-measured-test", "1",
-		"-finding-id", "finding-1",
-		"-out", outPath,
-	}); err != nil {
-		t.Fatalf("policy check-application: %v", err)
-	}
-	check := readPolicyCheckOutput(t, outPath)
-	if check.Allow || len(check.Reasons) != 1 || check.Reasons[0] != policy.ReasonUnknownEstimatedDelta {
-		t.Fatalf("policy check output = %#v, want unknown estimate refusal", check)
-	}
-	if check.Decision.EstimatedDelta.Production.Status != contracts.DeltaStatusUnknown || check.Decision.EstimatedDelta.Test.Status != contracts.DeltaStatusUnknown {
-		t.Fatalf("estimated delta = %#v, want unknown statuses", check.Decision.EstimatedDelta)
-	}
-}
-
-func TestPolicyCheckApplicationKnownEstimateRequiresExplicitCount(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	policyPath := filepath.Join(dir, "policy.json")
-	ledgerPath := filepath.Join(dir, "ledger.jsonl")
-	outPath := filepath.Join(dir, "policy-check.json")
-	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitLines)
-
-	err := route([]string{
-		"policy", "check-application",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-estimated-production-status", contracts.DeltaStatusKnown,
-		"-estimated-test-lines", "1",
-		"-measured-production", "1",
-		"-measured-test", "1",
-		"-finding-id", "finding-1",
-		"-out", outPath,
-	})
-	if err == nil {
-		t.Fatal("policy check-application accepted known production estimate without an explicit count")
-	}
-	if got := diag.FromError(err).Code; got != diag.CodeInvalidCommand {
-		t.Fatalf("diagnostic code = %s, want %s; err=%v", got, diag.CodeInvalidCommand, err)
-	}
-}
-
-func TestPolicyCheckApplicationRefusesReleaseUnitMismatch(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	policyPath := filepath.Join(dir, "policy.json")
-	ledgerPath := filepath.Join(dir, "ledger.jsonl")
-	outPath := filepath.Join(dir, "policy-check.json")
-	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitFiles)
-
-	err := route([]string{
-		"policy", "check-application",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-unit", policy.UnitLines,
-		"-estimated-production-lines", "1",
-		"-estimated-test-lines", "1",
-		"-measured-production", "1",
-		"-measured-test", "1",
-		"-finding-id", "finding-1",
-		"-out", outPath,
-	})
-	if err == nil {
-		t.Fatal("policy check-application accepted a release with the wrong unit")
-	}
-	var validation *policy.ValidationError
-	if !errors.As(err, &validation) {
-		t.Fatalf("error = %T, want policy.ValidationError", err)
-	}
-	if len(validation.Diagnostics) == 0 || validation.Diagnostics[0].Code != policy.CodeInvalidPolicyLoad {
-		t.Fatalf("diagnostics = %#v, want %s", validation.Diagnostics, policy.CodeInvalidPolicyLoad)
-	}
-}
-
-func TestPolicyCheckApplicationUsesLatestMatchingUnitRelease(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	policyPath := filepath.Join(dir, "policy.json")
-	ledgerPath := filepath.Join(dir, "ledger.jsonl")
-	outPath := filepath.Join(dir, "policy-check.json")
-	writeCLIAutoPolicy(t, frozen, frozenPath, policyPath, ledgerPath, policy.UnitLines)
-	if err := route([]string{
-		"policy", "release-caps",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-unit", policy.UnitFiles,
-		"-production-cap", "5",
-		"-test-cap", "5",
-		"-basis", contracts.CapReleaseBasisOwnerJudgment,
-		"-rationale", "Owner accepted conservative file caps.",
-		"-actor", "owner",
-		"-out", filepath.Join(dir, "release-files.json"),
-	}); err != nil {
-		t.Fatalf("policy release-caps files: %v", err)
-	}
-
-	if err := route([]string{
-		"policy", "check-application",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-unit", policy.UnitLines,
-		"-estimated-production-lines", "1",
-		"-estimated-test-lines", "1",
-		"-measured-production", "1",
-		"-measured-test", "1",
-		"-finding-id", "finding-1",
-		"-out", outPath,
-	}); err != nil {
-		t.Fatalf("policy check-application: %v", err)
-	}
-	check := readPolicyCheckOutput(t, outPath)
-	if !check.Allow || check.Decision.CapReleaseUnit != policy.UnitLines {
-		t.Fatalf("policy check output = %#v, want allow under latest matching lines release", check)
-	}
-}
-
-func TestAdjudicateCLIIgnoresEmbeddedCapReleaseWithoutLedger(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	roleOutput := validCLIRoleOutput(frozen)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	roleOutputPath := filepath.Join(dir, "role-output.json")
-	manifestPath := filepath.Join(dir, "manifest.json")
-	policyPath := filepath.Join(dir, "policy.json")
-	outPath := filepath.Join(dir, "adjudication.json")
-	if err := writeCanonical(frozenPath, frozen); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
-		t.Fatal(err)
-	}
-	productionCap := 5
-	testCap := 5
-	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV3,
-		PolicyID:                       "policy-cli",
-		ScopePolicy:                    contracts.ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-	}
-	release, err := policy.BuildCapRelease(policy.ReleaseInput{
-		Policy:        policyDocument,
-		Rules:         contracts.DefaultReviewRules(),
-		Unit:          policy.UnitLines,
-		ProductionCap: productionCap,
-		TestCap:       testCap,
-		Basis:         contracts.CapReleaseBasisOwnerJudgment,
-		Rationale:     "Owner accepted conservative caps.",
-		Actor:         "owner",
-		CharterHash:   frozen.CharterHash,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policyDocument.CapRelease = &release
-	if err := writeCanonical(policyPath, policyDocument); err != nil {
-		t.Fatal(err)
-	}
-
-	err = route([]string{
-		"adjudicate",
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-role-output", roleOutputPath,
-		"-manifest", manifestPath,
-		"-out", outPath,
-	})
-	if err == nil {
-		t.Fatal("adjudicate accepted an embedded cap_release without ledger provenance")
-	}
-	var validation *policy.ValidationError
-	if !errors.As(err, &validation) {
-		t.Fatalf("error = %T, want policy.ValidationError", err)
-	}
-	if len(validation.Diagnostics) == 0 || validation.Diagnostics[0].Code != policy.CodeInvalidPolicyLoad {
-		t.Fatalf("diagnostics = %#v, want %s", validation.Diagnostics, policy.CodeInvalidPolicyLoad)
+	for _, record := range records {
+		if record.EventKind != ledger.EventKindFinding {
+			continue
+		}
+		finding, err := strictjson.DecodeBytes[ledger.FindingEvent](record.Event, strictjson.DefaultMaxBytes)
+		if err != nil {
+			t.Fatalf("decode finding ledger record: %v", err)
+		}
+		if finding.Finding["attribution"] != contracts.FindingAttributionIntroduced {
+			t.Fatalf("serialized finding ledger record = %#v, want introduced attribution", finding)
+		}
+		reasons, ok := finding.Finding["reasons"].([]any)
+		if !ok || len(reasons) != 1 || reasons[0] != adjudicate.ReasonRelaySurvived {
+			t.Fatalf("serialized finding ledger record = %#v, want relay-survived reason", finding)
+		}
 	}
 }
 
@@ -1492,146 +1283,12 @@ func TestAdjudicateCLILedgerQuestionAllowsEmptyFindingID(t *testing.T) {
 	}
 }
 
-func TestAdjudicateCLILedgerBackedPolicyAppendsLineageAndRefusesDuplicate(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	roleOutput := validCLIRoleOutput(frozen)
-	roleOutput.MissingGoalQuestions = []contracts.MissingGoalQuestion{{
-		ID:               "question-1",
-		FindingID:        "finding-1",
-		Dimension:        charter.DimensionScaleBounds,
-		AnchorIndex:      0,
-		Property:         "maximum reviewed size",
-		Value:            "100 files",
-		AffectedDecision: "automatic application",
-		Statement:        "Should maximum reviewed size be an explicit goal?",
-	}}
-	frozenPath := filepath.Join(dir, "frozen.json")
-	roleOutputPath := filepath.Join(dir, "role-output.json")
-	manifestPath := filepath.Join(dir, "manifest.json")
-	policyPath := filepath.Join(dir, "policy.json")
-	ledgerPath := filepath.Join(dir, "ledger.jsonl")
-	outPath := filepath.Join(dir, "adjudication.json")
-
-	if err := writeCanonical(frozenPath, frozen); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
-		t.Fatal(err)
-	}
-	manifest := validCLIAdjudicationManifest(t, frozen, roleOutput)
-	manifest.Batches[0].Status = contracts.RecordStatusUnavailable
-	manifest.Batches[0].RelayVerdicts = nil
-	manifest.Batches[0].FailureReason = "relay unavailable"
-	if err := writeCanonical(manifestPath, manifest); err != nil {
-		t.Fatal(err)
-	}
-	productionCap := 5
-	testCap := 5
-	policyDocument := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV3,
-		PolicyID:                       "policy-cli",
-		ScopePolicy:                    contracts.ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-	}
-	if err := writeCanonical(policyPath, policyDocument); err != nil {
-		t.Fatal(err)
-	}
-	err := route([]string{
-		"adjudicate",
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-role-output", roleOutputPath,
-		"-manifest", manifestPath,
-		"-out", outPath,
-	})
-	if err == nil {
-		t.Fatal("adjudicate without ledger-backed cap release succeeded, want fail-closed error")
-	}
-	release, err := policy.BuildCapRelease(policy.ReleaseInput{
-		Policy:        policyDocument,
-		Rules:         contracts.DefaultReviewRules(),
-		Unit:          policy.UnitLines,
-		ProductionCap: productionCap,
-		TestCap:       testCap,
-		Basis:         contracts.CapReleaseBasisOwnerJudgment,
-		Rationale:     "Owner accepted conservative caps.",
-		Actor:         "owner",
-		CharterHash:   digest.RawBytes([]byte("older-charter")),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ledger.AppendEvent(ledgerPath, ledger.EventKindCapRelease, ledger.CapReleaseEvent{Release: release}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := route([]string{
-		"adjudicate",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-role-output", roleOutputPath,
-		"-manifest", manifestPath,
-		"-out", outPath,
-	}); err != nil {
-		t.Fatalf("adjudicate with ledger: %v", err)
-	}
-	resultData, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := strictjson.DecodeBytes[adjudicate.Result](resultData, strictjson.DefaultMaxBytes*2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.CapReleaseCharterMismatch {
-		t.Fatalf("cap_release_charter_mismatch = false, want true; result=%#v", result)
-	}
-	records, err := ledger.ReadFile(ledgerPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kinds := map[string]int{}
-	for _, record := range records {
-		kinds[record.EventKind]++
-	}
-	for _, kind := range []string{
-		ledger.EventKindCapRelease,
-		ledger.EventKindAdjudicationRun,
-		ledger.EventKindVerdict,
-		ledger.EventKindQuestion,
-		ledger.EventKindPendingVerification,
-		ledger.EventKindPolicyDecision,
-	} {
-		if kinds[kind] == 0 {
-			t.Fatalf("ledger event kinds = %#v, missing %s", kinds, kind)
-		}
-	}
-
-	err = route([]string{
-		"adjudicate",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-role-output", roleOutputPath,
-		"-manifest", manifestPath,
-		"-out", outPath,
-	})
-	if err == nil {
-		t.Fatal("second adjudicate succeeded, want duplicate run digest refusal")
-	}
-	if got := diag.FromError(err).Code; got != ledger.CodeDuplicateRunDigest {
-		t.Fatalf("diagnostic code = %s, want %s; err=%v", got, ledger.CodeDuplicateRunDigest, err)
-	}
-}
-
 func TestAdjudicateCLIAcceptsPriorLineage(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
 	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.SchemaVersion = contracts.RoleOutputV4
+	roleOutput.Findings[0].Attribution = contracts.FindingAttributionIntroduced
 	finding := roleOutput.Findings[0]
 	witnessDigest, err := contracts.WitnessDigest(finding.Witness)
 	if err != nil {
@@ -1683,7 +1340,7 @@ func TestAdjudicateCLIAcceptsPriorLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := strictjson.DecodeBytes[adjudicate.Result](data, strictjson.DefaultMaxBytes)
+	result, err := adjudicate.ReadResultBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1776,12 +1433,165 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 	}
 }
 
+func TestVerificationAssembleRunRelayRetainsConsumingRecordAcrossBudgetRejection(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := filepath.Join(dir, "source")
+	stateDir := filepath.Join(dir, "state")
+	manifestOut := filepath.Join(dir, "manifest-run.json")
+	charterPath := filepath.Join(dir, "charter.json")
+	relayPath := filepath.Join(dir, "fake-relay")
+	bundlePath := filepath.Join(cliTestRepoRoot(t), "testdata", "preflight", "integration-bundle-v2.fixture.json")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "app.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCanonical(charterPath, validCLICharter(t)); err != nil {
+		t.Fatal(err)
+	}
+	buildCLIFakeRelay(t, relayPath)
+
+	beginOutput, err := captureRouteStdout(t, []string{
+		"pass", "begin",
+		"-state-dir", stateDir,
+		"-charter", charterPath,
+		"-source-dir", sourceDir,
+		"-allow-non-git-source",
+		"-relay", relayPath,
+		"-integration-bundle", bundlePath,
+		"-backend", "codex",
+	})
+	if err != nil {
+		t.Fatalf("pass begin: %v", err)
+	}
+	invocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(beginOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode pass begin output: %v", err)
+	}
+	if invocation.StageRun != "freeze" {
+		t.Fatalf("pass begin invocation = %#v, want freeze", invocation)
+	}
+
+	preflightOutput, err := captureRouteStdout(t, []string{"pass", "resume", "-state-dir", stateDir})
+	if err != nil {
+		t.Fatalf("pass resume preflight: %v", err)
+	}
+	preflightInvocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(preflightOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode preflight invocation: %v", err)
+	}
+	if preflightInvocation.NextAction.Type != "caller_role_outputs" || len(preflightInvocation.NextAction.Roles) != 2 {
+		t.Fatalf("preflight invocation = %#v, want caller role outputs", preflightInvocation)
+	}
+	frozenData, err := os.ReadFile(filepath.Join(stateDir, "charter.freeze.json"))
+	if err != nil {
+		t.Fatalf("read frozen charter: %v", err)
+	}
+	frozen, err := strictjson.DecodeBytes[charter.FrozenCharter](frozenData, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatalf("decode frozen charter: %v", err)
+	}
+	for _, request := range preflightInvocation.NextAction.Roles {
+		roleOutput := validCLIRoleOutput(frozen)
+		roleOutput.CharterHash = preflightInvocation.NextAction.CharterHash
+		roleOutput.ArtifactDigest = preflightInvocation.NextAction.SnapshotDigest
+		switch request.Role {
+		case contracts.RoleDefect:
+		case contracts.RoleEconomy:
+			roleOutput.Role = contracts.RoleEconomy
+			roleOutput.Findings = []contracts.Finding{}
+		default:
+			t.Fatalf("unexpected caller role-output request: %#v", request)
+		}
+		if err := os.MkdirAll(filepath.Dir(request.Path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeCanonical(request.Path, roleOutput); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	planOutput, err := captureRouteStdout(t, []string{"pass", "resume", "-state-dir", stateDir})
+	if err != nil {
+		t.Fatalf("pass resume plan: %v", err)
+	}
+	planInvocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(planOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode plan invocation: %v", err)
+	}
+	if planInvocation.StageRun != "plan" || planInvocation.NextAction.Type != "caller_relay_batch" || planInvocation.NextAction.RelayBatch == nil {
+		t.Fatalf("plan invocation = %#v, want caller relay batch", planInvocation)
+	}
+
+	t.Setenv("WITNESS_FAKE_RELAY_FAIL_RUN", "1")
+	baseArgs := []string{
+		"verification", "assemble",
+		"-run-relay",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-state-dir", stateDir,
+		"-relay", relayPath,
+		"-backend", "codex",
+		"-charter-freeze", filepath.Join(stateDir, "charter.freeze.json"),
+		"-artifact", filepath.Join(stateDir, "source-snapshot", "manifest.json"),
+		"-compatibility-manifest", filepath.Join(stateDir, "compatibility-manifest.json"),
+		"-relay-capabilities", filepath.Join(stateDir, "relay-capabilities.json"),
+		"-integration-bundle", filepath.Join(stateDir, "integration-bundle.body.json"),
+		"-selected-contract", filepath.Join(stateDir, "integration-bundle.body.json"),
+		"-out", manifestOut,
+	}
+	if err := route(baseArgs); err != nil {
+		t.Fatalf("first verification assemble -run-relay: %v", err)
+	}
+
+	recordPath := filepath.Join(stateDir, "verification", "runs", "defect-batch-1.json")
+	before, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read first consuming run record: %v", err)
+	}
+	records, err := relayrun.ReadRunRecordsBytes(before)
+	if err != nil || len(records) != 1 || !records[0].ConsumesBatch {
+		t.Fatalf("first run record records=%#v err=%v, want one consuming record", records, err)
+	}
+
+	secondArgs := append(append([]string(nil), baseArgs...), "-named-input-budget-bytes", "1")
+	err = route(secondArgs)
+	if err == nil {
+		t.Fatal("second verification assemble -run-relay succeeded despite the retained consuming record")
+	}
+	diagnostic := diag.FromError(err)
+	if diagnostic.Code != relayrun.CodeConsumingRunRecordExists || diagnostic.Details["batch_id"] != "defect-batch-1" || !strings.Contains(diagnostic.Message, "consuming record already exists") {
+		t.Fatalf("second-run diagnostic = %#v, want clear consuming-record refusal", diagnostic)
+	}
+	after, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read retained run record after refusal: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("consuming run record changed after later budget rejection\nbefore: %s\nafter: %s", before, after)
+	}
+
+	resumeOutput, err := captureRouteStdout(t, []string{"pass", "resume", "-state-dir", stateDir})
+	if err != nil {
+		t.Fatalf("pass resume after consuming relay record: %v", err)
+	}
+	resumeInvocation, err := strictjson.DecodeBytes[passdriver.Invocation]([]byte(resumeOutput), strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatalf("decode post-record pass invocation: %v", err)
+	}
+	if resumeInvocation.StageRun != "assemble" || resumeInvocation.NextAction.Type != "witness_command" {
+		t.Fatalf("post-record pass invocation = %#v, want assembly instead of a reopened caller relay batch", resumeInvocation)
+	}
+}
+
 func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testing.T) {
 	dir := t.TempDir()
 	const sentinel = "relay-run-record-secret-sentinel"
 	frozen := validCLIFrozenCharter(t)
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.SchemaVersion = contracts.RoleOutputV4
+	roleOutput.Findings[0].Attribution = contracts.FindingAttributionIntroduced
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
 	manifestOut := filepath.Join(dir, "manifest-run-record.json")
@@ -2392,7 +2202,7 @@ func TestVerificationAssembleOutputContainsUnverifiedRelationships(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := strictjson.DecodeBytes[planning.AssembleResult](data, strictjson.DefaultMaxBytes*4)
+	result, err := planning.ReadAssembleResultBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3131,7 +2941,16 @@ func readFrozen(t *testing.T, path string) charter.FrozenCharter {
 
 func validCLIFrozenCharter(t *testing.T) charter.FrozenCharter {
 	t.Helper()
-	frozen, err := charter.Freeze(charter.Charter{
+	frozen, err := charter.Freeze(validCLICharter(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frozen
+}
+
+func validCLICharter(t *testing.T) charter.Charter {
+	t.Helper()
+	return charter.Charter{
 		SchemaVersion: charter.SchemaVersion,
 		Goals: []charter.Statement{{
 			ID:        "goal-cli",
@@ -3180,16 +2999,34 @@ func validCLIFrozenCharter(t *testing.T) charter.FrozenCharter {
 				Entries:   []charter.Entry{},
 			},
 		},
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
 	}
-	return frozen
+}
+
+func cliTestRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve CLI test source path")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("CLI test repo root %q: %v", root, err)
+	}
+	return root
+}
+
+func buildCLIFakeRelay(t *testing.T, outputPath string) {
+	t.Helper()
+	command := exec.Command("go", "build", "-o", outputPath, "./testdata/e2e/fake-relay")
+	command.Dir = cliTestRepoRoot(t)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build fake relay: %v\n%s", err, output)
+	}
 }
 
 func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocument {
 	return contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV3,
+		SchemaVersion:  contracts.RoleOutputV4,
 		Role:           contracts.RoleDefect,
 		CharterHash:    frozen.CharterHash,
 		ArtifactDigest: digest.RawBytes([]byte("artifact")),
@@ -3204,6 +3041,7 @@ func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocume
 			Title:           "CLI rejects a declared input",
 			CharterGoalIDs:  []string{"goal-cli"},
 			ClaimedSeverity: contracts.SeverityHigh,
+			Attribution:     contracts.FindingAttributionIntroduced,
 			ScopeAnchors:    []contracts.ScopeAnchor{{Dimension: charter.DimensionEntryPoints, EntryID: "cli"}},
 			Witness: contracts.Witness{
 				Kind:     contracts.WitnessKindDefect,
@@ -3238,54 +3076,6 @@ func validCLIRoleOutput(frozen charter.FrozenCharter) contracts.RoleOutputDocume
 	}
 }
 
-func writeCLIAutoPolicy(t *testing.T, frozen charter.FrozenCharter, frozenPath string, policyPath string, ledgerPath string, unit string) {
-	t.Helper()
-	productionCap := 5
-	testCap := 5
-	document := contracts.ReviewPolicy{
-		SchemaVersion:                  contracts.ReviewPolicyV3,
-		PolicyID:                       "policy-cli",
-		ScopePolicy:                    contracts.ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-	}
-	if err := writeCanonical(frozenPath, frozen); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeCanonical(policyPath, document); err != nil {
-		t.Fatal(err)
-	}
-	if err := route([]string{
-		"policy", "release-caps",
-		"-ledger", ledgerPath,
-		"-policy", policyPath,
-		"-charter-freeze", frozenPath,
-		"-unit", unit,
-		"-production-cap", "5",
-		"-test-cap", "5",
-		"-basis", contracts.CapReleaseBasisOwnerJudgment,
-		"-rationale", "Owner accepted conservative caps.",
-		"-actor", "owner",
-		"-out", filepath.Join(filepath.Dir(policyPath), "release-"+unit+".json"),
-	}); err != nil {
-		t.Fatalf("policy release-caps: %v", err)
-	}
-}
-
-func readPolicyCheckOutput(t *testing.T, path string) policyCheckApplicationOutput {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := strictjson.DecodeBytes[policyCheckApplicationOutput](data, strictjson.DefaultMaxBytes*2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return output
-}
-
 func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, roleOutput contracts.RoleOutputDocument) contracts.VerificationManifest {
 	t.Helper()
 	finding := roleOutput.Findings[0]
@@ -3310,7 +3100,7 @@ func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, ro
 	batchRef := artifactRef("verification-batch", "batch-1", digest.RawBytes([]byte("batch")))
 	exportRef := artifactRef("relay-root-portable-export", "batch-1", digest.RawBytes([]byte("export")))
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV4,
+		SchemaVersion:         contracts.VerificationManifestV6,
 		PlanDigest:            digest.RawBytes([]byte("plan")),
 		CharterHash:           frozen.CharterHash,
 		ArtifactDigest:        roleOutput.ArtifactDigest,
@@ -3350,6 +3140,9 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 			"retention_kind":  "compatibility-manifest",
 			"retention_scope": "test",
 		}
+	}
+	if strings.HasPrefix(name, "bundle") {
+		value = validCLIIntegrationBundle()
 	}
 	if err := writeCanonical(path, value); err != nil {
 		t.Fatal(err)
@@ -3447,7 +3240,6 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 	t.Helper()
 	suffix := strings.TrimPrefix(compatibilityName, "compatibility")
 	capabilitiesName := "capabilities" + suffix
-	bundleName := "bundle" + suffix
 	capabilities := map[string]bool{}
 	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
 		capabilities[requirement.Key] = true
@@ -3489,7 +3281,7 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 		DigestProfile:           digest.Profile,
 		Capabilities:            capabilities,
 		CapabilitiesDigest:      cliWrittenCanonicalDigest(t, map[string]any{"name": capabilitiesName}),
-		IntegrationBundleDigest: cliSemanticDigest(t, map[string]any{"name": bundleName}),
+		IntegrationBundleDigest: cliSemanticDigest(t, validCLIIntegrationBundle()),
 		SelectedContracts:       selectedContracts,
 		RecipePlans:             recipePlans,
 		CompileReports:          compileReports,
@@ -3498,6 +3290,57 @@ func validCLICompatibility(t *testing.T, compatibilityName string) contracts.Rel
 			{Backend: "claude", Status: "available"},
 		},
 		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
+	}
+}
+
+func validCLIIntegrationBundle() map[string]any {
+	return map[string]any{
+		"schema_version": "relay-integration-bundle-v2",
+		"id":             "witness/cli-fixture-v1",
+		"contracts": map[string]any{
+			"witnessed-review/witness-falsification-v2": validCLIIntegrationContract(),
+			"witnessed-review/economy-equivalence-v2":   validCLIIntegrationContract(),
+		},
+	}
+}
+
+func validCLIIntegrationContract() map[string]any {
+	return map[string]any{
+		"turns": []any{
+			map[string]any{"participant_turn": 1, "slot": "slot_0", "instructions": "Present the filed witness using only bound inputs."},
+			map[string]any{"participant_turn": 2, "slot": "slot_1", "instructions": "Challenge the filed witness without introducing new evidence."},
+			map[string]any{"participant_turn": 3, "slot": "slot_0", "instructions": "Answer the challenge using only bound inputs."},
+			map[string]any{"participant_turn": 4, "slot": "slot_1", "instructions": "State remaining objections to the filed witness."},
+		},
+		"reducer": map[string]any{
+			"instructions": "Return one JSON object that conforms to the result schema.",
+		},
+		"prompt_context": map[string]any{
+			"participant_transcript": "complete",
+			"facilitator_ledger":     "trace_only",
+		},
+		"inputs": map[string]any{
+			"artifact": map[string]any{"required": false, "cardinality": "many", "max_bytes": 1048576},
+			"charter": map[string]any{
+				"required":    true,
+				"cardinality": "one",
+				"media_type":  "application/json",
+				"max_bytes":   262144,
+				"schema":      map[string]any{"type": "object"},
+			},
+			"findings": map[string]any{
+				"required":    true,
+				"cardinality": "one",
+				"media_type":  "application/json",
+				"max_bytes":   262144,
+				"schema":      map[string]any{"type": "object"},
+			},
+		},
+		"result": map[string]any{
+			"transport":  "json",
+			"schema":     map[string]any{"type": "object"},
+			"assertions": []any{},
+		},
 	}
 }
 

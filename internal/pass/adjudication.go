@@ -17,20 +17,17 @@ import (
 )
 
 type AdjudicationOptions struct {
-	FrozenCharter                charter.FrozenCharter
-	RoleOutputs                  []adjudicate.RoleOutputInput
-	Manifest                     contracts.VerificationManifest
-	BaseManifest                 *freeze.Manifest
-	HeadManifest                 *freeze.Manifest
-	LedgerPath                   string
-	ReceiptOutputDir             string
-	ReceiptHMACKeyFile           string
-	Rules                        contracts.ReviewRules
-	Policy                       contracts.ReviewPolicy
-	PolicyCapReleaseLedgerBacked bool
-	PriorLineage                 []adjudicate.PriorLineageRecord
-	PriorLineageProvided         bool
-	DriverResumeMode             bool
+	FrozenCharter        charter.FrozenCharter
+	RoleOutputs          []adjudicate.RoleOutputInput
+	Manifest             contracts.VerificationManifest
+	BaseManifest         *freeze.Manifest
+	HeadManifest         *freeze.Manifest
+	LedgerPath           string
+	ReceiptOutputDir     string
+	ReceiptHMACKeyFile   string
+	PriorLineage         []adjudicate.PriorLineageRecord
+	PriorLineageProvided bool
+	DriverResumeMode     bool
 }
 
 type AdjudicationServiceResult struct {
@@ -41,18 +38,15 @@ type AdjudicationServiceResult struct {
 
 func RunAdjudicationService(options AdjudicationOptions) (AdjudicationServiceResult, error) {
 	result, runErr := adjudicate.Run(adjudicate.Options{
-		FrozenCharter:                &options.FrozenCharter,
-		RoleOutputs:                  options.RoleOutputs,
-		Manifest:                     options.Manifest,
-		BaseManifest:                 options.BaseManifest,
-		HeadManifest:                 options.HeadManifest,
-		ReceiptOutputDir:             options.ReceiptOutputDir,
-		ReceiptHMACKeyFile:           options.ReceiptHMACKeyFile,
-		Rules:                        options.Rules,
-		Policy:                       options.Policy,
-		PolicyCapReleaseLedgerBacked: options.PolicyCapReleaseLedgerBacked,
-		PriorLineage:                 options.PriorLineage,
-		PriorLineageProvided:         options.PriorLineageProvided,
+		FrozenCharter:        &options.FrozenCharter,
+		RoleOutputs:          options.RoleOutputs,
+		Manifest:             options.Manifest,
+		BaseManifest:         options.BaseManifest,
+		HeadManifest:         options.HeadManifest,
+		ReceiptOutputDir:     options.ReceiptOutputDir,
+		ReceiptHMACKeyFile:   options.ReceiptHMACKeyFile,
+		PriorLineage:         options.PriorLineage,
+		PriorLineageProvided: options.PriorLineageProvided,
 	})
 	service := AdjudicationServiceResult{Result: result, RunErr: runErr}
 	if result == nil {
@@ -233,12 +227,6 @@ func lineageRecordRunDigest(record ledger.Record) (string, error) {
 			return "", err
 		}
 		return event.RunDigest, nil
-	case ledger.EventKindPolicyDecision:
-		event, err := strictjson.DecodeBytes[ledger.PolicyDecisionEvent](record.Event, strictjson.DefaultMaxBytes*8)
-		if err != nil {
-			return "", err
-		}
-		return event.RunDigest, nil
 	default:
 		return "", nil
 	}
@@ -249,21 +237,15 @@ func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 	events := []ledger.EventToAppend{{
 		Kind: ledger.EventKindAdjudicationRun,
 		Payload: ledger.AdjudicationRunEvent{
-			RunDigest:                 result.ResultDigest,
-			ResultSchemaVersion:       result.SchemaVersion,
-			PolicyID:                  result.PolicyID,
-			PolicyDigest:              result.PolicyDigest,
-			RulesDigest:               result.RulesDigest,
-			CharterHash:               result.CharterHash,
-			ArtifactDigest:            result.ArtifactDigest,
-			ManifestDigest:            result.ManifestDigest,
-			CapReleaseCharterMismatch: result.CapReleaseCharterMismatch,
-			FindingCount:              len(result.Findings),
-			PendingVerificationCount:  result.Summary.PendingVerification,
-			AutomaticCandidateCount:   result.Summary.AutomaticCandidate,
-			CallerDecisionCount:       result.Summary.CallerDecision,
-			PolicyDecisionRecordCount: len(result.Findings),
-			MissingGoalQuestionCount:  len(questions),
+			RunDigest:                result.ResultDigest,
+			ResultSchemaVersion:      result.SchemaVersion,
+			DecisionRulesVersion:     result.DecisionRulesVersion,
+			CharterHash:              result.CharterHash,
+			ArtifactDigest:           result.ArtifactDigest,
+			ManifestDigest:           result.ManifestDigest,
+			FindingCount:             len(result.Findings),
+			PendingVerificationCount: result.Summary.PendingVerification,
+			MissingGoalQuestionCount: len(questions),
 		},
 	}}
 	for _, finding := range result.Findings {
@@ -286,7 +268,6 @@ func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 				Role:              finding.Role,
 				Kind:              finding.Kind,
 				Disposition:       finding.Disposition,
-				ApplicationClass:  finding.ApplicationClass,
 				ClaimedSeverity:   finding.ClaimedSeverity,
 				EffectiveSeverity: finding.EffectiveSeverity,
 				SeverityCap:       finding.SeverityCap,
@@ -325,28 +306,6 @@ func AdjudicationLedgerEvents(result *adjudicate.Result, inputs []adjudicate.Rol
 				FindingID:      finding.FindingID,
 				VerificationID: pendingVerificationID(result.ResultDigest, finding.FindingID),
 				Status:         finding.Disposition,
-			},
-		})
-	}
-	operationalEnvelopePresent := frozen.Charter.OperationalEnvelope != nil
-	for _, finding := range result.Findings {
-		allow := finding.ApplicationClass == contracts.ApplicationClassAutomaticCandidate
-		events = append(events, ledger.EventToAppend{
-			Kind: ledger.EventKindPolicyDecision,
-			Payload: ledger.PolicyDecisionEvent{
-				RunDigest:                  result.ResultDigest,
-				Allow:                      ledger.BoolPtr(allow),
-				Reasons:                    policyDecisionReasons(finding),
-				PolicyID:                   result.PolicyID,
-				PolicyDigest:               result.PolicyDigest,
-				RulesDigest:                result.RulesDigest,
-				CharterHash:                result.CharterHash,
-				CapReleaseCharterMismatch:  result.CapReleaseCharterMismatch,
-				CapReleaseUnit:             result.CapReleaseUnit,
-				PositiveCapAllowanceUsed:   false,
-				FindingID:                  finding.FindingID,
-				ApplicationClass:           finding.ApplicationClass,
-				OperationalEnvelopePresent: operationalEnvelopePresent,
 			},
 		})
 	}
@@ -411,18 +370,10 @@ func pendingVerificationID(runDigest string, findingID string) string {
 	return "pending-" + findingID + "-" + suffix
 }
 
-func policyDecisionReasons(finding adjudicate.FindingVerdict) []string {
-	if len(finding.Reasons) > 0 {
-		return append([]string(nil), finding.Reasons...)
-	}
-	if finding.ApplicationClass != "" {
-		return []string{finding.ApplicationClass}
-	}
-	return []string{"adjudicated"}
-}
-
 func findingPayloadForLedger(finding adjudicate.FindingVerdict) map[string]any {
 	return map[string]any{
+		"attribution": finding.Attribution,
+		"reasons":     append([]string(nil), finding.Reasons...),
 		"estimated_delta": map[string]any{
 			"production": deltaEstimatePayload(finding.EstimatedDelta.Production),
 			"test":       deltaEstimatePayload(finding.EstimatedDelta.Test),

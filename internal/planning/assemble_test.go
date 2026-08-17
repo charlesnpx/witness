@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"github.com/charlesnpx/witness/internal/changesurface"
 	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
+	"github.com/charlesnpx/witness/internal/diag"
 	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/strictjson"
 )
@@ -838,7 +840,6 @@ func TestAssembleRederivesDeclaredChangeSurface(t *testing.T) {
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
@@ -885,7 +886,6 @@ func TestAssembleDeclaredChangeSurfaceRequiresDerivationManifests(t *testing.T) 
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
@@ -915,7 +915,6 @@ func TestAssembleRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *testi
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", RefID: "defect-json", Document: roleOutput}},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     planningTestPreflightBinding(t),
 		ChangeSurface: ChangeSurfaceInput{BaselinePass: true},
 	})
@@ -933,7 +932,6 @@ func TestAssembleRejectsBaselinePassExcludedFindingWithoutChangeSurface(t *testi
 		SourceRoleOutputRef:    batch.Plan.SourceRoleOutputRef,
 		SourceRoleOutputDigest: batch.Plan.SourceRoleOutputDigest,
 		Disposition:            contracts.DispositionAdvisory,
-		ApplicationClass:       contracts.ApplicationClassCallerDecision,
 		Reason:                 contracts.ReasonOutOfDelta,
 	}}
 	if err := stampPlanDigest(&tamperedPlan); err != nil {
@@ -992,6 +990,38 @@ func TestAssembleRejectsV1PlanBeforeDigestAcceptance(t *testing.T) {
 	}
 }
 
+func TestReadAssembleResultBytesRefusesActualSchemaVersion(t *testing.T) {
+	for _, actual := range []string{"witness-verification-assemble-result-v1", "", "future-version"} {
+		t.Run(schemaVersionTestName(actual), func(t *testing.T) {
+			data := []byte(`{"manifest":{},"legacy_shape_field":true}`)
+			if actual != "" {
+				data = []byte(fmt.Sprintf(`{"schema_version":%q,"manifest":{},"legacy_shape_field":true}`, actual))
+			}
+			_, err := ReadAssembleResultBytes(data)
+			if err == nil {
+				t.Fatalf("ReadAssembleResultBytes accepted %q", actual)
+			}
+			diagnostic := diag.FromError(err)
+			if diagnostic.Code != CodeUnsupportedAssembleResultSchema || diagnostic.Path != "/schema_version" {
+				t.Fatalf("diagnostic = %#v", diagnostic)
+			}
+			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, AssembleResultSchemaVersion) {
+				t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+			}
+			if actual == "" {
+				if !strings.Contains(diagnostic.Message, "missing or unversioned") {
+					t.Fatalf("diagnostic = %#v, want missing-version wording", diagnostic)
+				}
+			} else if !strings.Contains(diagnostic.Message, actual) {
+				t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
+			}
+			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != AssembleResultSchemaVersion {
+				t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
+			}
+		})
+	}
+}
+
 func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
@@ -1011,7 +1041,6 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 			{Path: "role-a.json", RefID: "role-a", Document: outRoleOutput},
 			{Path: "role-b.json", RefID: "role-b", Document: inRoleOutput},
 		},
-		Policy:        planningDeltaPolicy(),
 		Preflight:     preflight,
 		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
 	})
@@ -1044,7 +1073,6 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 		FrozenCharter: frozen,
 		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "role-b.json", Document: inRoleOutput}},
 		Manifest:      manifest,
-		Policy:        planningDeltaPolicy(),
 		BaseManifest:  &baseManifest,
 		HeadManifest:  &headManifest,
 	})
@@ -1062,7 +1090,6 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 			{Path: "role-b.json", Document: inRoleOutput},
 		},
 		Manifest:     manifest,
-		Policy:       planningDeltaPolicy(),
 		BaseManifest: &baseManifest,
 		HeadManifest: &headManifest,
 	})
@@ -1074,14 +1101,71 @@ func TestExcludedOutOfDeltaFindingsCarryThroughAssemblyAndAdjudication(t *testin
 		byID[finding.FindingID] = finding
 	}
 	excluded := byID[outOfDelta.ID]
-	if excluded.Disposition != contracts.DispositionAdvisory || excluded.ApplicationClass != contracts.ApplicationClassCallerDecision {
-		t.Fatalf("excluded verdict = %#v, want advisory caller_decision", excluded)
+	if excluded.Disposition != contracts.DispositionAdvisory {
+		t.Fatalf("excluded verdict = %#v, want advisory", excluded)
 	}
 	if !stringSliceContains(excluded.Reasons, contracts.ReasonOutOfDelta) {
 		t.Fatalf("excluded reasons = %#v, want out_of_delta", excluded.Reasons)
 	}
 	if excluded.Relay != nil || excluded.Execution != nil {
 		t.Fatalf("excluded verdict used verification evidence: %#v", excluded)
+	}
+}
+
+func TestAttributionExcludedFindingsCarryThroughAssemblyAndAdjudication(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	finding := planningTestFinding("pre-existing", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	finding.Attribution = contracts.FindingAttributionPreExisting
+	finding.ScopeAnchors = []contracts.ScopeAnchor{{Dimension: charter.DimensionInputSurface, Value: "internal/unchanged.go"}}
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	roleOutput.SchemaVersion = contracts.RoleOutputV4
+	roleOutput.ArtifactDigest = headDigest
+	preflight := planningTestPreflightBinding(t)
+	preflight.SnapshotDigest = headDigest
+
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "role.json", RefID: "role", Document: roleOutput}},
+		Preflight:     preflight,
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Batches) != 0 || len(planResult.Plan.ExcludedFindings) != 1 || planResult.Plan.ExcludedFindings[0].Reason != contracts.ReasonPreExisting {
+		t.Fatalf("plan = %#v, want one pre_existing exclusion and no batches", planResult.Plan)
+	}
+
+	assembled, err := Assemble(AssembleOptions{
+		Plan:         planResult.Plan,
+		EvidenceRefs: validManifestEvidenceRefs(),
+		BaseManifest: &baseManifest,
+		HeadManifest: &headManifest,
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if len(assembled.Manifest.ExcludedFindings) != 1 || assembled.Manifest.ExcludedFindings[0].Reason != contracts.ReasonPreExisting {
+		t.Fatalf("manifest exclusions = %#v, want pre_existing", assembled.Manifest.ExcludedFindings)
+	}
+
+	adjudicated, err := adjudicate.Run(adjudicate.Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []adjudicate.RoleOutputInput{{Path: "role.json", Document: roleOutput}},
+		Manifest:      assembled.Manifest,
+		BaseManifest:  &baseManifest,
+		HeadManifest:  &headManifest,
+	})
+	if err != nil {
+		t.Fatalf("adjudicate: %v", err)
+	}
+	if len(adjudicated.Findings) != 1 {
+		t.Fatalf("findings = %#v, want one", adjudicated.Findings)
+	}
+	verdict := adjudicated.Findings[0]
+	if verdict.Disposition != contracts.DispositionAdvisory || !stringSliceContains(verdict.Reasons, contracts.ReasonPreExisting) || stringSliceContains(verdict.Reasons, contracts.ReasonOutOfDelta) {
+		t.Fatalf("verdict = %#v, want pre_existing rather than out_of_delta", verdict)
 	}
 }
 

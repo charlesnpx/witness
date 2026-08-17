@@ -17,30 +17,29 @@ import (
 )
 
 const (
-	SchemaVersion                 = "witness-verification-plan-v2"
-	ManifestSkeletonSchemaVersion = "witness-verification-manifest-skeleton-v1"
+	SchemaVersion                 = "witness-verification-plan-v4"
+	ManifestSkeletonSchemaVersion = "witness-verification-manifest-skeleton-v3"
 	MaxBatchFindings              = 8
 
-	CodeMissingFrozenCharter       = "planning_missing_frozen_charter"
-	CodeInvalidReviewRules         = "planning_invalid_review_rules"
-	CodeInvalidReviewPolicy        = "planning_invalid_review_policy"
-	CodeMixedCharter               = "planning_mixed_charter"
-	CodeMixedArtifact              = "planning_mixed_artifact"
-	CodeSnapshotArtifactMismatch   = "planning_snapshot_artifact_mismatch"
-	CodeMissingChangeSurface       = "planning_missing_change_surface"
-	CodeInvalidChangeSurface       = "planning_invalid_change_surface"
-	CodeBaselineSurfaceConflict    = "planning_baseline_change_surface_conflict"
-	CodeInvalidRoleOutput          = "planning_invalid_role_output"
-	CodeScopeAdvisory              = "planning_scope_advisory"
-	CodeInvalidReachability        = "planning_invalid_reachability"
-	CodeSeverityExceedsCap         = "planning_severity_exceeds_strength_cap"
-	CodeRecursiveRecurrence        = "planning_recursive_recurrence"
-	CodeInvalidBatch               = "planning_invalid_batch"
-	CodeOutputWriteFailed          = "planning_output_write_failed"
-	CodeMissingRoleOutput          = "planning_missing_role_output"
-	CodeUnsupportedRole            = "planning_unsupported_role"
-	DispositionAdvisory            = "advisory"
-	DispositionPendingVerification = "pending_verification"
+	CodeMissingFrozenCharter              = "planning_missing_frozen_charter"
+	CodeMixedCharter                      = "planning_mixed_charter"
+	CodeMixedArtifact                     = "planning_mixed_artifact"
+	CodeSnapshotArtifactMismatch          = "planning_snapshot_artifact_mismatch"
+	CodeMissingChangeSurface              = "planning_missing_change_surface"
+	CodeInvalidChangeSurface              = "planning_invalid_change_surface"
+	CodeBaselineSurfaceConflict           = "planning_baseline_change_surface_conflict"
+	CodeInvalidRoleOutput                 = "planning_invalid_role_output"
+	CodeScopeAdvisory                     = "planning_scope_advisory"
+	CodeInvalidReachability               = "planning_invalid_reachability"
+	CodeSeverityExceedsCap                = "planning_severity_exceeds_strength_cap"
+	CodeRecursiveRecurrence               = "planning_recursive_recurrence"
+	CodeInvalidBatch                      = "planning_invalid_batch"
+	CodeOutputWriteFailed                 = "planning_output_write_failed"
+	CodeMissingRoleOutput                 = "planning_missing_role_output"
+	CodeUnsupportedRole                   = "planning_unsupported_role"
+	CodeUnsupportedManifestSkeletonSchema = "planning_unsupported_manifest_skeleton_schema"
+	DispositionAdvisory                   = "advisory"
+	DispositionPendingVerification        = "pending_verification"
 )
 
 type RoleOutputInput struct {
@@ -55,8 +54,6 @@ type Options struct {
 	RoleOutputs      []RoleOutputInput
 	StateDir         string
 	ConsumerIdentity map[string]any
-	Rules            contracts.ReviewRules
-	Policy           contracts.ReviewPolicy
 	Preflight        PreflightBinding
 	ChangeSurface    ChangeSurfaceInput
 }
@@ -141,7 +138,6 @@ type ExcludedFinding struct {
 	SourceRoleOutputRef    contracts.ArtifactRef `json:"source_role_output_ref"`
 	SourceRoleOutputDigest string                `json:"source_role_output_digest"`
 	Disposition            string                `json:"disposition"`
-	ApplicationClass       string                `json:"application_class,omitempty"`
 	Reason                 string                `json:"reason"`
 	Diagnostics            []diag.Diagnostic     `json:"diagnostics,omitempty"`
 }
@@ -197,33 +193,9 @@ func Run(options Options) (*Result, error) {
 	if len(options.RoleOutputs) == 0 {
 		return nil, diag.New(CodeMissingRoleOutput, "planning requires at least one role-output document.")
 	}
-	rules := options.Rules
-	if rules.SchemaVersion == "" {
-		rules = contracts.DefaultReviewRules()
-	}
-	if diagnostics := contracts.ValidateReviewRules(rules); len(diagnostics) > 0 {
-		return nil, diag.New(CodeInvalidReviewRules, "planning review rules are invalid.", diag.WithDetails(firstDiagnosticDetails(diagnostics)))
-	}
-	policy := options.Policy
-	if policy.SchemaVersion == "" {
-		policy = contracts.DefaultReviewPolicy()
-	}
-	if diagnostics := contracts.ValidateReviewPolicy(policy, nil).Diagnostics; len(diagnostics) > 0 {
-		return nil, diag.New(CodeInvalidReviewPolicy, "planning review policy is invalid.", diag.WithDetails(firstDiagnosticDetails(diagnostics)))
-	}
-	scopePolicy := contracts.EffectiveScopePolicy(policy)
-	if scopePolicy == contracts.ScopePolicyDeltaObligating {
-		if policy.SchemaVersion != contracts.ReviewPolicyV3 {
-			return nil, diag.New(CodeInvalidReviewPolicy, "delta_obligating scope policy requires review-policy-v3.", diag.WithDetail("actual", policy.SchemaVersion), diag.WithDetail("expected", contracts.ReviewPolicyV3))
-		}
-		if rules.SchemaVersion != contracts.ReviewRulesV3 {
-			return nil, diag.New(CodeInvalidReviewRules, "delta_obligating scope policy requires review-rules-v3.", diag.WithDetail("actual", rules.SchemaVersion), diag.WithDetail("expected", contracts.ReviewRulesV3))
-		}
-	}
-
 	result := &Result{}
 	preflightSnapshotDigest := strings.TrimSpace(options.Preflight.SnapshotDigest)
-	changeSurface, changeSurfaceDigest, baselinePass, err := planChangeSurface(options.ChangeSurface, scopePolicy, preflightSnapshotDigest)
+	changeSurface, changeSurfaceDigest, baselinePass, scopePolicy, err := planChangeSurface(options.ChangeSurface, preflightSnapshotDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -341,14 +313,35 @@ func Run(options Options) (*Result, error) {
 				})
 				continue
 			}
-			if scopePolicy == contracts.ScopePolicyDeltaObligating && changeSurface != nil && !contracts.FindingInChangeSurface(finding, *changeSurface) {
+			switch document.EffectiveFindingAttribution(finding) {
+			case contracts.FindingAttributionPreExisting:
 				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
 					Role:                   document.Role,
 					FindingID:              finding.ID,
 					SourceRoleOutputRef:    roleOutputRef,
 					SourceRoleOutputDigest: roleDigest,
 					Disposition:            DispositionAdvisory,
-					ApplicationClass:       contracts.ApplicationClassCallerDecision,
+					Reason:                 contracts.ReasonPreExisting,
+				})
+				continue
+			case contracts.FindingAttributionUnattributed:
+				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
+					Reason:                 contracts.ReasonAttributionUnattributed,
+				})
+				continue
+			}
+			if scopePolicy == changesurface.ScopePolicyDeltaObligating && changeSurface != nil && !contracts.FindingInChangeSurface(finding, *changeSurface) {
+				plan.ExcludedFindings = append(plan.ExcludedFindings, ExcludedFinding{
+					Role:                   document.Role,
+					FindingID:              finding.ID,
+					SourceRoleOutputRef:    roleOutputRef,
+					SourceRoleOutputDigest: roleDigest,
+					Disposition:            DispositionAdvisory,
 					Reason:                 contracts.ReasonOutOfDelta,
 				})
 				continue
@@ -415,6 +408,60 @@ func Run(options Options) (*Result, error) {
 	return result, nil
 }
 
+func ReadPlanDocumentBytes(data []byte) (PlanDocument, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return PlanDocument{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return PlanDocument{}, diag.New(CodeInvalidPlanDigest, "verification plan must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != SchemaVersion {
+		return PlanDocument{}, diag.New(
+			CodeInvalidPlanDigest,
+			unsupportedSchemaVersionMessage("verification plan", actual, SchemaVersion, "witness-verification-plan-v3", "after exclusion reasons expanded."),
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", SchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	return strictjson.DecodeBytes[PlanDocument](data, strictjson.DefaultMaxBytes*4)
+}
+
+func ReadManifestSkeletonBytes(data []byte) (ManifestSkeleton, error) {
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return ManifestSkeleton{}, err
+	}
+	document, ok := value.(map[string]any)
+	if !ok {
+		return ManifestSkeleton{}, diag.New(CodeUnsupportedManifestSkeletonSchema, "verification manifest skeleton must be a JSON object.", diag.WithPath("/schema_version"))
+	}
+	actual, _ := document["schema_version"].(string)
+	if actual != ManifestSkeletonSchemaVersion {
+		return ManifestSkeleton{}, diag.New(
+			CodeUnsupportedManifestSkeletonSchema,
+			unsupportedSchemaVersionMessage("verification manifest skeleton", actual, ManifestSkeletonSchemaVersion, "witness-verification-manifest-skeleton-v2", "after exclusion reasons expanded."),
+			diag.WithPath("/schema_version"),
+			diag.WithDetail("expected", ManifestSkeletonSchemaVersion),
+			diag.WithDetail("actual", actual),
+		)
+	}
+	return strictjson.DecodeBytes[ManifestSkeleton](data, strictjson.DefaultMaxBytes*4)
+}
+
+func unsupportedSchemaVersionMessage(artifact string, actual string, expected string, predecessor string, migration string) string {
+	if strings.TrimSpace(actual) == "" {
+		return fmt.Sprintf("%s schema_version is unsupported; a missing or unversioned schema_version is refused and %s is required.", artifact, expected)
+	}
+	if actual == predecessor && migration != "" {
+		return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required %s", artifact, actual, expected, migration)
+	}
+	return fmt.Sprintf("%s schema_version is unsupported; %s is refused and %s is required.", artifact, actual, expected)
+}
+
 func WriteState(stateDir string, result *Result) error {
 	if result == nil {
 		return nil
@@ -438,11 +485,11 @@ func WriteState(stateDir string, result *Result) error {
 	return writeCanonicalFile(filepath.Join(stateDir, "verification", "index.skeleton.json"), result.ManifestSkeleton)
 }
 
-func planChangeSurface(input ChangeSurfaceInput, scopePolicy string, passArtifactDigest string) (*changesurface.Document, string, *changesurface.BaselinePass, error) {
+func planChangeSurface(input ChangeSurfaceInput, passArtifactDigest string) (*changesurface.Document, string, *changesurface.BaselinePass, string, error) {
 	hasBase := input.BaseManifest != nil
 	hasHead := input.HeadManifest != nil
 	if hasBase != hasHead {
-		return nil, "", nil, diag.New(
+		return nil, "", nil, "", diag.New(
 			CodeMissingChangeSurface,
 			"change surface derivation requires both -base-manifest and -head-manifest.",
 			diag.WithDetail("base_manifest", hasBase),
@@ -450,35 +497,22 @@ func planChangeSurface(input ChangeSurfaceInput, scopePolicy string, passArtifac
 		)
 	}
 	if input.BaselinePass && hasBase {
-		return nil, "", nil, diag.New(CodeBaselineSurfaceConflict, "baseline_pass cannot be combined with derived change surface manifests.")
+		return nil, "", nil, "", diag.New(CodeBaselineSurfaceConflict, "baseline_pass cannot be combined with derived change surface manifests.")
 	}
 	if hasBase && hasHead {
 		surface, surfaceDigest, err := changesurface.Derive(*input.BaseManifest, *input.HeadManifest, passArtifactDigest)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, "", err
 		}
-		return &surface, surfaceDigest, nil, nil
-	}
-	if scopePolicy == contracts.ScopePolicyDeltaObligating {
-		if input.BaselinePass {
-			return nil, "", &changesurface.BaselinePass{
-				Declared: true,
-				Reason:   changesurface.BaselinePassReasonExplicit,
-			}, nil
-		}
-		return nil, "", nil, diag.New(
-			CodeMissingChangeSurface,
-			"delta_obligating scope policy requires derived change surface manifests or an explicit baseline_pass marker.",
-			diag.WithDetail("scope_policy", scopePolicy),
-		)
+		return &surface, surfaceDigest, nil, changesurface.ScopePolicyDeltaObligating, nil
 	}
 	if input.BaselinePass {
 		return nil, "", &changesurface.BaselinePass{
 			Declared: true,
 			Reason:   changesurface.BaselinePassReasonExplicit,
-		}, nil
+		}, changesurface.ScopePolicyWholeTree, nil
 	}
-	return nil, "", nil, nil
+	return nil, "", nil, changesurface.ScopePolicyWholeTree, nil
 }
 
 func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contracts.Finding, frozen *charter.FrozenCharter) ([]diag.Diagnostic, string) {
@@ -507,7 +541,7 @@ func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contract
 			return prefixDiagnostics("/witness", witness.Diagnostics), CodeInvalidReachability
 		}
 	}
-	// Review-rules caps are adjudication semantics: planning sends over-cap
+	// Severity caps are adjudication semantics: planning sends over-cap
 	// claims to verification, and adjudication caps admitted or pending results.
 	if finding.Recurrence != nil && finding.Recurrence.PriorFindingID == finding.ID {
 		return []diag.Diagnostic{diag.FromError(diag.New(
@@ -730,16 +764,6 @@ func sourceRoleOutputRef(input RoleOutputInput, index int, document contracts.Ro
 		DigestProfile: digest.Profile,
 		MediaType:     "application/json",
 	}
-}
-
-func exceedsSeverityCap(claimed string, strength string, rules contracts.ReviewRules) bool {
-	capSeverity := rules.SeverityCaps[strength]
-	if capSeverity == "" {
-		return true
-	}
-	claimedRank := severityRank(claimed)
-	capRank := severityRank(capSeverity)
-	return claimedRank >= 0 && capRank >= 0 && claimedRank < capRank
 }
 
 func severityRank(severity string) int {

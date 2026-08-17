@@ -18,6 +18,7 @@ func TestRoleOutputValidFixtures(t *testing.T) {
 	frozen := validFrozenCharter(t)
 	for _, name := range []string{
 		"role-output-defect.json",
+		"role-output-defect-v3.json",
 		"role-output-economy.json",
 		"role-output-goal-fit.json",
 	} {
@@ -50,6 +51,55 @@ func TestRoleOutputDocumentLevelWiring(t *testing.T) {
 		diagnostics := ValidateRoleOutput(document, frozen)
 		assertDiagnosticCode(t, diagnostics, CodeMissingCharterTrace)
 	})
+}
+
+func TestRoleOutputV4RequiresKnownFindingAttribution(t *testing.T) {
+	frozen := validFrozenCharter(t)
+	for _, attribution := range []string{
+		FindingAttributionIntroduced,
+		FindingAttributionWorsened,
+		FindingAttributionPreExisting,
+		FindingAttributionUnattributed,
+	} {
+		t.Run(attribution, func(t *testing.T) {
+			document := readRoleFixture(t, "role-output-defect.json")
+			document.CharterHash = frozen.CharterHash
+			document.Findings[0].Attribution = attribution
+			if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
+				t.Fatalf("ValidateRoleOutput diagnostics = %#v", diagnostics)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name        string
+		attribution string
+	}{
+		{name: "missing", attribution: ""},
+		{name: "unknown", attribution: "unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := readRoleFixture(t, "role-output-defect.json")
+			document.CharterHash = frozen.CharterHash
+			document.Findings[0].Attribution = test.attribution
+			assertDiagnosticCode(t, ValidateRoleOutput(document, frozen), CodeInvalidRoleOutput)
+		})
+	}
+}
+
+func TestRoleOutputV3CompatibilityTreatsFindingsAsUnattributed(t *testing.T) {
+	frozen := validFrozenCharter(t)
+	document := readRoleFixture(t, "role-output-defect-v3.json")
+	if document.SchemaVersion != RoleOutputV3 {
+		t.Fatalf("schema_version = %q, want %q", document.SchemaVersion, RoleOutputV3)
+	}
+	document.CharterHash = frozen.CharterHash
+	if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
+		t.Fatalf("v3 ValidateRoleOutput diagnostics = %#v", diagnostics)
+	}
+	if got := document.EffectiveFindingAttribution(document.Findings[0]); got != FindingAttributionUnattributed {
+		t.Fatalf("v3 effective attribution = %q, want %q", got, FindingAttributionUnattributed)
+	}
 }
 
 func TestVerificationBatchRejectsNarrativeAndDigestMismatch(t *testing.T) {
@@ -268,23 +318,6 @@ func TestReducerSchemaSourceContainsNoCommentAndIsStrictJSON(t *testing.T) {
 	}
 }
 
-func TestPolicyEstimateOverCapDisqualifiesBeforeMeasuredDelta(t *testing.T) {
-	policy := validAutoApplyPolicy(10, 10)
-	decision := CheckApplication(policy, nil, ApplicationCheck{
-		Role:                       RoleDefect,
-		RemedyDirection:            RemedyDirectionAdd,
-		OperationalEnvelopePresent: true,
-		EstimatedDelta: SplitDeltaEstimate{
-			Production: DeltaEstimate{Status: DeltaStatusKnown, Lines: 11},
-			Test:       DeltaEstimate{Status: DeltaStatusKnown, Lines: 1},
-		},
-		MeasuredDelta: &MeasuredDelta{Production: 1, Test: 1},
-	})
-	if decision.Allow || decision.Reason != "estimated_delta_over_cap" {
-		t.Fatalf("decision = %#v, want estimated delta refusal", decision)
-	}
-}
-
 func TestRelayCompatibilityRequiresFullCapabilityClosure(t *testing.T) {
 	document := validRelayCompatibility()
 	if diagnostics := ValidateRelayCompatibility(document); len(diagnostics) > 0 {
@@ -419,11 +452,43 @@ func TestVerificationManifestRejectsInvalidRelayLaunchStatusMarkers(t *testing.T
 	assertDiagnosticCode(t, diagnostics, CodeInvalidManifest)
 }
 
-func TestReviewRulesRejectReorderedAdjudicationSequence(t *testing.T) {
-	rules := DefaultReviewRules()
-	rules.AdjudicationOrder[0], rules.AdjudicationOrder[1] = rules.AdjudicationOrder[1], rules.AdjudicationOrder[0]
-	diagnostics := ValidateReviewRules(rules)
-	assertDiagnosticCode(t, diagnostics, CodeInvalidRules)
+func TestReadVerificationManifestBytesRefusesActualSchemaVersion(t *testing.T) {
+	for _, actual := range []string{VerificationManifestV5, "", "future-version"} {
+		t.Run(contractSchemaVersionTestName(actual), func(t *testing.T) {
+			data := []byte(`{"legacy_shape_field":true}`)
+			if actual != "" {
+				data = []byte(`{"schema_version":"` + actual + `","legacy_shape_field":true}`)
+			}
+			_, err := ReadVerificationManifestBytes(data)
+			if err == nil {
+				t.Fatalf("ReadVerificationManifestBytes accepted %q", actual)
+			}
+			diagnostic := diag.FromError(err)
+			if diagnostic.Code != CodeInvalidManifest || diagnostic.Path != "/schema_version" {
+				t.Fatalf("diagnostic = %#v", diagnostic)
+			}
+			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, VerificationManifestV6) {
+				t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
+			}
+			if actual == "" {
+				if !strings.Contains(diagnostic.Message, "missing or unversioned") {
+					t.Fatalf("diagnostic = %#v, want missing-version wording", diagnostic)
+				}
+			} else if !strings.Contains(diagnostic.Message, actual) {
+				t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
+			}
+			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != VerificationManifestV6 {
+				t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
+			}
+		})
+	}
+}
+
+func contractSchemaVersionTestName(version string) string {
+	if version == "" {
+		return "missing"
+	}
+	return version
 }
 
 func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {
@@ -453,16 +518,6 @@ func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {
 	}
 	if diagnostics := ValidateVerificationBatch(batch, &document); len(diagnostics) > 0 {
 		t.Fatalf("verification batch diagnostics = %#v", diagnostics)
-	}
-	decision := CheckApplication(validAutoApplyPolicy(10, 10), nil, ApplicationCheck{
-		Role:                       RoleDefect,
-		RemedyDirection:            RemedyDirectionAdd,
-		OperationalEnvelopePresent: true,
-		EstimatedDelta:             document.Findings[0].EstimatedDelta,
-		MeasuredDelta:              &MeasuredDelta{Production: 1, Test: 1},
-	})
-	if decision.Allow || decision.Reason != "unknown_estimated_delta" {
-		t.Fatalf("decision = %#v, want unknown delta refusal", decision)
 	}
 }
 
@@ -552,28 +607,6 @@ func validCounterWitness() *CounterWitness {
 	}
 }
 
-func validAutoApplyPolicy(productionCap int, testCap int) ReviewPolicy {
-	return ReviewPolicy{
-		SchemaVersion:                  ReviewPolicyV3,
-		PolicyID:                       "policy-1",
-		ScopePolicy:                    ScopePolicyWholeTree,
-		DefectAdditiveAutoApplyEnabled: true,
-		ProductionCap:                  &productionCap,
-		TestCap:                        &testCap,
-		CapRelease: &CapReleaseRecord{
-			Unit:          "lines",
-			ProductionCap: productionCap,
-			TestCap:       testCap,
-			Basis:         CapReleaseBasisOwnerJudgment,
-			Rationale:     "Test policy cap release.",
-			Actor:         "owner",
-			PolicyDigest:  testDigest("policy"),
-			RulesDigest:   testDigest("rules"),
-			CharterHash:   testDigest("charter"),
-		},
-	}
-}
-
 func validRelayCompatibility() RelayCompatibility {
 	capabilities := make(map[string]bool, len(RequiredRelayCapabilitiesV3))
 	for _, capability := range RequiredRelayCapabilitiesV3 {
@@ -630,7 +663,7 @@ func validVerificationManifest(t *testing.T, batch VerificationBatchDocument, ve
 	portableExportDigest := testDigest("portable-export")
 	portableExportRef := testArtifactRef("portable-export", "portable-export-1", portableExportDigest)
 	return VerificationManifest{
-		SchemaVersion:         VerificationManifestV4,
+		SchemaVersion:         VerificationManifestV6,
 		PlanDigest:            testDigest("plan"),
 		CharterHash:           batch.CharterHash,
 		ArtifactDigest:        batch.ArtifactDigest,
