@@ -13,7 +13,11 @@ Use the shipped relay integration bundle at `bundle/relay-integration-bundle-v2.
 
 ## Finder Guidance
 
-All new finder output is a `review-role-output-v4` role-output document. Findings must name Charter goals; existing code, tests, defenses, and review machinery create no goals.
+All new finder output is a `review-role-output-v5` role-output document. Findings must name Charter goals; existing code, tests, defenses, and review machinery create no goals.
+
+When a defect or economy finder finds no findings, it must emit `"findings": []` and an `evaluation` object with non-empty, duplicate-free `evaluated_paths` and `evaluated_charter_goal_ids` arrays. List the actual frozen Charter goal IDs evaluated. When the caller supplies a derived `delta_obligating` change surface, list every changed path in that surface and no other path. In a whole-tree pass with no derived change surface, list the non-empty set of paths actually evaluated. A v5 document with findings may also include `evaluation`, which is checked the same way when present.
+
+This attestation is a finder self-report, not proof that review happened. Witness can reject an invented path, omitted delta path, or unknown Charter goal, but a determined lazy finder can still make a false shape-correct claim.
 
 Every finding must carry base/head attribution: `introduced` when the stack created it, `worsened` when the stack made it worse, `pre-existing` when it was already present at base, or `unattributed` when the finder could not establish it. Only introduced and worsened findings can score the stack; pre-existing and unattributed findings remain visible as advisory findings.
 

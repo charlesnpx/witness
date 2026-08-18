@@ -3288,13 +3288,17 @@ func writeRoleOutputsForState(t *testing.T, stateDir string, withFinding bool) {
 	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
 	for _, request := range state.Config.RoleOutputs {
 		document := contracts.RoleOutputDocument{
-			SchemaVersion:    contracts.RoleOutputV4,
+			SchemaVersion:    contracts.RoleOutputV5,
 			Role:             request.Role,
 			CharterHash:      frozen.CharterHash,
 			ArtifactDigest:   preflightResult.SnapshotDigest,
 			SourceIdentity:   map[string]any{"kind": "test", "id": "source"},
 			ConsumerIdentity: map[string]any{"kind": "test", "id": "pass-test"},
 			Findings:         []contracts.Finding{},
+			Evaluation: &contracts.RoleEvaluation{
+				EvaluatedPaths:          []string{"app.txt"},
+				EvaluatedCharterGoalIDs: []string{"goal-1"},
+			},
 		}
 		if withFinding && request.Role == contracts.RoleDefect {
 			document.Findings = []contracts.Finding{{
@@ -3331,13 +3335,17 @@ func writeRoleOutputsForStateWithScopeAnchor(t *testing.T, stateDir string, path
 	preflightResult := readJSONForTest[preflight.Result](t, state.Config.Outputs.PreflightPath)
 	for _, request := range state.Config.RoleOutputs {
 		document := contracts.RoleOutputDocument{
-			SchemaVersion:    contracts.RoleOutputV4,
+			SchemaVersion:    contracts.RoleOutputV5,
 			Role:             request.Role,
 			CharterHash:      frozen.CharterHash,
 			ArtifactDigest:   preflightResult.SnapshotDigest,
 			SourceIdentity:   map[string]any{"kind": "test", "id": "source"},
 			ConsumerIdentity: map[string]any{"kind": "test", "id": "pass-test"},
 			Findings:         []contracts.Finding{},
+			Evaluation: &contracts.RoleEvaluation{
+				EvaluatedPaths:          []string{path},
+				EvaluatedCharterGoalIDs: []string{"goal-1"},
+			},
 		}
 		if request.Role == contracts.RoleDefect {
 			document.Findings = []contracts.Finding{{

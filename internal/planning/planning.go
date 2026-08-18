@@ -29,6 +29,7 @@ const (
 	CodeInvalidChangeSurface              = "planning_invalid_change_surface"
 	CodeBaselineSurfaceConflict           = "planning_baseline_change_surface_conflict"
 	CodeInvalidRoleOutput                 = "planning_invalid_role_output"
+	CodeUnattestedEmptyRoleOutput         = "unattested_empty_role_output"
 	CodeScopeAdvisory                     = "planning_scope_advisory"
 	CodeInvalidReachability               = "planning_invalid_reachability"
 	CodeSeverityExceedsCap                = "planning_severity_exceeds_strength_cap"
@@ -228,6 +229,7 @@ func Run(options Options) (*Result, error) {
 
 	roleDigests := make([]string, len(options.RoleOutputs))
 	var candidates []candidate
+	var admissionDiagnostics []diag.Diagnostic
 	for sourceIndex, input := range options.RoleOutputs {
 		document := input.Document
 		if document.CharterHash != "" && document.CharterHash != options.FrozenCharter.CharterHash {
@@ -275,8 +277,11 @@ func Run(options Options) (*Result, error) {
 		roleDigests[sourceIndex] = roleDigest
 		roleOutputRef := sourceRoleOutputRef(input, sourceIndex, document, roleDigest)
 		diagnostics := contracts.ValidateRoleOutput(document, options.FrozenCharter)
+		evaluationAdmissionDiagnostics := validateRoleOutputEvaluationAdmission(document, options.FrozenCharter, changeSurface, scopePolicy)
+		diagnostics = append(diagnostics, evaluationAdmissionDiagnostics...)
 		findingDiagnostics, documentDiagnostics := splitFindingDiagnostics(diagnostics)
 		plan.Diagnostics = append(plan.Diagnostics, prefixedRoleDiagnostics(input, sourceIndex, documentDiagnostics)...)
+		admissionDiagnostics = append(admissionDiagnostics, prefixedRoleDiagnostics(input, sourceIndex, evaluationAdmissionDiagnostics)...)
 		documentInvalid := len(documentDiagnostics) > 0
 		if document.Role == contracts.RoleGoalFit {
 			if len(document.Findings) > 0 {
@@ -381,6 +386,9 @@ func Run(options Options) (*Result, error) {
 				witnessDigest: witnessDigest,
 			})
 		}
+	}
+	if len(admissionDiagnostics) > 0 {
+		return nil, &ValidationError{Diagnostics: admissionDiagnostics}
 	}
 
 	sortCandidates(candidates)
@@ -513,6 +521,68 @@ func planChangeSurface(input ChangeSurfaceInput, passArtifactDigest string) (*ch
 		}, changesurface.ScopePolicyWholeTree, nil
 	}
 	return nil, "", nil, changesurface.ScopePolicyWholeTree, nil
+}
+
+func validateRoleOutputEvaluationAdmission(document contracts.RoleOutputDocument, frozen *charter.FrozenCharter, changeSurface *changesurface.Document, scopePolicy string) []diag.Diagnostic {
+	if (document.Role == contracts.RoleDefect || document.Role == contracts.RoleEconomy) && len(document.Findings) == 0 && (document.SchemaVersion != contracts.RoleOutputV5 || document.Evaluation == nil) {
+		return []diag.Diagnostic{diag.FromError(diag.New(
+			CodeUnattestedEmptyRoleOutput,
+			"role-output documents with no findings require a review-role-output-v5 evaluation attestation before planning can admit them as evidence.",
+			diag.WithPath("/evaluation"),
+			diag.WithDetail("schema_version", document.SchemaVersion),
+		))}
+	}
+	if document.Evaluation == nil {
+		return nil
+	}
+
+	var diagnostics []diag.Diagnostic
+	if changeSurface != nil {
+		changedPaths := changesurface.ChangedPathSet(*changeSurface)
+		evaluatedPaths := make(map[string]bool, len(document.Evaluation.EvaluatedPaths))
+		for index, evaluatedPath := range document.Evaluation.EvaluatedPaths {
+			evaluatedPaths[evaluatedPath] = true
+			if _, exists := changedPaths[evaluatedPath]; !exists {
+				diagnostics = append(diagnostics, diag.FromError(diag.New(
+					CodeInvalidRoleOutput,
+					"evaluation path is not present in the derived change surface.",
+					diag.WithPath(fmt.Sprintf("/evaluation/evaluated_paths/%d", index)),
+					diag.WithDetail("path", evaluatedPath),
+				)))
+			}
+		}
+		if scopePolicy == changesurface.ScopePolicyDeltaObligating {
+			for _, change := range changeSurface.ChangedPaths {
+				if evaluatedPaths[change.Path] {
+					continue
+				}
+				diagnostics = append(diagnostics, diag.FromError(diag.New(
+					CodeInvalidRoleOutput,
+					"evaluation must attest every path in a delta-obligating change surface.",
+					diag.WithPath("/evaluation/evaluated_paths"),
+					diag.WithDetail("missing_path", change.Path),
+				)))
+			}
+		}
+	}
+	goalIDs := map[string]bool{}
+	if frozen != nil {
+		for _, goal := range frozen.Charter.Goals {
+			goalIDs[goal.ID] = true
+		}
+	}
+	for index, goalID := range document.Evaluation.EvaluatedCharterGoalIDs {
+		if goalIDs[goalID] {
+			continue
+		}
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidRoleOutput,
+			"evaluation references a Charter goal that is not declared in the frozen Charter.",
+			diag.WithPath(fmt.Sprintf("/evaluation/evaluated_charter_goal_ids/%d", index)),
+			diag.WithDetail("goal_id", goalID),
+		)))
+	}
+	return diagnostics
 }
 
 func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contracts.Finding, frozen *charter.FrozenCharter) ([]diag.Diagnostic, string) {

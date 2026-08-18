@@ -270,7 +270,7 @@ func runRoleOutputInit(args []string) error {
 		)
 	}
 	document := contracts.RoleOutputDocument{
-		SchemaVersion:  contracts.RoleOutputV4,
+		SchemaVersion:  contracts.RoleOutputV5,
 		Role:           *role,
 		CharterHash:    digest.RawBytes(nil),
 		ArtifactDigest: digest.RawBytes(nil),

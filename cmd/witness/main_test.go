@@ -251,24 +251,40 @@ func TestRoleOutputValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read initialized role output: %v", err)
 	}
-	if initialized.SchemaVersion != contracts.RoleOutputV4 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
+	if initialized.SchemaVersion != contracts.RoleOutputV5 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
 		t.Fatalf("initialized role output = %#v, want an empty valid defect document", initialized)
 	}
 	if err := contracts.RequireValidRoleOutput(initialized, nil); err != nil {
 		t.Fatalf("initialized role output validation: %v", err)
 	}
+	if initialized.Evaluation != nil {
+		t.Fatalf("initialized role output evaluation = %#v, want no scaffolded attestation", initialized.Evaluation)
+	}
 	plannerFrozen := validCLIFrozenCharter(t)
 	plannerFrozen.CharterHash = initialized.CharterHash
-	planned, err := planning.Run(planning.Options{
+	unattested := initialized
+	unattested.SchemaVersion = contracts.RoleOutputV4
+	if err := contracts.RequireValidRoleOutput(unattested, &plannerFrozen); err != nil {
+		t.Fatalf("v4 RequireValidRoleOutput: %v", err)
+	}
+	_, err = planning.Run(planning.Options{
 		FrozenCharter: &plannerFrozen,
-		RoleOutputs:   []planning.RoleOutputInput{{Path: initializedPath, Document: initialized}},
+		RoleOutputs:   []planning.RoleOutputInput{{Path: initializedPath, Document: unattested}},
 		Preflight:     planning.PreflightBinding{SnapshotDigest: initialized.ArtifactDigest},
 	})
-	if err != nil {
-		t.Fatalf("planner accepts initialized role output: %v", err)
+	var validation *planning.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("planner error = %T (%v), want *planning.ValidationError", err, err)
 	}
-	if len(planned.Plan.Diagnostics) != 0 {
-		t.Fatalf("planner diagnostics for initialized role output = %#v", planned.Plan.Diagnostics)
+	foundUnattested := false
+	for _, diagnostic := range validation.Diagnostics {
+		if diagnostic.Code == planning.CodeUnattestedEmptyRoleOutput {
+			foundUnattested = true
+			break
+		}
+	}
+	if !foundUnattested {
+		t.Fatalf("planner diagnostics = %#v, want %s", validation.Diagnostics, planning.CodeUnattestedEmptyRoleOutput)
 	}
 	if !roleOutputHasInitPlaceholders(initialized) {
 		t.Fatal("initialized template not detected as carrying placeholder identities")
@@ -360,7 +376,7 @@ func TestRoleOutputValidate(t *testing.T) {
 			if result, err = strictjson.DecodeBytes[roleOutputValidationResult]([]byte(output), strictjson.DefaultMaxBytes); err != nil {
 				t.Fatalf("decode validation output: %v", err)
 			}
-			if !result.OK || result.SchemaVersion != contracts.RoleOutputV4 || result.RoleOutputDigest != test.wantDigest {
+			if !result.OK || result.SchemaVersion != contracts.RoleOutputV5 || result.RoleOutputDigest != test.wantDigest {
 				t.Fatalf("validation result = %#v, want ok result with schema version and digest", result)
 			}
 		})
@@ -921,7 +937,12 @@ func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
 	roleOutput.Findings = []contracts.Finding{}
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{"whole-tree"},
+		EvaluatedCharterGoalIDs: []string{"goal-cli"},
+	}
 	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
 		t.Fatal(err)
 	}
@@ -1557,7 +1578,12 @@ func TestVerificationAssembleRunRelayRetainsConsumingRecordAcrossBudgetRejection
 		case contracts.RoleDefect:
 		case contracts.RoleEconomy:
 			roleOutput.Role = contracts.RoleEconomy
+			roleOutput.SchemaVersion = contracts.RoleOutputV5
 			roleOutput.Findings = []contracts.Finding{}
+			roleOutput.Evaluation = &contracts.RoleEvaluation{
+				EvaluatedPaths:          []string{"app.txt"},
+				EvaluatedCharterGoalIDs: []string{"goal-cli"},
+			}
 		default:
 			t.Fatalf("unexpected caller role-output request: %#v", request)
 		}

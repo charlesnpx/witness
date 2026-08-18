@@ -22,9 +22,16 @@ type RoleOutputDocument struct {
 	SourceIdentity       map[string]any        `json:"source_identity"`
 	ConsumerIdentity     map[string]any        `json:"consumer_identity"`
 	Findings             []Finding             `json:"findings"`
+	Evaluation           *RoleEvaluation       `json:"evaluation,omitempty"`
 	MissingGoalQuestions []MissingGoalQuestion `json:"missing_goal_questions,omitempty"`
 
 	legacyFindingAttribution string
+	evaluationPresent        bool
+}
+
+type RoleEvaluation struct {
+	EvaluatedPaths          []string `json:"evaluated_paths"`
+	EvaluatedCharterGoalIDs []string `json:"evaluated_charter_goal_ids"`
 }
 
 type Finding struct {
@@ -75,6 +82,22 @@ type DeltaEstimate struct {
 
 	linesPresent bool
 	filesPresent bool
+}
+
+func (document *RoleOutputDocument) UnmarshalJSON(data []byte) error {
+	type roleOutputAlias RoleOutputDocument
+	var decoded roleOutputAlias
+	if err := decodeStrictContractJSON(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, evaluationPresent := fields["evaluation"]
+	*document = RoleOutputDocument(decoded)
+	document.evaluationPresent = evaluationPresent
+	return nil
 }
 
 func (finding *Finding) UnmarshalJSON(data []byte) error {
@@ -215,12 +238,12 @@ func RequireValidRoleOutput(document RoleOutputDocument, frozen *charter.FrozenC
 
 func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenCharter) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	if document.SchemaVersion != RoleOutputV3 && document.SchemaVersion != RoleOutputV4 {
+	if document.SchemaVersion != RoleOutputV3 && document.SchemaVersion != RoleOutputV4 && document.SchemaVersion != RoleOutputV5 {
 		diagnostics = append(diagnostics, diagnostic(
 			CodeInvalidRoleOutput,
-			"role-output document schema_version must be review-role-output-v3 or review-role-output-v4.",
+			"role-output document schema_version must be review-role-output-v3, review-role-output-v4, or review-role-output-v5.",
 			"/schema_version",
-			map[string]any{"expected": []string{RoleOutputV3, RoleOutputV4}, "actual": document.SchemaVersion},
+			map[string]any{"expected": []string{RoleOutputV3, RoleOutputV4, RoleOutputV5}, "actual": document.SchemaVersion},
 		))
 	}
 	requireEnum(&diagnostics, "/role", "role", document.Role, stringSet(RoleDefect, RoleEconomy, RoleGoalFit), CodeInvalidRoleOutput)
@@ -250,6 +273,17 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 			"/findings",
 			nil,
 		))
+	}
+	if document.SchemaVersion != RoleOutputV5 && (document.Evaluation != nil || document.evaluationPresent) {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidRoleOutput,
+			"evaluation is only supported by review-role-output-v5.",
+			"/evaluation",
+			map[string]any{"schema_version": document.SchemaVersion},
+		))
+	}
+	if document.Evaluation != nil {
+		diagnostics = append(diagnostics, validateRoleEvaluation(*document.Evaluation, "/evaluation")...)
 	}
 
 	questions := map[string]MissingGoalQuestion{}
@@ -282,6 +316,55 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 		}
 		seenFindings[finding.ID] = index
 		diagnostics = append(diagnostics, validateFinding(document.SchemaVersion, document.Role, finding, path, frozen, goalIDs, questions, questionPaths)...)
+	}
+	return diagnostics
+}
+
+func validateRoleEvaluation(evaluation RoleEvaluation, path string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if len(evaluation.EvaluatedPaths) == 0 {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidRoleOutput,
+			"evaluation requires at least one evaluated path.",
+			path+"/evaluated_paths",
+			nil,
+		))
+	}
+	paths := map[string]int{}
+	for index, evaluatedPath := range evaluation.EvaluatedPaths {
+		itemPath := path + "/evaluated_paths/" + itoa(index)
+		requireString(&diagnostics, itemPath, "evaluated path", evaluatedPath)
+		if first, exists := paths[evaluatedPath]; exists {
+			diagnostics = append(diagnostics, diagnostic(
+				CodeInvalidRoleOutput,
+				"evaluation paths must be unique.",
+				itemPath,
+				map[string]any{"duplicate_of": path + "/evaluated_paths/" + itoa(first)},
+			))
+		}
+		paths[evaluatedPath] = index
+	}
+	if len(evaluation.EvaluatedCharterGoalIDs) == 0 {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidRoleOutput,
+			"evaluation requires at least one evaluated Charter goal ID.",
+			path+"/evaluated_charter_goal_ids",
+			nil,
+		))
+	}
+	goalIDs := map[string]int{}
+	for index, goalID := range evaluation.EvaluatedCharterGoalIDs {
+		itemPath := path + "/evaluated_charter_goal_ids/" + itoa(index)
+		requireString(&diagnostics, itemPath, "evaluated Charter goal ID", goalID)
+		if first, exists := goalIDs[goalID]; exists {
+			diagnostics = append(diagnostics, diagnostic(
+				CodeInvalidRoleOutput,
+				"evaluation Charter goal IDs must be unique.",
+				itemPath,
+				map[string]any{"duplicate_of": path + "/evaluated_charter_goal_ids/" + itoa(first)},
+			))
+		}
+		goalIDs[goalID] = index
 	}
 	return diagnostics
 }
@@ -368,7 +451,7 @@ func validateFinding(schemaVersion string, role string, finding Finding, path st
 	requireString(&diagnostics, path+"/title", "finding title", finding.Title)
 	requireEnum(&diagnostics, path+"/claimed_severity", "claimed_severity", finding.ClaimedSeverity, stringSet(SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow), CodeInvalidRoleOutput)
 	switch schemaVersion {
-	case RoleOutputV4:
+	case RoleOutputV4, RoleOutputV5:
 		requireEnum(&diagnostics, path+"/attribution", "attribution", finding.Attribution, stringSet(FindingAttributionIntroduced, FindingAttributionWorsened, FindingAttributionPreExisting, FindingAttributionUnattributed), CodeInvalidRoleOutput)
 	case RoleOutputV3:
 		if finding.Attribution != "" {
