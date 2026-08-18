@@ -1210,6 +1210,91 @@ func TestAssembleRejectsSelectedContractManifestEvidenceMismatch(t *testing.T) {
 	}
 }
 
+func TestAssembleZeroBatchPlanRejectsTamperedSelectedContractEvidence(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	refs := validManifestEvidenceRefs()
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "defect.json", Document: planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})},
+			{Path: "economy.json", Document: planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})},
+		},
+		Preflight: planningTestPreflightBindingForRefs(t, refs),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) != 0 {
+		t.Fatalf("plan batches = %#v, want none", planResult.Plan.Batches)
+	}
+
+	var retained map[string]any
+	if err := json.Unmarshal(refs.SelectedContractEvidence[0].RawBytes, &retained); err != nil {
+		t.Fatalf("decode selected-contract evidence: %v", err)
+	}
+	contract, ok := retained["contract"].(map[string]any)
+	if !ok {
+		t.Fatalf("selected-contract evidence = %#v, want retained contract body", retained)
+	}
+	contract["tampered"] = true
+	refs.SelectedContractEvidence[0].RawBytes = canonjson.MustMarshal(retained)
+
+	_, err = Assemble(AssembleOptions{
+		Plan:         planResult.Plan,
+		EvidenceRefs: refs,
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted tampered selected-contract evidence for an empty plan")
+	}
+	found := false
+	for _, diagnostic := range err.(*ValidationError).Diagnostics {
+		if diagnostic.Code == CodeInvalidSelectedContract {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want %s", err.(*ValidationError).Diagnostics, CodeInvalidSelectedContract)
+	}
+}
+
+func TestAssembleBatchedPlanRequiresSelectedContractRefs(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) == 0 {
+		t.Fatalf("plan batches = %#v, want at least one", planResult.Plan.Batches)
+	}
+	refs := validManifestEvidenceRefs()
+	refs.SelectedContracts = nil
+
+	_, err = Assemble(AssembleOptions{
+		Plan:         planResult.Plan,
+		EvidenceRefs: refs,
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a batched plan without selected-contract references")
+	}
+	found := false
+	for _, diagnostic := range err.(*ValidationError).Diagnostics {
+		if diagnostic.Code == CodeMissingEvidenceRef && diagnostic.Details["ref"] == "selected_contracts" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want %s for selected_contracts", err.(*ValidationError).Diagnostics, CodeMissingEvidenceRef)
+	}
+}
+
 func planningTestPreflightBinding(t *testing.T) PreflightBinding {
 	t.Helper()
 	refs := validManifestEvidenceRefs()
