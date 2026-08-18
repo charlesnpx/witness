@@ -904,6 +904,63 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 	}
 }
 
+func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	stateDir := filepath.Join(dir, "state")
+	planOut := filepath.Join(dir, "plan-out.json")
+	manifestOut := filepath.Join(dir, "manifest.json")
+	compatibility := writeCLIArtifact(t, dir, "compatibility.json")
+	capabilities := writeCLIArtifact(t, dir, "capabilities.json")
+	bundle := writeCLIArtifact(t, dir, "bundle.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
+
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.Findings = []contracts.Finding{}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", planOut,
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-compatibility-manifest", compatibility,
+		"-relay-capabilities", capabilities,
+		"-integration-bundle", bundle,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble without -selected-contract: %v", err)
+	}
+	data, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Batches) != 0 {
+		t.Fatalf("manifest batches = %#v, want none", manifest.Batches)
+	}
+	if len(manifest.SelectedContracts) != 0 {
+		t.Fatalf("manifest selected contracts = %#v, want none", manifest.SelectedContracts)
+	}
+}
+
 func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

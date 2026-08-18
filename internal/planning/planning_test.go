@@ -105,6 +105,8 @@ func TestPlanningBatchDigestBindsPersistedBytes(t *testing.T) {
 func TestPlanningEmptyFindingsEmitEmptyBatchArrays(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	refs := validManifestEvidenceRefs()
+	refs.SelectedContracts = nil
+	refs.SelectedContractEvidence = nil
 	stateDir := t.TempDir()
 	result, err := Run(Options{
 		FrozenCharter: frozen,
@@ -148,6 +150,9 @@ func TestPlanningEmptyFindingsEmitEmptyBatchArrays(t *testing.T) {
 	}
 	if !strings.Contains(string(manifest), `"batches":[]`) {
 		t.Fatalf("manifest bytes = %s, want empty batches array", manifest)
+	}
+	if len(assembled.Manifest.SelectedContracts) != 0 {
+		t.Fatalf("manifest selected contracts = %#v, want none for an empty plan", assembled.Manifest.SelectedContracts)
 	}
 }
 
