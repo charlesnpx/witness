@@ -147,6 +147,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	}
 	relayLaunchStatus := relayLaunchStatusForCompatibility(options.EvidenceRefs.RelayCompatibility)
 	attachRelayLaunchStatus(&manifest, relayLaunchStatus)
+	diagnostics = append(diagnostics, validateRelayEvidencePlanMembership(options.Plan, options.RelayResults)...)
 	if refDiagnostics := validateManifestEvidenceRefs(options.Plan, options.EvidenceRefs); len(refDiagnostics) > 0 {
 		diagnostics = append(diagnostics, refDiagnostics...)
 		for _, planned := range options.Plan.Batches {
@@ -1078,6 +1079,29 @@ func assembleReceiptRecords(options AssembleOptions) ([]contracts.ExecutionRecei
 		records = append(records, record)
 	}
 	return records, diagnostics, contradictions
+}
+
+func validateRelayEvidencePlanMembership(plan PlanDocument, relays []RelayEvidence) []diag.Diagnostic {
+	plannedBatchIDs := make(map[string]bool, len(plan.Batches))
+	for _, planned := range plan.Batches {
+		plannedBatchIDs[planned.BatchID] = true
+	}
+	unplannedBatchIDs := make([]string, 0)
+	for _, relay := range relays {
+		if !plannedBatchIDs[relay.BatchID] {
+			unplannedBatchIDs = append(unplannedBatchIDs, relay.BatchID)
+		}
+	}
+	sort.Strings(unplannedBatchIDs)
+	diagnostics := make([]diag.Diagnostic, 0, len(unplannedBatchIDs))
+	for _, batchID := range unplannedBatchIDs {
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeInvalidRelay,
+			"relay evidence references a batch outside the verification plan.",
+			diag.WithDetail("batch_id", batchID),
+		)))
+	}
+	return diagnostics
 }
 
 func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) []diag.Diagnostic {
