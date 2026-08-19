@@ -1210,6 +1210,199 @@ func TestAssembleRejectsSelectedContractManifestEvidenceMismatch(t *testing.T) {
 	}
 }
 
+func TestAssembleZeroBatchPlanRejectsTamperedSelectedContractEvidence(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	refs := validManifestEvidenceRefs()
+	defect := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	defect.SchemaVersion = contracts.RoleOutputV5
+	defect.Evaluation = planningTestEvaluation("whole-tree")
+	economy := planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})
+	economy.SchemaVersion = contracts.RoleOutputV5
+	economy.Evaluation = planningTestEvaluation("whole-tree")
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "defect.json", Document: defect},
+			{Path: "economy.json", Document: economy},
+		},
+		Preflight: planningTestPreflightBindingForRefs(t, refs),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) != 0 {
+		t.Fatalf("plan batches = %#v, want none", planResult.Plan.Batches)
+	}
+
+	var retained map[string]any
+	if err := json.Unmarshal(refs.SelectedContractEvidence[0].RawBytes, &retained); err != nil {
+		t.Fatalf("decode selected-contract evidence: %v", err)
+	}
+	contract, ok := retained["contract"].(map[string]any)
+	if !ok {
+		t.Fatalf("selected-contract evidence = %#v, want retained contract body", retained)
+	}
+	contract["tampered"] = true
+	refs.SelectedContractEvidence[0].RawBytes = canonjson.MustMarshal(retained)
+
+	_, err = Assemble(AssembleOptions{
+		Plan:         planResult.Plan,
+		EvidenceRefs: refs,
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted tampered selected-contract evidence for an empty plan")
+	}
+	found := false
+	for _, diagnostic := range err.(*ValidationError).Diagnostics {
+		if diagnostic.Code == CodeInvalidSelectedContract {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want %s", err.(*ValidationError).Diagnostics, CodeInvalidSelectedContract)
+	}
+}
+
+func TestAssembleRejectsUnplannedRelayEvidenceForZeroBatchPlan(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	refs := validManifestEvidenceRefs()
+	defect := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	defect.SchemaVersion = contracts.RoleOutputV5
+	defect.Evaluation = planningTestEvaluation("whole-tree")
+	economy := planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})
+	economy.SchemaVersion = contracts.RoleOutputV5
+	economy.Evaluation = planningTestEvaluation("whole-tree")
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "defect.json", Document: defect},
+			{Path: "economy.json", Document: economy},
+		},
+		Preflight: planningTestPreflightBindingForRefs(t, refs),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) != 0 {
+		t.Fatalf("plan batches = %#v, want none", planResult.Plan.Batches)
+	}
+
+	_, err = Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		RelayResults: []RelayEvidence{{
+			BatchID: "unplanned-batch",
+		}},
+		EvidenceRefs: refs,
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted relay evidence outside an empty plan")
+	}
+	found := false
+	for _, diagnostic := range err.(*ValidationError).Diagnostics {
+		if diagnostic.Code == CodeInvalidRelay && diagnostic.Details["batch_id"] == "unplanned-batch" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want %s for unplanned-batch", err.(*ValidationError).Diagnostics, CodeInvalidRelay)
+	}
+}
+
+func TestAssembleRejectsUnplannedRelayEvidenceAlongsidePlannedEvidence(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	exportVerdicts := contracts.RelayWitnessVerdictsDocument{
+		SchemaVersion: contracts.RelayWitnessVerdictsV2,
+		BatchID:       batch.Document.BatchID,
+		Verdicts: []contracts.WitnessVerdict{{
+			FindingID:     "finding-1",
+			WitnessDigest: batch.Document.Findings[0].WitnessDigest,
+			Verdict:       contracts.VerdictSurvived,
+		}},
+	}
+	portableDir := writePlanningPortableExport(t, exportVerdicts, batch.Document)
+
+	_, err = Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{
+			{
+				BatchID:           batch.Plan.BatchID,
+				RecipeFamily:      batch.Plan.RecipeFamily,
+				Backend:           "codex",
+				PortableExportDir: portableDir,
+			},
+			{BatchID: "unplanned-batch"},
+		},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted relay evidence outside a batched plan")
+	}
+	found := false
+	for _, diagnostic := range err.(*ValidationError).Diagnostics {
+		if diagnostic.Code == CodeInvalidRelay && diagnostic.Details["batch_id"] == "unplanned-batch" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want %s for unplanned-batch", err.(*ValidationError).Diagnostics, CodeInvalidRelay)
+	}
+}
+
+func TestAssembleBatchedPlanRequiresSelectedContractRefs(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(planResult.Plan.Batches) == 0 {
+		t.Fatalf("plan batches = %#v, want at least one", planResult.Plan.Batches)
+	}
+	refs := validManifestEvidenceRefs()
+	refs.SelectedContracts = nil
+
+	_, err = Assemble(AssembleOptions{
+		Plan:         planResult.Plan,
+		EvidenceRefs: refs,
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted a batched plan without selected-contract references")
+	}
+	found := false
+	for _, diagnostic := range err.(*ValidationError).Diagnostics {
+		if diagnostic.Code == CodeMissingEvidenceRef && diagnostic.Details["ref"] == "selected_contracts" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want %s for selected_contracts", err.(*ValidationError).Diagnostics, CodeMissingEvidenceRef)
+	}
+}
+
 func planningTestPreflightBinding(t *testing.T) PreflightBinding {
 	t.Helper()
 	refs := validManifestEvidenceRefs()

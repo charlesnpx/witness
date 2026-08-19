@@ -16,6 +16,7 @@ import (
 const (
 	RoleOutputV3                   = "review-role-output-v3"
 	RoleOutputV4                   = "review-role-output-v4"
+	RoleOutputV5                   = "review-role-output-v5"
 	VerificationBatchV2            = "review-verification-batch-v2"
 	RelayWitnessVerdictsV2         = "relay-witness-verdicts-v2"
 	VerificationManifestV3         = "review-verification-manifest-v3"

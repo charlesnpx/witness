@@ -251,24 +251,40 @@ func TestRoleOutputValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read initialized role output: %v", err)
 	}
-	if initialized.SchemaVersion != contracts.RoleOutputV4 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
+	if initialized.SchemaVersion != contracts.RoleOutputV5 || initialized.Role != contracts.RoleDefect || initialized.Findings == nil || len(initialized.Findings) != 0 {
 		t.Fatalf("initialized role output = %#v, want an empty valid defect document", initialized)
 	}
 	if err := contracts.RequireValidRoleOutput(initialized, nil); err != nil {
 		t.Fatalf("initialized role output validation: %v", err)
 	}
+	if initialized.Evaluation != nil {
+		t.Fatalf("initialized role output evaluation = %#v, want no scaffolded attestation", initialized.Evaluation)
+	}
 	plannerFrozen := validCLIFrozenCharter(t)
 	plannerFrozen.CharterHash = initialized.CharterHash
-	planned, err := planning.Run(planning.Options{
+	unattested := initialized
+	unattested.SchemaVersion = contracts.RoleOutputV4
+	if err := contracts.RequireValidRoleOutput(unattested, &plannerFrozen); err != nil {
+		t.Fatalf("v4 RequireValidRoleOutput: %v", err)
+	}
+	_, err = planning.Run(planning.Options{
 		FrozenCharter: &plannerFrozen,
-		RoleOutputs:   []planning.RoleOutputInput{{Path: initializedPath, Document: initialized}},
+		RoleOutputs:   []planning.RoleOutputInput{{Path: initializedPath, Document: unattested}},
 		Preflight:     planning.PreflightBinding{SnapshotDigest: initialized.ArtifactDigest},
 	})
-	if err != nil {
-		t.Fatalf("planner accepts initialized role output: %v", err)
+	var validation *planning.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("planner error = %T (%v), want *planning.ValidationError", err, err)
 	}
-	if len(planned.Plan.Diagnostics) != 0 {
-		t.Fatalf("planner diagnostics for initialized role output = %#v", planned.Plan.Diagnostics)
+	foundUnattested := false
+	for _, diagnostic := range validation.Diagnostics {
+		if diagnostic.Code == planning.CodeUnattestedEmptyRoleOutput {
+			foundUnattested = true
+			break
+		}
+	}
+	if !foundUnattested {
+		t.Fatalf("planner diagnostics = %#v, want %s", validation.Diagnostics, planning.CodeUnattestedEmptyRoleOutput)
 	}
 	if !roleOutputHasInitPlaceholders(initialized) {
 		t.Fatal("initialized template not detected as carrying placeholder identities")
@@ -360,7 +376,7 @@ func TestRoleOutputValidate(t *testing.T) {
 			if result, err = strictjson.DecodeBytes[roleOutputValidationResult]([]byte(output), strictjson.DefaultMaxBytes); err != nil {
 				t.Fatalf("decode validation output: %v", err)
 			}
-			if !result.OK || result.SchemaVersion != contracts.RoleOutputV4 || result.RoleOutputDigest != test.wantDigest {
+			if !result.OK || result.SchemaVersion != contracts.RoleOutputV5 || result.RoleOutputDigest != test.wantDigest {
 				t.Fatalf("validation result = %#v, want ok result with schema version and digest", result)
 			}
 		})
@@ -901,6 +917,68 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 	}
 	if len(manifest.Batches) != 1 || manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
 		t.Fatalf("manifest batches = %#v, want unavailable missing relay verification", manifest.Batches)
+	}
+}
+
+func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
+	dir := t.TempDir()
+	frozen := validCLIFrozenCharter(t)
+	frozenPath := filepath.Join(dir, "frozen.json")
+	roleOutputPath := filepath.Join(dir, "role-output.json")
+	stateDir := filepath.Join(dir, "state")
+	planOut := filepath.Join(dir, "plan-out.json")
+	manifestOut := filepath.Join(dir, "manifest.json")
+	compatibility := writeCLIArtifact(t, dir, "compatibility.json")
+	capabilities := writeCLIArtifact(t, dir, "capabilities.json")
+	bundle := writeCLIArtifact(t, dir, "bundle.json")
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
+
+	if err := writeCanonical(frozenPath, frozen); err != nil {
+		t.Fatal(err)
+	}
+	roleOutput := validCLIRoleOutput(frozen)
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.Findings = []contracts.Finding{}
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{"whole-tree"},
+		EvaluatedCharterGoalIDs: []string{"goal-cli"},
+	}
+	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+		t.Fatal(err)
+	}
+	if err := route([]string{
+		"verification", "plan",
+		"-charter-freeze", frozenPath,
+		"-preflight", preflightPath,
+		"-role-output", roleOutputPath,
+		"-state-dir", stateDir,
+		"-out", planOut,
+	}); err != nil {
+		t.Fatalf("verification plan: %v", err)
+	}
+	if err := route([]string{
+		"verification", "assemble",
+		"-plan", filepath.Join(stateDir, "verification-plan.json"),
+		"-compatibility-manifest", compatibility,
+		"-relay-capabilities", capabilities,
+		"-integration-bundle", bundle,
+		"-out", manifestOut,
+	}); err != nil {
+		t.Fatalf("verification assemble without -selected-contract: %v", err)
+	}
+	data, err := os.ReadFile(manifestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Batches) != 0 {
+		t.Fatalf("manifest batches = %#v, want none", manifest.Batches)
+	}
+	if len(manifest.SelectedContracts) != 0 {
+		t.Fatalf("manifest selected contracts = %#v, want none", manifest.SelectedContracts)
 	}
 }
 
@@ -1500,7 +1578,12 @@ func TestVerificationAssembleRunRelayRetainsConsumingRecordAcrossBudgetRejection
 		case contracts.RoleDefect:
 		case contracts.RoleEconomy:
 			roleOutput.Role = contracts.RoleEconomy
+			roleOutput.SchemaVersion = contracts.RoleOutputV5
 			roleOutput.Findings = []contracts.Finding{}
+			roleOutput.Evaluation = &contracts.RoleEvaluation{
+				EvaluatedPaths:          []string{"app.txt"},
+				EvaluatedCharterGoalIDs: []string{"goal-cli"},
+			}
 		default:
 			t.Fatalf("unexpected caller role-output request: %#v", request)
 		}

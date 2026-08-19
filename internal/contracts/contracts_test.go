@@ -87,6 +87,79 @@ func TestRoleOutputV4RequiresKnownFindingAttribution(t *testing.T) {
 	}
 }
 
+func TestRoleOutputV5MaintainsFindingValidation(t *testing.T) {
+	frozen := validFrozenCharter(t)
+	document := readRoleFixture(t, "role-output-defect.json")
+	document.SchemaVersion = RoleOutputV5
+	document.CharterHash = frozen.CharterHash
+	if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
+		t.Fatalf("v5 ValidateRoleOutput diagnostics = %#v", diagnostics)
+	}
+	document.Findings[0].Attribution = ""
+	assertDiagnosticCode(t, ValidateRoleOutput(document, frozen), CodeInvalidRoleOutput)
+}
+
+func TestRoleOutputEvaluationRequiresV5(t *testing.T) {
+	frozen := validFrozenCharter(t)
+	v4 := readRoleFixture(t, "role-output-defect.json")
+	v4.CharterHash = frozen.CharterHash
+	v4.Evaluation = &RoleEvaluation{
+		EvaluatedPaths:          []string{"cmd/witness/main.go"},
+		EvaluatedCharterGoalIDs: []string{"goal-cli"},
+	}
+	assertDiagnosticCode(t, ValidateRoleOutput(v4, frozen), CodeInvalidRoleOutput)
+
+	v3 := readRoleFixture(t, "role-output-defect-v3.json")
+	v3.CharterHash = frozen.CharterHash
+	v3.Evaluation = &RoleEvaluation{
+		EvaluatedPaths:          []string{"cmd/witness/main.go"},
+		EvaluatedCharterGoalIDs: []string{"goal-cli"},
+	}
+	assertDiagnosticCode(t, ValidateRoleOutput(v3, frozen), CodeInvalidRoleOutput)
+}
+
+func TestRoleOutputEvaluationRequiresCompleteUniqueLists(t *testing.T) {
+	frozen := validFrozenCharter(t)
+	validV5 := func() RoleOutputDocument {
+		document := readRoleFixture(t, "role-output-defect.json")
+		document.SchemaVersion = RoleOutputV5
+		document.CharterHash = frozen.CharterHash
+		document.Evaluation = &RoleEvaluation{
+			EvaluatedPaths:          []string{"cmd/witness/main.go"},
+			EvaluatedCharterGoalIDs: []string{"goal-cli"},
+		}
+		return document
+	}
+	assertInvalid := func(document RoleOutputDocument) {
+		t.Helper()
+		if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) == 0 {
+			t.Fatal("ValidateRoleOutput accepted malformed evaluation")
+		}
+	}
+
+	if diagnostics := ValidateRoleOutput(validV5(), frozen); len(diagnostics) != 0 {
+		t.Fatalf("valid v5 evaluation diagnostics = %#v", diagnostics)
+	}
+	document := validV5()
+	document.Evaluation.EvaluatedPaths = nil
+	assertInvalid(document)
+	document = validV5()
+	document.Evaluation.EvaluatedPaths = []string{" "}
+	assertInvalid(document)
+	document = validV5()
+	document.Evaluation.EvaluatedPaths = []string{"cmd/witness/main.go", "cmd/witness/main.go"}
+	assertInvalid(document)
+	document = validV5()
+	document.Evaluation.EvaluatedCharterGoalIDs = nil
+	assertInvalid(document)
+	document = validV5()
+	document.Evaluation.EvaluatedCharterGoalIDs = []string{" "}
+	assertInvalid(document)
+	document = validV5()
+	document.Evaluation.EvaluatedCharterGoalIDs = []string{"goal-cli", "goal-cli"}
+	assertInvalid(document)
+}
+
 func TestRoleOutputV3CompatibilityTreatsFindingsAsUnattributed(t *testing.T) {
 	frozen := validFrozenCharter(t)
 	document := readRoleFixture(t, "role-output-defect-v3.json")
