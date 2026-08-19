@@ -240,7 +240,7 @@ from another run:
       "<each path from the pass change surface that this finder evaluated>"
     ],
     "evaluated_charter_goal_ids": [
-      "<each frozen Charter goal ID or standing-statement ID that this finder evaluated>"
+      "<each real frozen Charter goal ID evaluated; only with no real goals: standing-no-derived-goals>"
     ]
   }
 }
@@ -253,10 +253,11 @@ and must include a non-empty, duplicate-free `evaluation`. Under a
 `delta_obligating` pass, `evaluated_paths` must name every path in the derived
 change surface and no other path; the change surface is available from the
 caller role-output action. Every `evaluated_charter_goal_ids` entry must be an
-actual frozen Charter goal ID or standing-statement ID. Under a zero-goal
-Charter explicitly allowed with `-allow-empty-charter`, name its frozen
-`standing-no-derived-goals` standing statement; that is the correct way to make
-the required non-empty attestation. In a whole-tree pass with no derived change
+real frozen Charter goal ID that the finder evaluated. Only under a zero-goal
+Charter explicitly allowed with `-allow-empty-charter` may it name the frozen
+`standing-no-derived-goals` standing statement; that statement is not a valid
+attestation ID when the Charter declares one or more real goals. In a whole-tree
+pass with no derived change
 surface, list the non-empty set of paths the finder actually evaluated; Witness
 can structurally validate that claim but has no change-surface list to compare
 it against. Do not leave the initializer's
@@ -622,12 +623,14 @@ describe a pending-verification item as verified.
 
 A zero-findings result is only as meaningful as the Charter goals and finder
 effort behind it. A v5 empty defect or economy document must attest the paths
-and frozen Charter goal IDs or standing-statement IDs it evaluated. Under a
-zero-goal Charter explicitly allowed with `-allow-empty-charter`, naming the
-frozen `standing-no-derived-goals` standing statement is the correct way to
-attest. For a derived delta, Witness rejects an attestation that invents a path
-or omits a changed path, and it rejects a goal or standing-statement ID absent
-from the frozen Charter. This turns an empty result into a
+and real frozen Charter goal IDs it evaluated. Under a zero-goal Charter
+explicitly allowed with `-allow-empty-charter`, naming the frozen
+`standing-no-derived-goals` standing statement is the correct way to attest;
+that statement is a valid attestation ID only when the Charter declares no real
+goals. For a derived delta, Witness rejects an attestation that invents a path
+or omits a changed path, and it rejects an unknown real goal or a
+standing-statement ID under a Charter with real goals. This turns an empty
+result into a
 cross-checkable claim; it does not prove that the finder reviewed those paths
 or that the repository has no defects. A determined lazy finder can still file
 a false but shape-correct attestation.

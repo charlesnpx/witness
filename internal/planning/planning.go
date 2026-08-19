@@ -581,8 +581,10 @@ func validateRoleOutputEvaluationAdmission(document contracts.RoleOutputDocument
 		for _, goal := range frozen.Charter.Goals {
 			goalIDs[goal.ID] = true
 		}
-		for _, standingStatement := range frozen.Charter.StandingNoGoals {
-			goalIDs[standingStatement.ID] = true
+		if len(frozen.Charter.Goals) == 0 {
+			for _, standingStatement := range frozen.Charter.StandingNoGoals {
+				goalIDs[standingStatement.ID] = true
+			}
 		}
 	}
 	for index, goalID := range document.Evaluation.EvaluatedCharterGoalIDs {

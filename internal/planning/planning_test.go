@@ -346,6 +346,28 @@ func TestPlanningAcceptsStandingStatementEvaluationUnderZeroGoalCharter(t *testi
 	}
 }
 
+func TestPlanningRejectsStandingStatementEvaluationUnderRealGoalCharter(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{"whole-tree"},
+		EvaluatedCharterGoalIDs: []string{charter.StandingNoGoalsID},
+	}
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+	})
+	validation := requirePlanningValidationError(t, err)
+	for _, diagnostic := range validation.Diagnostics {
+		if diagnostic.Code == CodeInvalidRoleOutput && diagnostic.Details["goal_id"] == charter.StandingNoGoalsID {
+			return
+		}
+	}
+	t.Fatalf("diagnostics = %#v, want unknown-goal diagnostic for %q", validation.Diagnostics, charter.StandingNoGoalsID)
+}
+
 func TestPlanningRejectsEmptyRoleOutputEvaluationPathOutsideChangeSurface(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
