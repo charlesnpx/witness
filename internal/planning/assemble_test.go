@@ -1213,11 +1213,17 @@ func TestAssembleRejectsSelectedContractManifestEvidenceMismatch(t *testing.T) {
 func TestAssembleZeroBatchPlanRejectsTamperedSelectedContractEvidence(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	refs := validManifestEvidenceRefs()
+	defect := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	defect.SchemaVersion = contracts.RoleOutputV5
+	defect.Evaluation = planningTestEvaluation("whole-tree")
+	economy := planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})
+	economy.SchemaVersion = contracts.RoleOutputV5
+	economy.Evaluation = planningTestEvaluation("whole-tree")
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs: []RoleOutputInput{
-			{Path: "defect.json", Document: planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})},
-			{Path: "economy.json", Document: planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})},
+			{Path: "defect.json", Document: defect},
+			{Path: "economy.json", Document: economy},
 		},
 		Preflight: planningTestPreflightBindingForRefs(t, refs),
 	})
@@ -1261,11 +1267,17 @@ func TestAssembleZeroBatchPlanRejectsTamperedSelectedContractEvidence(t *testing
 func TestAssembleRejectsUnplannedRelayEvidenceForZeroBatchPlan(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	refs := validManifestEvidenceRefs()
+	defect := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	defect.SchemaVersion = contracts.RoleOutputV5
+	defect.Evaluation = planningTestEvaluation("whole-tree")
+	economy := planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})
+	economy.SchemaVersion = contracts.RoleOutputV5
+	economy.Evaluation = planningTestEvaluation("whole-tree")
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs: []RoleOutputInput{
-			{Path: "defect.json", Document: planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})},
-			{Path: "economy.json", Document: planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})},
+			{Path: "defect.json", Document: defect},
+			{Path: "economy.json", Document: economy},
 		},
 		Preflight: planningTestPreflightBindingForRefs(t, refs),
 	})

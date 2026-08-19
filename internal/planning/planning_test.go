@@ -107,12 +107,18 @@ func TestPlanningEmptyFindingsEmitEmptyBatchArrays(t *testing.T) {
 	refs := validManifestEvidenceRefs()
 	refs.SelectedContracts = nil
 	refs.SelectedContractEvidence = nil
+	defect := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	defect.SchemaVersion = contracts.RoleOutputV5
+	defect.Evaluation = planningTestEvaluation("whole-tree")
+	economy := planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})
+	economy.SchemaVersion = contracts.RoleOutputV5
+	economy.Evaluation = planningTestEvaluation("whole-tree")
 	stateDir := t.TempDir()
 	result, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs: []RoleOutputInput{
-			{Path: "defect.json", Document: planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})},
-			{Path: "economy.json", Document: planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})},
+			{Path: "defect.json", Document: defect},
+			{Path: "economy.json", Document: economy},
 		},
 		StateDir:  stateDir,
 		Preflight: planningTestPreflightBindingForRefs(t, refs),
@@ -122,6 +128,9 @@ func TestPlanningEmptyFindingsEmitEmptyBatchArrays(t *testing.T) {
 	}
 	if result.Plan.Batches == nil {
 		t.Fatal("plan batches = nil, want non-nil empty slice")
+	}
+	if len(result.Plan.Diagnostics) != 0 {
+		t.Fatalf("plan diagnostics = %#v, want none", result.Plan.Diagnostics)
 	}
 
 	for _, output := range []struct {
@@ -154,6 +163,316 @@ func TestPlanningEmptyFindingsEmitEmptyBatchArrays(t *testing.T) {
 	if len(assembled.Manifest.SelectedContracts) != 0 {
 		t.Fatalf("manifest selected contracts = %#v, want none for an empty plan", assembled.Manifest.SelectedContracts)
 	}
+}
+
+func TestPlanningRejectsUnattestedEmptyRoleOutput(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	if err := contracts.RequireValidRoleOutput(roleOutput, frozen); err != nil {
+		t.Fatalf("RequireValidRoleOutput: %v", err)
+	}
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+	})
+	validation := requirePlanningValidationError(t, err)
+	assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeUnattestedEmptyRoleOutput)
+}
+
+func TestPlanningCollectsAdmissionRefusalsAcrossRoleOutputs(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	defect := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	economy := planningTestRoleOutput(frozen, contracts.RoleEconomy, []contracts.Finding{})
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs: []RoleOutputInput{
+			{Path: "defect.json", Document: defect},
+			{Path: "economy.json", Document: economy},
+		},
+	})
+	validation := requirePlanningValidationError(t, err)
+	if len(validation.Diagnostics) != 2 {
+		t.Fatalf("validation diagnostics = %#v, want both role-output refusals", validation.Diagnostics)
+	}
+	for index, roleOutput := range []string{"defect.json", "economy.json"} {
+		diagnostic := validation.Diagnostics[index]
+		if diagnostic.Code != CodeUnattestedEmptyRoleOutput {
+			t.Fatalf("diagnostic %d code = %s, want %s", index, diagnostic.Code, CodeUnattestedEmptyRoleOutput)
+		}
+		if got, _ := diagnostic.Details["role_output"].(string); got != roleOutput {
+			t.Fatalf("diagnostic %d role_output = %q, want %q", index, got, roleOutput)
+		}
+	}
+}
+
+func TestPlanningRefusalDoesNotWriteState(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	stateDir := t.TempDir()
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		StateDir:      stateDir,
+	})
+	validation := requirePlanningValidationError(t, err)
+	assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeUnattestedEmptyRoleOutput)
+	planPath := filepath.Join(stateDir, "verification-plan.json")
+	if _, statErr := os.Stat(planPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused plan state at %s: stat error = %v, want no plan file", planPath, statErr)
+	}
+	entries, readErr := os.ReadDir(stateDir)
+	if readErr != nil {
+		t.Fatalf("read state directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("state directory entries = %#v, want no persisted state", entries)
+	}
+}
+
+func TestPlanningRejectsStructurallyInvalidEmptyRoleOutputWithoutWritingState(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	stateDir := t.TempDir()
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{},
+		EvaluatedCharterGoalIDs: []string{},
+	}
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		StateDir:      stateDir,
+	})
+	validation := requirePlanningValidationError(t, err)
+	assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeUnattestedEmptyRoleOutput)
+	planPath := filepath.Join(stateDir, "verification-plan.json")
+	if _, statErr := os.Stat(planPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused plan state at %s: stat error = %v, want no plan file", planPath, statErr)
+	}
+	entries, readErr := os.ReadDir(stateDir)
+	if readErr != nil {
+		t.Fatalf("read state directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("state directory entries = %#v, want no persisted state", entries)
+	}
+}
+
+func TestPlanningRejectsEmptyRoleOutputEvaluationWithDuplicatePath(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{"whole-tree", "whole-tree"},
+		EvaluatedCharterGoalIDs: []string{"goal-cli"},
+	}
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+	})
+	validation := requirePlanningValidationError(t, err)
+	assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeUnattestedEmptyRoleOutput)
+}
+
+func TestPlanningAcceptsTruthfulEmptyRoleOutputEvaluation(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.ArtifactDigest = headDigest
+	roleOutput.Evaluation = planningTestEvaluation("internal/changed.go", "internal/deleted.go")
+
+	result, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Plan.Diagnostics) != 0 {
+		t.Fatalf("plan diagnostics = %#v, want none", result.Plan.Diagnostics)
+	}
+	if len(result.Plan.Batches) != 0 || len(result.Batches) != 0 {
+		t.Fatalf("planned batches = %#v, outputs = %#v; want valid zero-batch plan", result.Plan.Batches, result.Batches)
+	}
+}
+
+func TestPlanningAcceptsStandingStatementEvaluationUnderZeroGoalCharter(t *testing.T) {
+	frozen, err := charter.Freeze(charter.Charter{
+		SchemaVersion: charter.SchemaVersion,
+		Goals:         []charter.Statement{},
+		NonGoals:      []charter.Statement{},
+		OwnerEvents: []charter.OwnerEvent{{
+			ID:      "event-1",
+			Type:    "charter_initialized",
+			Actor:   "owner",
+			Summary: "Explicitly allowed empty Charter.",
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frozen.Charter.Goals) != 0 {
+		t.Fatalf("frozen Charter goals = %#v, want zero-goal Charter", frozen.Charter.Goals)
+	}
+	if len(frozen.Charter.StandingNoGoals) != 1 || frozen.Charter.StandingNoGoals[0].ID != charter.StandingNoGoalsID {
+		t.Fatalf("frozen Charter standing statements = %#v", frozen.Charter.StandingNoGoals)
+	}
+	roleOutput := planningTestRoleOutput(&frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{"whole-tree"},
+		EvaluatedCharterGoalIDs: []string{charter.StandingNoGoalsID},
+	}
+
+	result, err := Run(Options{
+		FrozenCharter: &frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Plan.Diagnostics) != 0 {
+		t.Fatalf("plan diagnostics = %#v, want none", result.Plan.Diagnostics)
+	}
+	if len(result.Plan.Batches) != 0 || len(result.Batches) != 0 {
+		t.Fatalf("planned batches = %#v, outputs = %#v; want valid zero-batch plan", result.Plan.Batches, result.Batches)
+	}
+}
+
+func TestPlanningRejectsStandingStatementEvaluationUnderRealGoalCharter(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{"whole-tree"},
+		EvaluatedCharterGoalIDs: []string{charter.StandingNoGoalsID},
+	}
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+	})
+	validation := requirePlanningValidationError(t, err)
+	for _, diagnostic := range validation.Diagnostics {
+		if diagnostic.Code == CodeInvalidRoleOutput && diagnostic.Details["goal_id"] == charter.StandingNoGoalsID {
+			return
+		}
+	}
+	t.Fatalf("diagnostics = %#v, want unknown-goal diagnostic for %q", validation.Diagnostics, charter.StandingNoGoalsID)
+}
+
+func TestPlanningRejectsEmptyRoleOutputEvaluationPathOutsideChangeSurface(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.ArtifactDigest = headDigest
+	roleOutput.Evaluation = planningTestEvaluation("internal/changed.go", "internal/deleted.go", "internal/invented.go")
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	validation := requirePlanningValidationError(t, err)
+	assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeInvalidRoleOutput)
+}
+
+func TestPlanningRejectsIncompleteEmptyRoleOutputEvaluation(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.ArtifactDigest = headDigest
+	roleOutput.Evaluation = planningTestEvaluation("internal/changed.go")
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	validation := requirePlanningValidationError(t, err)
+	assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeInvalidRoleOutput)
+}
+
+func TestPlanningRejectsEmptyRoleOutputEvaluationUnknownCharterGoal(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	roleOutput.SchemaVersion = contracts.RoleOutputV5
+	roleOutput.ArtifactDigest = headDigest
+	roleOutput.Evaluation = &contracts.RoleEvaluation{
+		EvaluatedPaths:          []string{"internal/changed.go", "internal/deleted.go"},
+		EvaluatedCharterGoalIDs: []string{"unknown-goal"},
+	}
+
+	_, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+		ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+	})
+	validation := requirePlanningValidationError(t, err)
+	assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeInvalidRoleOutput)
+}
+
+func TestPlanningValidatesV5EvaluationWhenFindingsArePresent(t *testing.T) {
+	t.Run("cross-check failures remain fatal", func(t *testing.T) {
+		frozen := planningTestFrozenCharter(t)
+		baseManifest, headManifest, headDigest := planningDeltaManifests(t)
+		roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+			planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+		})
+		roleOutput.SchemaVersion = contracts.RoleOutputV5
+		roleOutput.ArtifactDigest = headDigest
+		roleOutput.Evaluation = planningTestEvaluation("internal/invented.go")
+
+		_, err := Run(Options{
+			FrozenCharter: frozen,
+			RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+			Preflight:     PreflightBinding{SnapshotDigest: headDigest},
+			ChangeSurface: ChangeSurfaceInput{BaseManifest: &baseManifest, HeadManifest: &headManifest},
+		})
+		validation := requirePlanningValidationError(t, err)
+		assertPlanningDiagnosticCode(t, validation.Diagnostics, CodeInvalidRoleOutput)
+	})
+
+	t.Run("structural diagnostics remain advisory", func(t *testing.T) {
+		frozen := planningTestFrozenCharter(t)
+		roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
+			planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed),
+		})
+		roleOutput.SchemaVersion = contracts.RoleOutputV5
+		roleOutput.Evaluation = &contracts.RoleEvaluation{
+			EvaluatedPaths:          []string{"whole-tree", "whole-tree"},
+			EvaluatedCharterGoalIDs: []string{"goal-cli"},
+		}
+
+		result, err := Run(Options{
+			FrozenCharter: frozen,
+			RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertPlanningDiagnosticCode(t, result.Plan.Diagnostics, contracts.CodeInvalidRoleOutput)
+		if len(result.Plan.Batches) != 0 || len(result.Plan.ExcludedFindings) != 1 {
+			t.Fatalf("plan = %#v, want one advisory exclusion and no batches", result.Plan)
+		}
+		excluded := result.Plan.ExcludedFindings[0]
+		if excluded.Disposition != DispositionAdvisory || excluded.Reason != CodeInvalidRoleOutput || len(excluded.Diagnostics) == 0 {
+			t.Fatalf("excluded finding = %#v, want advisory structural-evaluation exclusion", excluded)
+		}
+	})
 }
 
 func TestPlanningPreSpendViolationsAreAdvisoryBeforeBatching(t *testing.T) {
@@ -558,7 +877,9 @@ func TestPlanningConsumerFallbackSkipsPreflightSnapshotMismatch(t *testing.T) {
 	mismatched.ConsumerIdentity = map[string]any{"kind": "test", "id": "consumer-a"}
 
 	emptyDigest := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{})
+	emptyDigest.SchemaVersion = contracts.RoleOutputV5
 	emptyDigest.ArtifactDigest = ""
+	emptyDigest.Evaluation = planningTestEvaluation("whole-tree")
 	emptyDigest.ConsumerIdentity = map[string]any{"kind": "test", "id": "consumer-empty"}
 
 	matching := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{
@@ -665,6 +986,35 @@ func planningTestRoleOutput(frozen *charter.FrozenCharter, role string, findings
 		},
 		Findings: findings,
 	}
+}
+
+func planningTestEvaluation(paths ...string) *contracts.RoleEvaluation {
+	return &contracts.RoleEvaluation{
+		EvaluatedPaths:          append([]string(nil), paths...),
+		EvaluatedCharterGoalIDs: []string{"goal-cli"},
+	}
+}
+
+func assertPlanningDiagnosticCode(t *testing.T, diagnostics []diag.Diagnostic, code string) {
+	t.Helper()
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == code {
+			return
+		}
+	}
+	t.Fatalf("diagnostics = %#v, want code %s", diagnostics, code)
+}
+
+func requirePlanningValidationError(t *testing.T, err error) *ValidationError {
+	t.Helper()
+	if err == nil {
+		t.Fatal("Run succeeded, want a planning validation refusal")
+	}
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("Run error = %T (%v), want *ValidationError", err, err)
+	}
+	return validation
 }
 
 func planningTestFinding(id string, severity string, strength string) contracts.Finding {

@@ -209,19 +209,19 @@ examining the frozen source snapshot against the Charter goals. Point finders
 at the snapshot retained under the state directory's `source-snapshot/` — the
 manifest lists every captured file with its content digest and the blobs hold
 the exact captured bytes — rather than at the live checkout, which can change
-after the freeze. The manual
-editing below is solely a stand-in used to demonstrate the required document
-shape and the zero-findings flow. A hand-authored zero-findings document is the
-vacuous case: Witness will record and adjudicate it, but its verdict carries no
-evidentiary weight about the source; see [Zero findings does not prove absence
-of defects](#zero-findings-does-not-prove-absence-of-defects). For a
-zero-findings run, the complete defect document has this shape; use the
+after the freeze. The manual editing below is solely a stand-in used to
+demonstrate the required document shape and the zero-findings flow. A
+zero-findings finder document is a specific self-reported claim about the paths
+and Charter goals the finder evaluated. Witness cross-checks that claim against
+the derived change surface and frozen Charter where it can; it does not prove
+that the review happened. For a zero-findings run, the complete defect document
+has this shape; use the
 `charter_hash` and `snapshot_digest` reported by the pass rather than values
 from another run:
 
 ```json
 {
-  "schema_version": "review-role-output-v4",
+  "schema_version": "review-role-output-v5",
   "role": "defect",
   "charter_hash": "<next_action.charter_hash>",
   "artifact_digest": "<next_action.snapshot_digest>",
@@ -234,13 +234,33 @@ from another run:
     "kind": "finder",
     "id": "<identifier for this finder run>"
   },
-  "findings": []
+  "findings": [],
+  "evaluation": {
+    "evaluated_paths": [
+      "<each path from the pass change surface that this finder evaluated>"
+    ],
+    "evaluated_charter_goal_ids": [
+      "<each real frozen Charter goal ID evaluated; only with no real goals: standing-no-derived-goals>"
+    ]
+  }
 }
 ```
 
 Use the same binding values and real identities for the economy document, with
 `"role": "economy"`. The empty array is intentional: `findings` must be `[]`
-for a zero-findings defect or economy role output. Do not leave the initializer's
+for a zero-findings defect or economy role output. Such an output must be v5
+and must include a non-empty, duplicate-free `evaluation`. Under a
+`delta_obligating` pass, `evaluated_paths` must name every path in the derived
+change surface and no other path; the change surface is available from the
+caller role-output action. Every `evaluated_charter_goal_ids` entry must be an
+real frozen Charter goal ID that the finder evaluated. Only under a zero-goal
+Charter explicitly allowed with `-allow-empty-charter` may it name the frozen
+`standing-no-derived-goals` standing statement; that statement is not a valid
+attestation ID when the Charter declares one or more real goals. In a whole-tree
+pass with no derived change
+surface, list the non-empty set of paths the finder actually evaluated; Witness
+can structurally validate that claim but has no change-surface list to compare
+it against. Do not leave the initializer's
 `{"kind":"placeholder","id":"replace-before-use"}` identities in either
 document. Angle-bracket values in the example are instructions to insert values
 from this pass, not literal placeholder identities.
@@ -256,7 +276,7 @@ current pass before filing it.
 
 ```json
 {
-  "schema_version": "review-role-output-v4",
+  "schema_version": "review-role-output-v5",
   "role": "defect",
   "charter_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -350,10 +370,12 @@ current pass before filing it.
 
 The root fields are `schema_version`, `role`, `charter_hash`,
 `artifact_digest`, `source_identity`, `consumer_identity`, `findings`, and the
-optional `missing_goal_questions`. `source_identity` and `consumer_identity`
-must each be non-empty JSON objects; their internal identity fields are owned by
-the producer. Defect and economy role outputs require `findings` to be an
-array, including `[]` when there are no findings.
+optional `evaluation` and `missing_goal_questions`. `source_identity` and
+`consumer_identity` must each be non-empty JSON objects; their internal
+identity fields are owned by the producer. Defect and economy role outputs
+require `findings` to be an array, including `[]` when there are no findings.
+Only v5 may carry `evaluation`; it has `evaluated_paths` and
+`evaluated_charter_goal_ids` arrays.
 
 Each `findings` entry has `id`, `kind`, `title`, `charter_goal_ids`,
 `claimed_severity`, `attribution`, `scope_anchors`, `witness`, `estimated_delta`,
@@ -600,9 +622,18 @@ describe a pending-verification item as verified.
 ## Zero findings does not prove absence of defects
 
 A zero-findings result is only as meaningful as the Charter goals and finder
-effort behind it. Witness records that the submitted finder documents ran
-against the frozen source snapshot and bound their claims to the frozen Charter;
-it does not prove that the repository has no defects.
+effort behind it. A v5 empty defect or economy document must attest the paths
+and real frozen Charter goal IDs it evaluated. Under a zero-goal Charter
+explicitly allowed with `-allow-empty-charter`, naming the frozen
+`standing-no-derived-goals` standing statement is the correct way to attest;
+that statement is a valid attestation ID only when the Charter declares no real
+goals. For a derived delta, Witness rejects an attestation that invents a path
+or omits a changed path, and it rejects an unknown real goal or a
+standing-statement ID under a Charter with real goals. This turns an empty
+result into a
+cross-checkable claim; it does not prove that the finder reviewed those paths
+or that the repository has no defects. A determined lazy finder can still file
+a false but shape-correct attestation.
 The identities in a role-output document assert the frozen source and who
 produced the findings; inventing either defeats the provenance record Witness
 keeps.
