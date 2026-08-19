@@ -240,7 +240,7 @@ from another run:
       "<each path from the pass change surface that this finder evaluated>"
     ],
     "evaluated_charter_goal_ids": [
-      "<each frozen Charter goal ID that this finder evaluated>"
+      "<each frozen Charter goal ID or standing-statement ID that this finder evaluated>"
     ]
   }
 }
@@ -253,7 +253,10 @@ and must include a non-empty, duplicate-free `evaluation`. Under a
 `delta_obligating` pass, `evaluated_paths` must name every path in the derived
 change surface and no other path; the change surface is available from the
 caller role-output action. Every `evaluated_charter_goal_ids` entry must be an
-actual frozen Charter goal ID. In a whole-tree pass with no derived change
+actual frozen Charter goal ID or standing-statement ID. Under a zero-goal
+Charter explicitly allowed with `-allow-empty-charter`, name its frozen
+`standing-no-derived-goals` standing statement; that is the correct way to make
+the required non-empty attestation. In a whole-tree pass with no derived change
 surface, list the non-empty set of paths the finder actually evaluated; Witness
 can structurally validate that claim but has no change-surface list to compare
 it against. Do not leave the initializer's
@@ -619,9 +622,12 @@ describe a pending-verification item as verified.
 
 A zero-findings result is only as meaningful as the Charter goals and finder
 effort behind it. A v5 empty defect or economy document must attest the paths
-and Charter goal IDs it evaluated. For a derived delta, Witness rejects an
-attestation that invents a path or omits a changed path, and it rejects a goal
-ID absent from the frozen Charter. This turns an empty result into a
+and frozen Charter goal IDs or standing-statement IDs it evaluated. Under a
+zero-goal Charter explicitly allowed with `-allow-empty-charter`, naming the
+frozen `standing-no-derived-goals` standing statement is the correct way to
+attest. For a derived delta, Witness rejects an attestation that invents a path
+or omits a changed path, and it rejects a goal or standing-statement ID absent
+from the frozen Charter. This turns an empty result into a
 cross-checkable claim; it does not prove that the finder reviewed those paths
 or that the repository has no defects. A determined lazy finder can still file
 a false but shape-correct attestation.

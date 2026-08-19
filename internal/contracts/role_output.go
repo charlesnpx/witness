@@ -236,6 +236,57 @@ func RequireValidRoleOutput(document RoleOutputDocument, frozen *charter.FrozenC
 	return ErrorFromDiagnostics(ValidateRoleOutput(document, frozen))
 }
 
+func ValidateRoleEvaluation(evaluation RoleEvaluation) []diag.Diagnostic {
+	const path = "/evaluation"
+
+	var diagnostics []diag.Diagnostic
+	if len(evaluation.EvaluatedPaths) == 0 {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidRoleOutput,
+			"evaluation requires at least one evaluated path.",
+			path+"/evaluated_paths",
+			nil,
+		))
+	}
+	paths := map[string]int{}
+	for index, evaluatedPath := range evaluation.EvaluatedPaths {
+		itemPath := path + "/evaluated_paths/" + itoa(index)
+		requireString(&diagnostics, itemPath, "evaluated path", evaluatedPath)
+		if first, exists := paths[evaluatedPath]; exists {
+			diagnostics = append(diagnostics, diagnostic(
+				CodeInvalidRoleOutput,
+				"evaluation paths must be unique.",
+				itemPath,
+				map[string]any{"duplicate_of": path + "/evaluated_paths/" + itoa(first)},
+			))
+		}
+		paths[evaluatedPath] = index
+	}
+	if len(evaluation.EvaluatedCharterGoalIDs) == 0 {
+		diagnostics = append(diagnostics, diagnostic(
+			CodeInvalidRoleOutput,
+			"evaluation requires at least one evaluated Charter goal ID.",
+			path+"/evaluated_charter_goal_ids",
+			nil,
+		))
+	}
+	goalIDs := map[string]int{}
+	for index, goalID := range evaluation.EvaluatedCharterGoalIDs {
+		itemPath := path + "/evaluated_charter_goal_ids/" + itoa(index)
+		requireString(&diagnostics, itemPath, "evaluated Charter goal ID", goalID)
+		if first, exists := goalIDs[goalID]; exists {
+			diagnostics = append(diagnostics, diagnostic(
+				CodeInvalidRoleOutput,
+				"evaluation Charter goal IDs must be unique.",
+				itemPath,
+				map[string]any{"duplicate_of": path + "/evaluated_charter_goal_ids/" + itoa(first)},
+			))
+		}
+		goalIDs[goalID] = index
+	}
+	return diagnostics
+}
+
 func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenCharter) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if document.SchemaVersion != RoleOutputV3 && document.SchemaVersion != RoleOutputV4 && document.SchemaVersion != RoleOutputV5 {
@@ -283,7 +334,7 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 		))
 	}
 	if document.Evaluation != nil {
-		diagnostics = append(diagnostics, validateRoleEvaluation(*document.Evaluation, "/evaluation")...)
+		diagnostics = append(diagnostics, ValidateRoleEvaluation(*document.Evaluation)...)
 	}
 
 	questions := map[string]MissingGoalQuestion{}
@@ -316,55 +367,6 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 		}
 		seenFindings[finding.ID] = index
 		diagnostics = append(diagnostics, validateFinding(document.SchemaVersion, document.Role, finding, path, frozen, goalIDs, questions, questionPaths)...)
-	}
-	return diagnostics
-}
-
-func validateRoleEvaluation(evaluation RoleEvaluation, path string) []diag.Diagnostic {
-	var diagnostics []diag.Diagnostic
-	if len(evaluation.EvaluatedPaths) == 0 {
-		diagnostics = append(diagnostics, diagnostic(
-			CodeInvalidRoleOutput,
-			"evaluation requires at least one evaluated path.",
-			path+"/evaluated_paths",
-			nil,
-		))
-	}
-	paths := map[string]int{}
-	for index, evaluatedPath := range evaluation.EvaluatedPaths {
-		itemPath := path + "/evaluated_paths/" + itoa(index)
-		requireString(&diagnostics, itemPath, "evaluated path", evaluatedPath)
-		if first, exists := paths[evaluatedPath]; exists {
-			diagnostics = append(diagnostics, diagnostic(
-				CodeInvalidRoleOutput,
-				"evaluation paths must be unique.",
-				itemPath,
-				map[string]any{"duplicate_of": path + "/evaluated_paths/" + itoa(first)},
-			))
-		}
-		paths[evaluatedPath] = index
-	}
-	if len(evaluation.EvaluatedCharterGoalIDs) == 0 {
-		diagnostics = append(diagnostics, diagnostic(
-			CodeInvalidRoleOutput,
-			"evaluation requires at least one evaluated Charter goal ID.",
-			path+"/evaluated_charter_goal_ids",
-			nil,
-		))
-	}
-	goalIDs := map[string]int{}
-	for index, goalID := range evaluation.EvaluatedCharterGoalIDs {
-		itemPath := path + "/evaluated_charter_goal_ids/" + itoa(index)
-		requireString(&diagnostics, itemPath, "evaluated Charter goal ID", goalID)
-		if first, exists := goalIDs[goalID]; exists {
-			diagnostics = append(diagnostics, diagnostic(
-				CodeInvalidRoleOutput,
-				"evaluation Charter goal IDs must be unique.",
-				itemPath,
-				map[string]any{"duplicate_of": path + "/evaluated_charter_goal_ids/" + itoa(first)},
-			))
-		}
-		goalIDs[goalID] = index
 	}
 	return diagnostics
 }

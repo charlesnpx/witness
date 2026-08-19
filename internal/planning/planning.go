@@ -524,7 +524,8 @@ func planChangeSurface(input ChangeSurfaceInput, passArtifactDigest string) (*ch
 }
 
 func validateRoleOutputEvaluationAdmission(document contracts.RoleOutputDocument, frozen *charter.FrozenCharter, changeSurface *changesurface.Document, scopePolicy string) []diag.Diagnostic {
-	if (document.Role == contracts.RoleDefect || document.Role == contracts.RoleEconomy) && len(document.Findings) == 0 && (document.SchemaVersion != contracts.RoleOutputV5 || document.Evaluation == nil) {
+	emptyFinderOutput := (document.Role == contracts.RoleDefect || document.Role == contracts.RoleEconomy) && len(document.Findings) == 0
+	if emptyFinderOutput && (document.SchemaVersion != contracts.RoleOutputV5 || document.Evaluation == nil) {
 		return []diag.Diagnostic{diag.FromError(diag.New(
 			CodeUnattestedEmptyRoleOutput,
 			"role-output documents with no findings require a review-role-output-v5 evaluation attestation before planning can admit them as evidence.",
@@ -534,6 +535,16 @@ func validateRoleOutputEvaluationAdmission(document contracts.RoleOutputDocument
 	}
 	if document.Evaluation == nil {
 		return nil
+	}
+	var admissionDiagnostics []diag.Diagnostic
+	if emptyFinderOutput {
+		structuralDiagnostics := contracts.ValidateRoleEvaluation(*document.Evaluation)
+		if len(structuralDiagnostics) > 0 {
+			for index := range structuralDiagnostics {
+				structuralDiagnostics[index].Code = CodeUnattestedEmptyRoleOutput
+			}
+			admissionDiagnostics = append(admissionDiagnostics, structuralDiagnostics...)
+		}
 	}
 
 	var diagnostics []diag.Diagnostic
@@ -570,6 +581,9 @@ func validateRoleOutputEvaluationAdmission(document contracts.RoleOutputDocument
 		for _, goal := range frozen.Charter.Goals {
 			goalIDs[goal.ID] = true
 		}
+		for _, standingStatement := range frozen.Charter.StandingNoGoals {
+			goalIDs[standingStatement.ID] = true
+		}
 	}
 	for index, goalID := range document.Evaluation.EvaluatedCharterGoalIDs {
 		if goalIDs[goalID] {
@@ -577,12 +591,12 @@ func validateRoleOutputEvaluationAdmission(document contracts.RoleOutputDocument
 		}
 		diagnostics = append(diagnostics, diag.FromError(diag.New(
 			CodeInvalidRoleOutput,
-			"evaluation references a Charter goal that is not declared in the frozen Charter.",
+			"evaluation references a Charter goal or standing statement that is not declared in the frozen Charter.",
 			diag.WithPath(fmt.Sprintf("/evaluation/evaluated_charter_goal_ids/%d", index)),
 			diag.WithDetail("goal_id", goalID),
 		)))
 	}
-	return diagnostics
+	return append(admissionDiagnostics, diagnostics...)
 }
 
 func preSpendDiagnostics(document contracts.RoleOutputDocument, finding contracts.Finding, frozen *charter.FrozenCharter) ([]diag.Diagnostic, string) {
