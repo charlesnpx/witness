@@ -1,19 +1,22 @@
 {
   "cases": [
-    {"file": "valid-findings.json", "expect": "valid"},
-    {"file": "valid-empty-evaluation.json", "expect": "valid"},
-    {"file": "valid-missing-goal-questions.json", "expect": "valid"},
-    {"file": "strict-duplicate-key.json", "expect": "strict-syntax"},
-    {"file": "strict-trailing-document.json", "expect": "strict-syntax"},
-    {"file": "strict-unknown-field.json", "expect": "strict-syntax"},
-    {"file": "strict-null-required.json", "expect": "strict-syntax"},
-    {"file": "schema-wrong-version.json", "expect": "json-schema"},
-    {"file": "schema-severity-enum.json", "expect": "json-schema"},
-    {"file": "schema-missing-title.json", "expect": "json-schema"},
-    {"file": "semantic-charter-mismatch.json", "expect": "semantic-binding"},
-    {"file": "semantic-empty-without-evaluation.json", "expect": "semantic-binding"},
-    {"file": "semantic-line-without-path.json", "expect": "semantic-binding"},
-    {"file": "semantic-argued-critical.json", "expect": "semantic-binding"},
-    {"file": "semantic-unknown-goal.json", "expect": "semantic-binding"}
+    {"file": "valid-findings.json", "strict": "pass", "schema": "pass", "semantic": "pass", "expected_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+    {"file": "valid-empty-evaluation.json", "strict": "pass", "schema": "pass", "semantic": "pass", "expected_input_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+    {"file": "valid-missing-goal-questions.json", "strict": "pass", "schema": "pass", "semantic": "pass", "expected_input_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"},
+    {"file": "strict-duplicate-key.json", "strict": "fail", "schema": "fail", "semantic": "n/a", "expected_input_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"},
+    {"file": "strict-trailing-document.json", "strict": "fail", "schema": "fail", "semantic": "n/a", "expected_input_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"},
+    {"file": "strict-unknown-field.json", "strict": "fail", "schema": "fail", "semantic": "n/a", "expected_input_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"},
+    {"file": "strict-null-required.json", "strict": "fail", "schema": "fail", "semantic": "n/a", "expected_input_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"},
+    {"file": "schema-wrong-version.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"},
+    {"file": "schema-severity-enum.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"},
+    {"file": "schema-missing-title.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"file": "semantic-charter-mismatch.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    {"file": "semantic-empty-without-evaluation.json", "strict": "pass", "schema": "pass", "semantic": "fail", "expected_input_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    {"file": "semantic-line-without-path.json", "strict": "pass", "schema": "pass", "semantic": "fail", "expected_input_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+    {"file": "semantic-argued-critical.json", "strict": "pass", "schema": "pass", "semantic": "fail", "expected_input_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+    {"file": "semantic-unknown-goal.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+    {"file": "semantic-input-digest-mismatch.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:1313131313131313131313131313131313131313131313131313131313131313"},
+    {"file": "semantic-executable-without-spec.json", "strict": "pass", "schema": "pass", "semantic": "fail", "expected_input_digest": "sha256:1414141414141414141414141414141414141414141414141414141414141414"},
+    {"file": "semantic-spec-without-executable.json", "strict": "pass", "schema": "pass", "semantic": "fail", "expected_input_digest": "sha256:1515151515151515151515151515151515151515151515151515151515151515"}
   ]
 }

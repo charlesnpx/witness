@@ -33,8 +33,6 @@ type ReviewReportDocument struct {
 	Findings             []ReportFinding               `json:"findings"`
 	Evaluation           *ReportEvaluation             `json:"evaluation,omitempty"`
 	MissingGoalQuestions []charter.MissingGoalQuestion `json:"missing_goal_questions,omitempty"`
-
-	findingsPresent bool
 }
 
 // ReportFinding is a defect finding submitted at the report boundary.
@@ -43,11 +41,18 @@ type ReportFinding struct {
 	Title           string             `json:"title"`
 	ClaimedSeverity string             `json:"claimed_severity"`
 	CharterGoalIDs  []string           `json:"charter_goal_ids"`
-	Witness         Witness            `json:"witness"`
+	Witness         ReportWitness      `json:"witness"`
 	Annotation      *FindingAnnotation `json:"annotation,omitempty"`
 	Remedy          *ReportRemedy      `json:"remedy,omitempty"`
+}
 
-	charterGoalIDsPresent bool
+// ReportWitness is the evidence carried by a review-report-v1 finding. It is
+// intentionally narrower than a role-output Witness.
+type ReportWitness struct {
+	Kind       string          `json:"kind"`
+	Strength   string          `json:"strength"`
+	Content    string          `json:"content"`
+	Executable *ExecutableSpec `json:"executable,omitempty"`
 }
 
 // FindingAnnotation is presentation-only location metadata. It carries no
@@ -74,8 +79,6 @@ type ReportRemedy struct {
 type ReportEvaluation struct {
 	EvaluatedPaths   []string `json:"evaluated_paths"`
 	EvaluatedGoalIDs []string `json:"evaluated_goal_ids"`
-
-	evaluatedGoalIDsPresent bool
 }
 
 func (document *ReviewReportDocument) UnmarshalJSON(data []byte) error {
@@ -94,7 +97,6 @@ func (document *ReviewReportDocument) UnmarshalJSON(data []byte) error {
 		}
 	}
 	*document = ReviewReportDocument(decoded)
-	_, document.findingsPresent = fields["findings"]
 	return nil
 }
 
@@ -114,7 +116,6 @@ func (finding *ReportFinding) UnmarshalJSON(data []byte) error {
 		}
 	}
 	*finding = ReportFinding(decoded)
-	_, finding.charterGoalIDsPresent = fields["charter_goal_ids"]
 	return nil
 }
 
@@ -153,7 +154,6 @@ func (evaluation *ReportEvaluation) UnmarshalJSON(data []byte) error {
 		}
 	}
 	*evaluation = ReportEvaluation(decoded)
-	_, evaluation.evaluatedGoalIDsPresent = fields["evaluated_goal_ids"]
 	return nil
 }
 
@@ -170,13 +170,13 @@ func rejectPresentJSONNull(fields map[string]json.RawMessage, field string, mess
 }
 
 // DecodeAndValidateReviewReport strictly decodes data and validates its
-// bindings to frozen intent before returning it.
-func DecodeAndValidateReviewReport(data []byte, frozen charter.FrozenCharter) (ReviewReportDocument, error) {
+// bindings to frozen intent and expected reviewer input before returning it.
+func DecodeAndValidateReviewReport(data []byte, frozen charter.FrozenCharter, expectedInputDigest string) (ReviewReportDocument, error) {
 	document, err := strictjson.DecodeBytes[ReviewReportDocument](data, strictjson.DefaultMaxBytes)
 	if err != nil {
 		return ReviewReportDocument{}, err
 	}
-	if err := RequireValidReviewReport(document, frozen); err != nil {
+	if err := RequireValidReviewReport(document, frozen, expectedInputDigest); err != nil {
 		return ReviewReportDocument{}, err
 	}
 	return document, nil
@@ -184,13 +184,13 @@ func DecodeAndValidateReviewReport(data []byte, frozen charter.FrozenCharter) (R
 
 // RequireValidReviewReport returns an aggregated validation error when a
 // report does not satisfy its boundary rules.
-func RequireValidReviewReport(document ReviewReportDocument, frozen charter.FrozenCharter) error {
-	return ErrorFromDiagnostics(ValidateReviewReport(document, frozen))
+func RequireValidReviewReport(document ReviewReportDocument, frozen charter.FrozenCharter, expectedInputDigest string) error {
+	return ErrorFromDiagnostics(ValidateReviewReport(document, frozen, expectedInputDigest))
 }
 
 // ValidateReviewReport returns every structural and semantic violation in a
 // review-report-v1 document.
-func ValidateReviewReport(document ReviewReportDocument, frozen charter.FrozenCharter) []diag.Diagnostic {
+func ValidateReviewReport(document ReviewReportDocument, frozen charter.FrozenCharter, expectedInputDigest string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if document.SchemaVersion != ReviewReportV1 {
 		diagnostics = append(diagnostics, Diagnostic(
@@ -203,7 +203,9 @@ func ValidateReviewReport(document ReviewReportDocument, frozen charter.FrozenCh
 	RequireEnum(&diagnostics, "/role", "role", document.Role, StringSet(RoleDefect), CodeInvalidReviewReport)
 	RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
 	RequireDigest(&diagnostics, "/review_input_digest", "review_input_digest", document.ReviewInputDigest)
+	RequireDigest(&diagnostics, "/review_input_digest", "expected_input_digest", expectedInputDigest)
 	CompareDigest(&diagnostics, "/charter_hash", "charter", document.CharterHash, frozen.CharterHash)
+	CompareDigest(&diagnostics, "/review_input_digest", "review input", document.ReviewInputDigest, expectedInputDigest)
 	validateReviewIdentity(&diagnostics, "/source_identity", "source_identity", document.SourceIdentity, CodeInvalidReviewReport)
 	validateReviewIdentity(&diagnostics, "/consumer_identity", "consumer_identity", document.ConsumerIdentity, CodeInvalidReviewReport)
 
@@ -289,7 +291,7 @@ func validateReportEvaluation(evaluation ReportEvaluation, path string, goalIDs 
 			))
 		}
 	}
-	if evaluation.EvaluatedGoalIDs == nil && !evaluation.evaluatedGoalIDsPresent {
+	if evaluation.EvaluatedGoalIDs == nil {
 		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidReviewReport,
 			"evaluation requires an evaluated_goal_ids array.",
@@ -327,7 +329,7 @@ func validateReportFinding(finding ReportFinding, path string, goalIDs map[strin
 		))
 	}
 	RequireEnum(&diagnostics, path+"/claimed_severity", "claimed_severity", finding.ClaimedSeverity, StringSet(SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow), CodeInvalidReviewReport)
-	if finding.CharterGoalIDs == nil && !finding.charterGoalIDsPresent {
+	if finding.CharterGoalIDs == nil {
 		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidReviewReport,
 			"charter_goal_ids is required and must be an array; use [] for an unbound finding.",
@@ -367,12 +369,21 @@ func validateReportFinding(finding ReportFinding, path string, goalIDs map[strin
 	return diagnostics
 }
 
-func validateReportWitness(witness Witness, path string) []diag.Diagnostic {
+func validateReportWitness(witness ReportWitness, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	RequireEnum(&diagnostics, path+"/kind", "witness kind", witness.Kind, StringSet(WitnessKindDefect, WitnessKindEquivalence), CodeInvalidReviewReport)
 	RequireEnum(&diagnostics, path+"/strength", "witness strength", witness.Strength, StringSet(WitnessStrengthExecutable, WitnessStrengthConstructed, WitnessStrengthArgued), CodeInvalidReviewReport)
 	if strings.TrimSpace(witness.Content) == "" {
 		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "witness content is required.", path+"/content", nil))
+	}
+	if witness.Strength == WitnessStrengthExecutable {
+		if witness.Executable == nil {
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "executable witness strength requires an executable specification.", path+"/executable", nil))
+		} else {
+			diagnostics = append(diagnostics, validateExecutableSpec(*witness.Executable, path+"/executable", false)...)
+		}
+	} else if witness.Executable != nil {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "an executable specification requires executable witness strength.", path+"/executable", nil))
 	}
 	return diagnostics
 }

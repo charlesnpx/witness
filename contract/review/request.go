@@ -34,6 +34,33 @@ type RequestSubject struct {
 	Head   string `json:"head"`
 	Tree   string `json:"tree,omitempty"`
 	Branch string `json:"branch,omitempty"`
+
+	treePresent   bool
+	branchPresent bool
+}
+
+func (subject *RequestSubject) UnmarshalJSON(data []byte) error {
+	type alias RequestSubject
+	var decoded alias
+	if err := decodeStrictContractJSON(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if err := rejectRequiredJSONNull(fields, "head"); err != nil {
+		return err
+	}
+	for _, field := range []string{"tree", "branch"} {
+		if err := rejectPresentJSONNull(fields, field, "subject "+field+" must be a string when present"); err != nil {
+			return err
+		}
+	}
+	*subject = RequestSubject(decoded)
+	_, subject.treePresent = fields["tree"]
+	_, subject.branchPresent = fields["branch"]
+	return nil
 }
 
 func (document *ReviewRequestDocument) UnmarshalJSON(data []byte) error {
@@ -90,10 +117,10 @@ func ValidateReviewRequest(document ReviewRequestDocument) []diag.Diagnostic {
 	if strings.TrimSpace(document.Subject.Head) == "" {
 		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewRequest, "subject head is required.", "/subject/head", nil))
 	}
-	if document.Subject.Tree != "" && strings.TrimSpace(document.Subject.Tree) == "" {
+	if (document.Subject.treePresent || document.Subject.Tree != "") && strings.TrimSpace(document.Subject.Tree) == "" {
 		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewRequest, "subject tree must be non-empty when present.", "/subject/tree", nil))
 	}
-	if document.Subject.Branch != "" && strings.TrimSpace(document.Subject.Branch) == "" {
+	if (document.Subject.branchPresent || document.Subject.Branch != "") && strings.TrimSpace(document.Subject.Branch) == "" {
 		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewRequest, "subject branch must be non-empty when present.", "/subject/branch", nil))
 	}
 	RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)

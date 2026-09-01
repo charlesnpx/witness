@@ -13,10 +13,14 @@ import (
 //go:embed testdata/conformance
 var ConformanceFS embed.FS
 
-// ConformanceCase identifies a fixture and its authoritative validation layer.
+// ConformanceCase identifies a fixture and its expected outcomes by validation
+// layer. Schema outcomes are consumed by the delegate repository.
 type ConformanceCase struct {
-	File   string `json:"file"`
-	Expect string `json:"expect"`
+	File                string `json:"file"`
+	Strict              string `json:"strict"`
+	Schema              string `json:"schema"`
+	Semantic            string `json:"semantic"`
+	ExpectedInputDigest string `json:"expected_input_digest"`
 }
 
 type conformanceManifest struct {
@@ -40,11 +44,26 @@ func LoadConformanceManifest() ([]ConformanceCase, error) {
 		if testCase.File == "" {
 			return nil, fmt.Errorf("conformance case %d has no file", index)
 		}
-		switch testCase.Expect {
-		case "valid", "strict-syntax", "json-schema", "semantic-binding":
-		default:
-			return nil, fmt.Errorf("conformance case %q has unsupported expect value %q", testCase.File, testCase.Expect)
+		if !conformancePassFail(testCase.Strict) {
+			return nil, fmt.Errorf("conformance case %q has unsupported strict outcome %q", testCase.File, testCase.Strict)
+		}
+		if !conformancePassFail(testCase.Schema) {
+			return nil, fmt.Errorf("conformance case %q has unsupported schema outcome %q", testCase.File, testCase.Schema)
+		}
+		if testCase.Strict == "fail" {
+			if testCase.Semantic != "n/a" {
+				return nil, fmt.Errorf("conformance case %q must mark semantic outcome n/a after strict failure", testCase.File)
+			}
+		} else if !conformancePassFail(testCase.Semantic) {
+			return nil, fmt.Errorf("conformance case %q has unsupported semantic outcome %q", testCase.File, testCase.Semantic)
+		}
+		if !validDigest(testCase.ExpectedInputDigest) {
+			return nil, fmt.Errorf("conformance case %q has invalid expected_input_digest", testCase.File)
 		}
 	}
 	return manifest.Cases, nil
+}
+
+func conformancePassFail(outcome string) bool {
+	return outcome == "pass" || outcome == "fail"
 }

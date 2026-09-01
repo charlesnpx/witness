@@ -10,7 +10,7 @@ import (
 
 // DefaultReviewerBriefText is the compact prompt-side contract for a defect
 // reviewer. The decoder remains authoritative for cross-field requirements.
-const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else. Echo the supplied charter_hash and review_input_digest exactly, and set role to defect. A claimed severity is capped by witness strength: argued is at most medium, constructed is at most high, and only executable evidence can claim critical. Empty findings require an evaluation attestation with evaluated paths. Use annotation for presentation-only file:line metadata; it carries zero epistemic weight. An unbound finding is allowed when charter_goal_ids is an empty array.`
+const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else. Echo the supplied charter_hash and review_input_digest exactly, and set role to defect. A claimed severity is capped by witness strength: argued is at most medium, constructed is at most high, and only executable evidence can claim critical. Empty findings require an evaluation attestation with evaluated paths. Use annotation for presentation-only file:line metadata; it carries zero epistemic weight. An unbound finding is allowed when charter_goal_ids is an empty array. The optional remedy and missing_goal_questions surfaces carry review-protocol discipline through scoped remedies and missing-goal questions.`
 
 // The schema contains only the relay-supported Draft 2020-12 keyword subset.
 // It cannot express the severity-cap cross-field rule or the empty-findings to
@@ -63,21 +63,6 @@ const defaultReviewerSchemaTemplate = `{
               "kind": {"enum": ["defect", "equivalence"]},
               "strength": {"enum": ["executable", "constructed", "argued"]},
               "content": {"type": "string", "minLength": 1},
-              "artifact_refs": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "required": ["kind", "id", "digest"],
-                  "properties": {
-                    "kind": {"type": "string", "minLength": 1},
-                    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
-                    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-                    "digest_profile": {"const": "relay-root-digests-v1"},
-                    "media_type": {"type": "string"}
-                  },
-                  "additionalProperties": false
-                }
-              },
               "executable": {
                 "type": "object",
                 "required": ["argv", "cwd", "expected_observation"],
@@ -99,35 +84,6 @@ const defaultReviewerSchemaTemplate = `{
                   }
                 },
                 "additionalProperties": false
-              },
-              "entry_point": {
-                "type": "object",
-                "required": ["dimension"],
-                "properties": {
-                  "dimension": {"type": "string", "minLength": 1},
-                  "entry_id": {"type": "string"},
-                  "property": {"type": "string"},
-                  "value": {"type": "string"},
-                  "affected_decision": {"type": "string"},
-                  "excluded": {"type": "boolean"}
-                },
-                "additionalProperties": false
-              },
-              "reachability_chain": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "required": ["dimension"],
-                  "properties": {
-                    "dimension": {"type": "string", "minLength": 1},
-                    "entry_id": {"type": "string"},
-                    "property": {"type": "string"},
-                    "value": {"type": "string"},
-                    "affected_decision": {"type": "string"},
-                    "excluded": {"type": "boolean"}
-                  },
-                  "additionalProperties": false
-                }
               }
             },
             "additionalProperties": false

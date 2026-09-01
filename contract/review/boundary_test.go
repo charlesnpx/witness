@@ -36,13 +36,39 @@ func TestReviewRequestDecodeValidateAndDigest(t *testing.T) {
 	}
 }
 
+func TestReviewRequestRejectsPresentEmptyOptionalSubjectLabels(t *testing.T) {
+	const request = `{
+  "schema_version": "review-request-v1",
+  "consumer_identity": {"kind": "delegate", "id": "consumer-a"},
+  "subject": {"head": "a1b2c3", "tree": "tree-a", "branch": "main"},
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+}`
+	for _, testCase := range []struct {
+		name string
+		from string
+		to   string
+	}{
+		{name: "empty tree", from: `"tree": "tree-a"`, to: `"tree": ""`},
+		{name: "whitespace branch", from: `"branch": "main"`, to: `"branch": " "`},
+		{name: "null tree", from: `"tree": "tree-a"`, to: `"tree": null`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			data := bytes.Replace([]byte(request), []byte(testCase.from), []byte(testCase.to), 1)
+			if _, err := DecodeAndValidateReviewRequest(data); err == nil {
+				t.Fatal("request with a present empty optional subject label passed validation")
+			}
+		})
+	}
+}
+
 func TestReviewReportDigest(t *testing.T) {
 	frozen := conformanceFrozenCharter(t)
 	data, err := ConformanceFS.ReadFile("testdata/conformance/valid-findings.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := DecodeAndValidateReviewReport(data, frozen)
+	document, err := DecodeAndValidateReviewReport(data, frozen, "sha256:1111111111111111111111111111111111111111111111111111111111111111")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +78,46 @@ func TestReviewReportDigest(t *testing.T) {
 	}
 	if !validDigest(reportDigest) {
 		t.Fatalf("report digest = %q", reportDigest)
+	}
+}
+
+func TestReviewReportBindsExpectedInputDigest(t *testing.T) {
+	frozen := conformanceFrozenCharter(t)
+	data, err := ConformanceFS.ReadFile("testdata/conformance/valid-findings.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAndValidateReviewReport(data, frozen, "not-a-digest"); err == nil {
+		t.Fatal("report with malformed expected input digest passed validation")
+	}
+	if _, err := DecodeAndValidateReviewReport(data, frozen, "sha256:2222222222222222222222222222222222222222222222222222222222222222"); err == nil {
+		t.Fatal("report with mismatched expected input digest passed validation")
+	}
+}
+
+func TestReviewReportWitnessRejectsRoleOutputOnlyFields(t *testing.T) {
+	const report = `{
+  "schema_version": "review-report-v1",
+  "role": "defect",
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "source_identity": {"kind": "git", "id": "source-head"},
+  "consumer_identity": {"kind": "delegate", "id": "consumer-a"},
+  "findings": [{
+    "id": "finding-role-output-field",
+    "title": "Report witnesses reject role-output fields.",
+    "claimed_severity": "low",
+    "charter_goal_ids": [],
+    "witness": {
+      "kind": "defect",
+      "strength": "argued",
+      "content": "The report boundary carries only report evidence.",
+      "artifact_refs": []
+    }
+  }]
+}`
+	if _, err := strictjson.DecodeBytes[ReviewReportDocument]([]byte(report), strictjson.DefaultMaxBytes); err == nil {
+		t.Fatal("strict decoder accepted artifact_refs on a report finding witness")
 	}
 }
 
@@ -105,6 +171,27 @@ func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 	enum, ok := goalItems["enum"].([]any)
 	if !ok || len(enum) != 1 || enum[0] != "goal-api" {
 		t.Fatalf("goal enum = %#v", goalItems["enum"])
+	}
+	witness, ok := findingProperties["witness"].(map[string]any)
+	if !ok {
+		t.Fatalf("witness schema = %#v", findingProperties["witness"])
+	}
+	witnessProperties, ok := witness["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("witness properties = %#v", witness["properties"])
+	}
+	if len(witnessProperties) != 4 {
+		t.Fatalf("witness properties = %#v, want exactly kind, strength, content, executable", witnessProperties)
+	}
+	for _, name := range []string{"kind", "strength", "content", "executable"} {
+		if _, ok := witnessProperties[name]; !ok {
+			t.Fatalf("witness schema omits %q", name)
+		}
+	}
+	for _, name := range []string{"artifact_refs", "entry_point", "reachability_chain"} {
+		if _, ok := witnessProperties[name]; ok {
+			t.Fatalf("witness schema unexpectedly permits %q", name)
+		}
 	}
 }
 

@@ -42,38 +42,22 @@ func TestReviewReportConformance(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, strictErr := strictjson.DecodeBytes[ReviewReportDocument](data, strictjson.DefaultMaxBytes)
-			_, validationErr := DecodeAndValidateReviewReport(data, frozen)
-			switch testCase.Expect {
-			case "valid":
-				if strictErr != nil {
-					t.Fatalf("strict decode: %v", strictErr)
-				}
-				if validationErr != nil {
-					t.Fatalf("DecodeAndValidateReviewReport: %v", validationErr)
-				}
-			case "strict-syntax":
+			if testCase.Strict == "fail" {
 				if strictErr == nil {
-					t.Fatal("strict decoder accepted invalid syntax")
+					t.Fatal("strict decoder accepted a fixture expected to fail")
 				}
-				if validationErr == nil {
-					t.Fatal("DecodeAndValidateReviewReport accepted strict-syntax fixture")
-				}
-			case "json-schema":
-				if strictErr != nil {
-					t.Fatalf("schema fixture must remain strictly decodable: %v", strictErr)
-				}
-				if validationErr == nil {
-					t.Fatal("json-schema fixture passed silently; semantic fallback must reject it here")
-				}
-			case "semantic-binding":
-				if strictErr != nil {
-					t.Fatalf("semantic fixture must remain strictly decodable: %v", strictErr)
-				}
-				if validationErr == nil {
-					t.Fatal("semantic-binding fixture passed validation")
-				}
-			default:
-				t.Fatalf("unsupported manifest expectation %q", testCase.Expect)
+				return
+			}
+			if strictErr != nil {
+				t.Fatalf("strict decode: %v", strictErr)
+			}
+
+			_, validationErr := DecodeAndValidateReviewReport(data, frozen, testCase.ExpectedInputDigest)
+			if testCase.Semantic == "pass" && validationErr != nil {
+				t.Fatalf("DecodeAndValidateReviewReport: %v", validationErr)
+			}
+			if testCase.Semantic == "fail" && validationErr == nil {
+				t.Fatal("DecodeAndValidateReviewReport accepted a fixture expected to fail semantic validation")
 			}
 		})
 	}
