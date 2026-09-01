@@ -2,6 +2,7 @@ package review
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/charlesnpx/witness/contract/strictjson"
@@ -163,6 +164,9 @@ func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 	findings, ok := properties["findings"].(map[string]any)
 	if !ok {
 		t.Fatalf("findings schema = %#v", properties["findings"])
+	}
+	if maxItems, ok := findings["maxItems"].(json.Number); !ok || maxItems.String() != "128" {
+		t.Fatalf("findings maxItems = %#v, want 128", findings["maxItems"])
 	}
 	findingSchema, ok := findings["items"].(map[string]any)
 	if !ok {

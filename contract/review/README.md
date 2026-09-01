@@ -10,5 +10,7 @@ goals or be unbound with an empty `charter_goal_ids` array. Annotation
 `path`/`line` metadata is presentation-only and carries zero epistemic weight;
 the witness is the evidence.
 
+The default-reviewer schema caps a report at 128 findings; consumers may enforce their own bounds.
+
 This boundary does not accept `review-role-output-v3`, `review-role-output-v4`,
 or `review-role-output-v5` documents.

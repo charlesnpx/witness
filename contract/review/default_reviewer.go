@@ -9,7 +9,7 @@ import (
 
 // DefaultReviewerBriefText is the compact prompt-side contract for a defect
 // reviewer. The decoder remains authoritative for cross-field requirements.
-const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else. Echo the supplied charter_hash and review_input_digest exactly, and set role to defect. Each finding carries a witness object of the form {"kind": "defect", "strength": "argued"|"constructed"|"executable", "content": "<concrete failure path>"}; kind is always defect, strength is the evidence class, and an executable strength additionally requires an executable specification. A claimed severity is capped by witness strength: argued is at most medium, constructed is at most high, and only executable evidence can claim critical. Empty findings require an evaluation attestation with evaluated paths. Use annotation for presentation-only file:line metadata; it carries zero epistemic weight. An unbound finding is allowed when charter_goal_ids is an empty array. The optional remedy and missing_goal_questions surfaces carry review-protocol discipline through scoped remedies and missing-goal questions.`
+const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else. Echo the supplied charter_hash and review_input_digest exactly, and set role to defect. Emit at most 128 findings per report. Each finding carries a witness object of the form {"kind": "defect", "strength": "argued"|"constructed"|"executable", "content": "<concrete failure path>"}; kind is always defect, strength is the evidence class, and an executable strength additionally requires an executable specification. A claimed severity is capped by witness strength: argued is at most medium, constructed is at most high, and only executable evidence can claim critical. Empty findings require an evaluation attestation with evaluated paths. Use annotation for presentation-only file:line metadata; it carries zero epistemic weight. An unbound finding is allowed when charter_goal_ids is an empty array. The optional remedy and missing_goal_questions surfaces carry review-protocol discipline through scoped remedies and missing-goal questions.`
 
 // The schema contains only the relay-supported Draft 2020-12 keyword subset.
 // It cannot express the severity-cap cross-field rule or the empty-findings to
@@ -44,6 +44,7 @@ const defaultReviewerSchemaTemplate = `{
     },
     "findings": {
       "type": "array",
+      "maxItems": 128,
       "items": {
         "type": "object",
         "required": ["id", "title", "claimed_severity", "charter_goal_ids", "witness"],

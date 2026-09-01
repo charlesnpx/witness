@@ -3,6 +3,7 @@
     {"file": "valid-findings.json", "strict": "pass", "schema": "pass", "semantic": "pass", "expected_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
     {"file": "valid-empty-evaluation.json", "strict": "pass", "schema": "pass", "semantic": "pass", "expected_input_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
     {"file": "valid-missing-goal-questions.json", "strict": "pass", "schema": "pass", "semantic": "pass", "expected_input_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"},
+    {"file": "schema-findings-over-cap.json", "strict": "pass", "schema": "fail", "semantic": "pass", "expected_input_digest": "sha256:1212121212121212121212121212121212121212121212121212121212121212"},
     {"file": "schema-witness-kind-equivalence.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:1616161616161616161616161616161616161616161616161616161616161616"},
     {"file": "semantic-zero-valued-missing-goal-question.json", "strict": "pass", "schema": "fail", "semantic": "fail", "expected_input_digest": "sha256:1717171717171717171717171717171717171717171717171717171717171717"},
     {"file": "strict-duplicate-key.json", "strict": "fail", "schema": "fail", "semantic": "n/a", "expected_input_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"},
