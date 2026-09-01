@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {"file": "valid-findings.json", "expect": "valid"},
+    {"file": "valid-empty-evaluation.json", "expect": "valid"},
+    {"file": "valid-missing-goal-questions.json", "expect": "valid"},
+    {"file": "strict-duplicate-key.json", "expect": "strict-syntax"},
+    {"file": "strict-trailing-document.json", "expect": "strict-syntax"},
+    {"file": "strict-unknown-field.json", "expect": "strict-syntax"},
+    {"file": "strict-null-required.json", "expect": "strict-syntax"},
+    {"file": "schema-wrong-version.json", "expect": "json-schema"},
+    {"file": "schema-severity-enum.json", "expect": "json-schema"},
+    {"file": "schema-missing-title.json", "expect": "json-schema"},
+    {"file": "semantic-charter-mismatch.json", "expect": "semantic-binding"},
+    {"file": "semantic-empty-without-evaluation.json", "expect": "semantic-binding"},
+    {"file": "semantic-line-without-path.json", "expect": "semantic-binding"},
+    {"file": "semantic-argued-critical.json", "expect": "semantic-binding"},
+    {"file": "semantic-unknown-goal.json", "expect": "semantic-binding"}
+  ]
+}

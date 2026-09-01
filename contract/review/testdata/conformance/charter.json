@@ -1,0 +1,31 @@
+{
+  "schema_version": "review-charter-freeze-v1",
+  "digest_profile": "relay-root-digests-v1",
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "reachability_rules_active": false,
+  "additive_remedies_automatic": false,
+  "charter": {
+    "schema_version": "review-charter-v2",
+    "goals": [
+      {
+        "id": "goal-api",
+        "statement": "The API returns its documented response."
+      }
+    ],
+    "non_goals": [],
+    "standing_no_goals": [
+      {
+        "id": "standing-no-derived-goals",
+        "statement": "Existing code, tests, defenses, and review-introduced machinery create no goals."
+      }
+    ],
+    "owner_events": [
+      {
+        "id": "event-initial",
+        "type": "charter_initialized",
+        "actor": "owner",
+        "summary": "Initial conformance charter."
+      }
+    ]
+  }
+}
