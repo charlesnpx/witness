@@ -121,6 +121,18 @@ func TestReviewReportWitnessRejectsRoleOutputOnlyFields(t *testing.T) {
 	}
 }
 
+func TestReviewReportRejectsPresentEmptyAnnotationPath(t *testing.T) {
+	frozen := conformanceFrozenCharter(t)
+	data, err := ConformanceFS.ReadFile("testdata/conformance/valid-findings.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte(`"path": "api/response.go"`), []byte(`"path": ""`), 1)
+	if _, err := DecodeAndValidateReviewReport(data, frozen, "sha256:1111111111111111111111111111111111111111111111111111111111111111"); err == nil {
+		t.Fatal("report with a present empty annotation path passed validation")
+	}
+}
+
 func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 	frozen := conformanceFrozenCharter(t)
 	inputDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -188,9 +200,18 @@ func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 			t.Fatalf("witness schema omits %q", name)
 		}
 	}
-	for _, name := range []string{"artifact_refs", "entry_point", "reachability_chain"} {
-		if _, ok := witnessProperties[name]; ok {
-			t.Fatalf("witness schema unexpectedly permits %q", name)
+	assertSchemaConst(t, witnessProperties, "kind", WitnessKindDefect)
+	for _, identityName := range []string{"source_identity", "consumer_identity"} {
+		identity, ok := properties[identityName].(map[string]any)
+		if !ok {
+			t.Fatalf("%s schema = %#v", identityName, properties[identityName])
+		}
+		identityProperties, ok := identity["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s properties = %#v", identityName, identity["properties"])
+		}
+		for _, field := range []string{"kind", "id"} {
+			assertSchemaPattern(t, identityProperties, field, `\S`)
 		}
 	}
 }
@@ -203,5 +224,16 @@ func assertSchemaConst(t *testing.T, properties map[string]any, name string, wan
 	}
 	if field["const"] != want {
 		t.Fatalf("schema property %q const = %#v, want %q", name, field["const"], want)
+	}
+}
+
+func assertSchemaPattern(t *testing.T, properties map[string]any, name string, want string) {
+	t.Helper()
+	field, ok := properties[name].(map[string]any)
+	if !ok {
+		t.Fatalf("schema property %q = %#v", name, properties[name])
+	}
+	if field["pattern"] != want {
+		t.Fatalf("schema property %q pattern = %#v, want %q", name, field["pattern"], want)
 	}
 }

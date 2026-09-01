@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/charlesnpx/witness/contract/charter"
-	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 // DefaultReviewerBriefText is the compact prompt-side contract for a defect
@@ -29,8 +28,8 @@ const defaultReviewerSchemaTemplate = `{
       "type": "object",
       "required": ["kind", "id"],
       "properties": {
-        "kind": {"type": "string", "minLength": 1},
-        "id": {"type": "string", "minLength": 1}
+        "kind": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "id": {"type": "string", "minLength": 1, "pattern": "\\S"}
       },
       "additionalProperties": true
     },
@@ -38,8 +37,8 @@ const defaultReviewerSchemaTemplate = `{
       "type": "object",
       "required": ["kind", "id"],
       "properties": {
-        "kind": {"type": "string", "minLength": 1},
-        "id": {"type": "string", "minLength": 1}
+        "kind": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "id": {"type": "string", "minLength": 1, "pattern": "\\S"}
       },
       "additionalProperties": true
     },
@@ -60,7 +59,7 @@ const defaultReviewerSchemaTemplate = `{
             "type": "object",
             "required": ["kind", "strength", "content"],
             "properties": {
-              "kind": {"enum": ["defect", "equivalence"]},
+              "kind": {"const": "defect"},
               "strength": {"enum": ["executable", "constructed", "argued"]},
               "content": {"type": "string", "minLength": 1},
               "executable": {
@@ -183,8 +182,5 @@ func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest strin
 		goalIDsJSON,
 		goalIDsJSON,
 	)
-	if _, err := strictjson.DecodeAnyBytes([]byte(rendered), strictjson.DefaultMaxBytes*4); err != nil {
-		return nil, fmt.Errorf("render default reviewer schema: %w", err)
-	}
 	return append(json.RawMessage(nil), rendered...), nil
 }

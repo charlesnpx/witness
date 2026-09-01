@@ -62,6 +62,7 @@ type FindingAnnotation struct {
 	Line     uint32 `json:"line,omitempty"`
 	Category string `json:"category,omitempty"`
 
+	pathPresent     bool
 	linePresent     bool
 	categoryPresent bool
 }
@@ -129,10 +130,14 @@ func (annotation *FindingAnnotation) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
+	if err := rejectPresentJSONNull(fields, "path", "annotation path must be a string when present"); err != nil {
+		return err
+	}
 	if err := rejectPresentJSONNull(fields, "line", "annotation line must be an unsigned integer"); err != nil {
 		return err
 	}
 	*annotation = FindingAnnotation(decoded)
+	_, annotation.pathPresent = fields["path"]
 	_, annotation.linePresent = fields["line"]
 	_, annotation.categoryPresent = fields["category"]
 	return nil
@@ -231,6 +236,7 @@ func ValidateReviewReport(document ReviewReportDocument, frozen charter.FrozenCh
 		diagnostics = append(diagnostics, validateReportEvaluation(*document.Evaluation, "/evaluation", goalIDs)...)
 	}
 
+	findingIDs := make(map[string]bool, len(document.Findings))
 	seen := map[string]int{}
 	for index, finding := range document.Findings {
 		path := "/findings/" + itoa(index)
@@ -243,7 +249,23 @@ func ValidateReviewReport(document ReviewReportDocument, frozen charter.FrozenCh
 			))
 		}
 		seen[finding.ID] = index
+		findingIDs[finding.ID] = true
 		diagnostics = append(diagnostics, validateReportFinding(finding, path, goalIDs)...)
+	}
+	questionPaths := map[string]string{}
+	for index, question := range document.MissingGoalQuestions {
+		path := "/missing_goal_questions/" + itoa(index)
+		diagnostics = append(diagnostics, validateReportMissingGoalQuestion(question, path, findingIDs)...)
+		if firstPath, exists := questionPaths[question.ID]; exists {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"missing-goal question IDs must be unique.",
+				path+"/id",
+				map[string]any{"id": question.ID, "duplicate_of": firstPath + "/id"},
+			))
+			continue
+		}
+		questionPaths[question.ID] = path
 	}
 	return diagnostics
 }
@@ -371,7 +393,7 @@ func validateReportFinding(finding ReportFinding, path string, goalIDs map[strin
 
 func validateReportWitness(witness ReportWitness, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	RequireEnum(&diagnostics, path+"/kind", "witness kind", witness.Kind, StringSet(WitnessKindDefect, WitnessKindEquivalence), CodeInvalidReviewReport)
+	RequireEnum(&diagnostics, path+"/kind", "witness kind", witness.Kind, StringSet(WitnessKindDefect), CodeInvalidReviewReport)
 	RequireEnum(&diagnostics, path+"/strength", "witness strength", witness.Strength, StringSet(WitnessStrengthExecutable, WitnessStrengthConstructed, WitnessStrengthArgued), CodeInvalidReviewReport)
 	if strings.TrimSpace(witness.Content) == "" {
 		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "witness content is required.", path+"/content", nil))
@@ -420,6 +442,16 @@ func maximumSeverityForEvidence(strength string) (string, bool) {
 
 func validateFindingAnnotation(annotation FindingAnnotation, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
+	if annotation.pathPresent || annotation.Path != "" {
+		if strings.TrimSpace(annotation.Path) == "" {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"annotation path must be non-empty when present.",
+				path+"/path",
+				nil,
+			))
+		}
+	}
 	if annotation.linePresent || annotation.Line != 0 {
 		if strings.TrimSpace(annotation.Path) == "" {
 			diagnostics = append(diagnostics, Diagnostic(
@@ -433,6 +465,48 @@ func validateFindingAnnotation(annotation FindingAnnotation, path string) []diag
 	if annotation.categoryPresent || annotation.Category != "" {
 		RequireStableID(&diagnostics, path+"/category", "annotation category", annotation.Category)
 	}
+	return diagnostics
+}
+
+func validateReportMissingGoalQuestion(question charter.MissingGoalQuestion, path string, findingIDs map[string]bool) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	RequireStableID(&diagnostics, path+"/id", "missing-goal question ID", question.ID)
+	RequireStableID(&diagnostics, path+"/finding_id", "missing-goal question finding ID", question.FindingID)
+	if validStableID(question.FindingID) && !findingIDs[question.FindingID] {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"missing-goal question references a finding that is not declared.",
+			path+"/finding_id",
+			map[string]any{"finding_id": question.FindingID},
+		))
+	}
+	RequireEnum(
+		&diagnostics,
+		path+"/dimension",
+		"Operational Envelope dimension",
+		question.Dimension,
+		StringSet(
+			charter.DimensionEntryPoints,
+			charter.DimensionInputSurface,
+			charter.DimensionValidStates,
+			charter.DimensionEnvironments,
+			charter.DimensionScaleBounds,
+			charter.DimensionCompatibilityPromises,
+			charter.DimensionThreatModel,
+		),
+		CodeInvalidReviewReport,
+	)
+	if question.AnchorIndex < 0 {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"missing-goal question anchor_index must identify the originating anchor.",
+			path+"/anchor_index",
+			map[string]any{"anchor_index": question.AnchorIndex},
+		))
+	}
+	RequireString(&diagnostics, path+"/property", "missing-goal question unstated property", question.Property)
+	RequireString(&diagnostics, path+"/affected_decision", "missing-goal question affected decision", question.AffectedDecision)
+	RequireString(&diagnostics, path+"/statement", "missing-goal question statement", question.Statement)
 	return diagnostics
 }
 
