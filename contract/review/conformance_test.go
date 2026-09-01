@@ -1,11 +1,13 @@
 package review
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/strictjson"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestConformanceFrozenCharterHash(t *testing.T) {
@@ -52,6 +54,18 @@ func TestReviewReportConformance(t *testing.T) {
 				t.Fatalf("strict decode: %v", strictErr)
 			}
 
+			schemaData, err := DefaultReviewerSchema(frozen, testCase.ExpectedInputDigest, testCase.ExpectedConsumerIdentity)
+			if err != nil {
+				t.Fatalf("DefaultReviewerSchema: %v", err)
+			}
+			schemaErr := validateConformanceSchema(schemaData, data)
+			if testCase.Schema == "pass" && schemaErr != nil {
+				t.Fatalf("default reviewer schema rejected a fixture expected to pass: %v", schemaErr)
+			}
+			if testCase.Schema == "fail" && schemaErr == nil {
+				t.Fatal("default reviewer schema accepted a fixture expected to fail")
+			}
+
 			_, validationErr := DecodeAndValidateReviewReport(data, frozen, testCase.ExpectedInputDigest)
 			if testCase.Semantic == "pass" && validationErr != nil {
 				t.Fatalf("DecodeAndValidateReviewReport: %v", validationErr)
@@ -61,6 +75,27 @@ func TestReviewReportConformance(t *testing.T) {
 			}
 		})
 	}
+}
+
+func validateConformanceSchema(schemaData []byte, data []byte) error {
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	schema, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaData))
+	if err != nil {
+		return err
+	}
+	if err := compiler.AddResource("https://witness.invalid/review-report-v1.schema.json", schema); err != nil {
+		return err
+	}
+	compiled, err := compiler.Compile("https://witness.invalid/review-report-v1.schema.json")
+	if err != nil {
+		return err
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	return compiled.Validate(instance)
 }
 
 func conformanceFrozenCharter(t *testing.T) charter.FrozenCharter {

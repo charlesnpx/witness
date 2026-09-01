@@ -3,13 +3,14 @@ package review
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/charlesnpx/witness/contract/charter"
 )
 
 // DefaultReviewerBriefText is the compact prompt-side contract for a defect
 // reviewer. The decoder remains authoritative for cross-field requirements.
-const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else, following this skeleton exactly (replace values, never field names or nesting): {"schema_version":"review-report-v1","role":"defect","charter_hash":"<echo the supplied value>","review_input_digest":"<echo the supplied value>","source_identity":{"kind":"<category>","id":"<identifier>"},"consumer_identity":{"kind":"<category>","id":"<identifier>"},"findings":[{"id":"<kebab-id>","title":"<one line>","claimed_severity":"critical|high|medium|low","charter_goal_ids":["<goal-id>"],"witness":{"kind":"defect","strength":"argued|constructed|executable","content":"<concrete failure path>"},"annotation":{"path":"<file>","line":1,"category":"<kebab-id>"}}],"evaluation":{"evaluated_paths":["<path>"],"evaluated_goal_ids":["<goal-id>"]}} Rules: claimed severity is capped by witness strength (argued at most medium, constructed at most high, only executable evidence can claim critical, and executable strength requires an executable specification object on the witness). At most 128 findings. Empty findings REQUIRE the evaluation object with BOTH evaluated_paths and evaluated_goal_ids; omit evaluation when findings are present, or include it truthfully. annotation is optional presentation-only file:line metadata with zero epistemic weight. An unbound finding uses an empty charter_goal_ids array. Optional remedy {direction, summary, minimality_argument} and missing_goal_questions surfaces carry review-protocol discipline.`
+const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else, following this skeleton exactly (replace values, never field names or nesting): {"schema_version":"review-report-v1","role":"defect","charter_hash":"<echo the supplied value>","review_input_digest":"<echo the supplied value>","source_identity":{"kind":"<category>","id":"<identifier>"},"consumer_identity":"<echo the supplied consumer identity object exactly>","findings":[{"id":"<kebab-id>","title":"<one line>","claimed_severity":"critical|high|medium|low","charter_goal_ids":["<goal-id>"],"witness":{"kind":"defect","strength":"argued|constructed|executable","content":"<concrete failure path>"},"annotation":{"path":"<file>","line":1,"category":"<kebab-id>"}}],"evaluation":{"evaluated_paths":["<path>"],"evaluated_goal_ids":["<goal-id>"]}} Rules: claimed severity is capped by witness strength (argued at most medium, constructed at most high, only executable evidence can claim critical, and executable strength requires an executable specification object on the witness). At most 128 findings. Empty findings REQUIRE the evaluation object with BOTH evaluated_paths and evaluated_goal_ids; omit evaluation when findings are present, or include it truthfully. annotation is optional presentation-only file:line metadata with zero epistemic weight. An unbound finding uses an empty charter_goal_ids array. Optional remedy {direction, summary, minimality_argument} and missing_goal_questions surfaces carry review-protocol discipline.`
 
 // The schema contains only the relay-supported Draft 2020-12 keyword subset.
 // It cannot express the severity-cap cross-field rule or the empty-findings to
@@ -37,10 +38,10 @@ const defaultReviewerSchemaTemplate = `{
       "type": "object",
       "required": ["kind", "id"],
       "properties": {
-        "kind": {"type": "string", "minLength": 1, "pattern": "\\S"},
-        "id": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        "kind": {"const": %s},
+        "id": {"const": %s}
       },
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "findings": {
       "type": "array",
@@ -143,13 +144,18 @@ const defaultReviewerSchemaTemplate = `{
 }`
 
 // DefaultReviewerSchema returns a $comment-free Draft 2020-12 schema for the
-// report document pinned to frozen and the exact reviewer input digest.
-func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest string) (json.RawMessage, error) {
+// report document pinned to frozen, the exact reviewer input digest, and the
+// requesting consumer identity.
+func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest string, expectedConsumerIdentity map[string]any) (json.RawMessage, error) {
 	if !validDigest(frozen.CharterHash) {
 		return nil, fmt.Errorf("frozen charter_hash must be a sha256 digest")
 	}
 	if !validDigest(reviewInputDigest) {
 		return nil, fmt.Errorf("review_input_digest must be a sha256 digest")
+	}
+	expectedConsumerKind, expectedConsumerID, err := defaultReviewerConsumerIdentity(expectedConsumerIdentity)
+	if err != nil {
+		return nil, err
 	}
 	goalIDs := make([]string, len(frozen.Charter.Goals))
 	for index, goal := range frozen.Charter.Goals {
@@ -171,6 +177,14 @@ func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest strin
 	if err != nil {
 		return nil, err
 	}
+	expectedConsumerKindJSON, err := json.Marshal(expectedConsumerKind)
+	if err != nil {
+		return nil, err
+	}
+	expectedConsumerIDJSON, err := json.Marshal(expectedConsumerID)
+	if err != nil {
+		return nil, err
+	}
 	goalIDsJSON, err := json.Marshal(goalIDs)
 	if err != nil {
 		return nil, err
@@ -180,8 +194,20 @@ func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest strin
 		schemaVersionJSON,
 		charterHashJSON,
 		reviewInputDigestJSON,
+		expectedConsumerKindJSON,
+		expectedConsumerIDJSON,
 		goalIDsJSON,
 		goalIDsJSON,
 	)
 	return append(json.RawMessage(nil), rendered...), nil
+}
+
+func defaultReviewerConsumerIdentity(expectedConsumerIdentity map[string]any) (string, string, error) {
+	for _, field := range []string{"kind", "id"} {
+		value, ok := expectedConsumerIdentity[field].(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			return "", "", fmt.Errorf("expected consumer_identity requires a non-empty %s", field)
+		}
+	}
+	return expectedConsumerIdentity["kind"].(string), expectedConsumerIdentity["id"].(string), nil
 }

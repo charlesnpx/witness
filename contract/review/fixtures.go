@@ -16,11 +16,12 @@ var ConformanceFS embed.FS
 // ConformanceCase identifies a fixture and its expected outcomes by validation
 // layer. Schema outcomes are consumed by the delegate repository.
 type ConformanceCase struct {
-	File                string `json:"file"`
-	Strict              string `json:"strict"`
-	Schema              string `json:"schema"`
-	Semantic            string `json:"semantic"`
-	ExpectedInputDigest string `json:"expected_input_digest"`
+	File                     string         `json:"file"`
+	Strict                   string         `json:"strict"`
+	Schema                   string         `json:"schema"`
+	Semantic                 string         `json:"semantic"`
+	ExpectedInputDigest      string         `json:"expected_input_digest"`
+	ExpectedConsumerIdentity map[string]any `json:"expected_consumer_identity"`
 }
 
 type conformanceManifest struct {
@@ -59,6 +60,9 @@ func LoadConformanceManifest() ([]ConformanceCase, error) {
 		}
 		if !validDigest(testCase.ExpectedInputDigest) {
 			return nil, fmt.Errorf("conformance case %q has invalid expected_input_digest", testCase.File)
+		}
+		if _, _, err := defaultReviewerConsumerIdentity(testCase.ExpectedConsumerIdentity); err != nil {
+			return nil, fmt.Errorf("conformance case %q has invalid expected_consumer_identity: %w", testCase.File, err)
 		}
 	}
 	return manifest.Cases, nil

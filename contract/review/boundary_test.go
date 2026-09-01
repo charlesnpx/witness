@@ -137,7 +137,8 @@ func TestReviewReportRejectsPresentEmptyAnnotationPath(t *testing.T) {
 func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 	frozen := conformanceFrozenCharter(t)
 	inputDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	schema, err := DefaultReviewerSchema(frozen, inputDigest)
+	expectedConsumerIdentity := map[string]any{"kind": "delegate", "id": "consumer-b"}
+	schema, err := DefaultReviewerSchema(frozen, inputDigest, expectedConsumerIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +161,23 @@ func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 	assertSchemaConst(t, properties, "role", RoleDefect)
 	assertSchemaConst(t, properties, "charter_hash", frozen.CharterHash)
 	assertSchemaConst(t, properties, "review_input_digest", inputDigest)
+	consumerIdentity, ok := properties["consumer_identity"].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer_identity schema = %#v", properties["consumer_identity"])
+	}
+	if consumerIdentity["additionalProperties"] != false {
+		t.Fatalf("consumer_identity additionalProperties = %#v, want false", consumerIdentity["additionalProperties"])
+	}
+	required, ok := consumerIdentity["required"].([]any)
+	if !ok || len(required) != 2 || required[0] != "kind" || required[1] != "id" {
+		t.Fatalf("consumer_identity required = %#v, want kind and id", consumerIdentity["required"])
+	}
+	consumerProperties, ok := consumerIdentity["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("consumer_identity properties = %#v", consumerIdentity["properties"])
+	}
+	assertSchemaConst(t, consumerProperties, "kind", "delegate")
+	assertSchemaConst(t, consumerProperties, "id", "consumer-b")
 
 	findings, ok := properties["findings"].(map[string]any)
 	if !ok {
@@ -205,17 +223,30 @@ func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 		}
 	}
 	assertSchemaConst(t, witnessProperties, "kind", WitnessKindDefect)
-	for _, identityName := range []string{"source_identity", "consumer_identity"} {
-		identity, ok := properties[identityName].(map[string]any)
-		if !ok {
-			t.Fatalf("%s schema = %#v", identityName, properties[identityName])
-		}
-		identityProperties, ok := identity["properties"].(map[string]any)
-		if !ok {
-			t.Fatalf("%s properties = %#v", identityName, identity["properties"])
-		}
-		for _, field := range []string{"kind", "id"} {
-			assertSchemaPattern(t, identityProperties, field, `\S`)
+	sourceIdentity, ok := properties["source_identity"].(map[string]any)
+	if !ok {
+		t.Fatalf("source_identity schema = %#v", properties["source_identity"])
+	}
+	sourceIdentityProperties, ok := sourceIdentity["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("source_identity properties = %#v", sourceIdentity["properties"])
+	}
+	for _, field := range []string{"kind", "id"} {
+		assertSchemaPattern(t, sourceIdentityProperties, field, `\S`)
+	}
+	if !bytes.Contains([]byte(DefaultReviewerBriefText), []byte(`"consumer_identity":"<echo the supplied consumer identity object exactly>"`)) {
+		t.Fatalf("DefaultReviewerBriefText does not require echoing the supplied consumer identity: %s", DefaultReviewerBriefText)
+	}
+	for _, expectedConsumerIdentity := range []map[string]any{
+		nil,
+		{"id": "consumer-b"},
+		{"kind": "delegate"},
+		{"kind": "", "id": "consumer-b"},
+		{"kind": "delegate", "id": " "},
+		{"kind": 1, "id": "consumer-b"},
+	} {
+		if _, err := DefaultReviewerSchema(frozen, inputDigest, expectedConsumerIdentity); err == nil {
+			t.Fatalf("DefaultReviewerSchema accepted invalid expected consumer identity %#v", expectedConsumerIdentity)
 		}
 	}
 }
