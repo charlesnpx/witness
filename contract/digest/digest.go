@@ -1,3 +1,4 @@
+// Package digest is part of the published contract surface: digest derivation is a contract semantic versioned with the module.
 package digest
 
 import (
@@ -6,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/canonjson"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/strictjson"
+	"github.com/charlesnpx/witness/contract/canonjson"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 const (

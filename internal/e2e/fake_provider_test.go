@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/internal/adjudicate"
-	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
-	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/harness"
 	"github.com/charlesnpx/witness/internal/ledger"
 	"github.com/charlesnpx/witness/internal/preflight"

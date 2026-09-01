@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/canonjson"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/contract/canonjson"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
 )
 

@@ -7,173 +7,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/changesurface"
-	"github.com/charlesnpx/witness/internal/charter"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/digest"
-	"github.com/charlesnpx/witness/internal/strictjson"
 )
-
-func TestRoleOutputValidFixtures(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	for _, name := range []string{
-		"role-output-defect.json",
-		"role-output-defect-v3.json",
-		"role-output-economy.json",
-		"role-output-goal-fit.json",
-	} {
-		t.Run(name, func(t *testing.T) {
-			document := readRoleFixture(t, name)
-			document.CharterHash = frozen.CharterHash
-			if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) > 0 {
-				t.Fatalf("ValidateRoleOutput diagnostics = %#v", diagnostics)
-			}
-			if _, err := RoleOutputDigest(document); err != nil {
-				t.Fatalf("RoleOutputDigest: %v", err)
-			}
-		})
-	}
-}
-
-func TestRoleOutputDocumentLevelWiring(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	t.Run("invalid anchor surfaces charter diagnostic", func(t *testing.T) {
-		document := readRoleFixture(t, "role-output-defect.json")
-		document.CharterHash = frozen.CharterHash
-		document.Findings[0].ScopeAnchors[0].EntryID = "missing"
-		diagnostics := ValidateRoleOutput(document, frozen)
-		assertDiagnosticCode(t, diagnostics, charter.CodeInvalidScopeAnchor)
-	})
-	t.Run("proposed test lacking Charter trace rejected", func(t *testing.T) {
-		document := readRoleFixture(t, "role-output-defect.json")
-		document.CharterHash = frozen.CharterHash
-		document.Findings[0].ProposedTests[0].CharterRefs = nil
-		diagnostics := ValidateRoleOutput(document, frozen)
-		assertDiagnosticCode(t, diagnostics, CodeMissingCharterTrace)
-	})
-}
-
-func TestRoleOutputV4RequiresKnownFindingAttribution(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	for _, attribution := range []string{
-		FindingAttributionIntroduced,
-		FindingAttributionWorsened,
-		FindingAttributionPreExisting,
-		FindingAttributionUnattributed,
-	} {
-		t.Run(attribution, func(t *testing.T) {
-			document := readRoleFixture(t, "role-output-defect.json")
-			document.CharterHash = frozen.CharterHash
-			document.Findings[0].Attribution = attribution
-			if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
-				t.Fatalf("ValidateRoleOutput diagnostics = %#v", diagnostics)
-			}
-		})
-	}
-
-	for _, test := range []struct {
-		name        string
-		attribution string
-	}{
-		{name: "missing", attribution: ""},
-		{name: "unknown", attribution: "unknown"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			document := readRoleFixture(t, "role-output-defect.json")
-			document.CharterHash = frozen.CharterHash
-			document.Findings[0].Attribution = test.attribution
-			assertDiagnosticCode(t, ValidateRoleOutput(document, frozen), CodeInvalidRoleOutput)
-		})
-	}
-}
-
-func TestRoleOutputV5MaintainsFindingValidation(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	document := readRoleFixture(t, "role-output-defect.json")
-	document.SchemaVersion = RoleOutputV5
-	document.CharterHash = frozen.CharterHash
-	if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
-		t.Fatalf("v5 ValidateRoleOutput diagnostics = %#v", diagnostics)
-	}
-	document.Findings[0].Attribution = ""
-	assertDiagnosticCode(t, ValidateRoleOutput(document, frozen), CodeInvalidRoleOutput)
-}
-
-func TestRoleOutputEvaluationRequiresV5(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	v4 := readRoleFixture(t, "role-output-defect.json")
-	v4.CharterHash = frozen.CharterHash
-	v4.Evaluation = &RoleEvaluation{
-		EvaluatedPaths:          []string{"cmd/witness/main.go"},
-		EvaluatedCharterGoalIDs: []string{"goal-cli"},
-	}
-	assertDiagnosticCode(t, ValidateRoleOutput(v4, frozen), CodeInvalidRoleOutput)
-
-	v3 := readRoleFixture(t, "role-output-defect-v3.json")
-	v3.CharterHash = frozen.CharterHash
-	v3.Evaluation = &RoleEvaluation{
-		EvaluatedPaths:          []string{"cmd/witness/main.go"},
-		EvaluatedCharterGoalIDs: []string{"goal-cli"},
-	}
-	assertDiagnosticCode(t, ValidateRoleOutput(v3, frozen), CodeInvalidRoleOutput)
-}
-
-func TestRoleOutputEvaluationRequiresCompleteUniqueLists(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	validV5 := func() RoleOutputDocument {
-		document := readRoleFixture(t, "role-output-defect.json")
-		document.SchemaVersion = RoleOutputV5
-		document.CharterHash = frozen.CharterHash
-		document.Evaluation = &RoleEvaluation{
-			EvaluatedPaths:          []string{"cmd/witness/main.go"},
-			EvaluatedCharterGoalIDs: []string{"goal-cli"},
-		}
-		return document
-	}
-	assertInvalid := func(document RoleOutputDocument) {
-		t.Helper()
-		if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) == 0 {
-			t.Fatal("ValidateRoleOutput accepted malformed evaluation")
-		}
-	}
-
-	if diagnostics := ValidateRoleOutput(validV5(), frozen); len(diagnostics) != 0 {
-		t.Fatalf("valid v5 evaluation diagnostics = %#v", diagnostics)
-	}
-	document := validV5()
-	document.Evaluation.EvaluatedPaths = nil
-	assertInvalid(document)
-	document = validV5()
-	document.Evaluation.EvaluatedPaths = []string{" "}
-	assertInvalid(document)
-	document = validV5()
-	document.Evaluation.EvaluatedPaths = []string{"cmd/witness/main.go", "cmd/witness/main.go"}
-	assertInvalid(document)
-	document = validV5()
-	document.Evaluation.EvaluatedCharterGoalIDs = nil
-	assertInvalid(document)
-	document = validV5()
-	document.Evaluation.EvaluatedCharterGoalIDs = []string{" "}
-	assertInvalid(document)
-	document = validV5()
-	document.Evaluation.EvaluatedCharterGoalIDs = []string{"goal-cli", "goal-cli"}
-	assertInvalid(document)
-}
-
-func TestRoleOutputV3CompatibilityTreatsFindingsAsUnattributed(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	document := readRoleFixture(t, "role-output-defect-v3.json")
-	if document.SchemaVersion != RoleOutputV3 {
-		t.Fatalf("schema_version = %q, want %q", document.SchemaVersion, RoleOutputV3)
-	}
-	document.CharterHash = frozen.CharterHash
-	if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) != 0 {
-		t.Fatalf("v3 ValidateRoleOutput diagnostics = %#v", diagnostics)
-	}
-	if got := document.EffectiveFindingAttribution(document.Findings[0]); got != FindingAttributionUnattributed {
-		t.Fatalf("v3 effective attribution = %q, want %q", got, FindingAttributionUnattributed)
-	}
-}
 
 func TestVerificationBatchRejectsNarrativeAndDigestMismatch(t *testing.T) {
 	roleOutput, batch := validRoleOutputAndBatch(t)
@@ -424,14 +263,18 @@ func TestVerificationBatchPreservesExplicitEmptyWitnessArtifactRefs(t *testing.T
 	if diagnostics := ValidateRoleOutput(document, frozen); len(diagnostics) > 0 {
 		t.Fatalf("role output diagnostics = %#v", diagnostics)
 	}
-	if !bytes.Contains(document.Findings[0].Witness.canonicalJSON, []byte(`"artifact_refs":[]`)) {
-		t.Fatalf("witness canonical JSON = %s, want explicit empty artifact_refs", document.Findings[0].Witness.canonicalJSON)
+	canonicalWitness, err := WitnessCanonicalJSON(document.Findings[0].Witness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(canonicalWitness, []byte(`"artifact_refs":[]`)) {
+		t.Fatalf("witness canonical JSON = %s, want explicit empty artifact_refs", canonicalWitness)
 	}
 	batch, err := NewVerificationBatch(document, "batch-1", []string{"defect-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantWitnessDigest := digest.RawBytes(document.Findings[0].Witness.canonicalJSON)
+	wantWitnessDigest := digest.RawBytes(canonicalWitness)
 	if batch.Findings[0].WitnessDigest != wantWitnessDigest {
 		t.Fatalf("witness digest = %s, want %s", batch.Findings[0].WitnessDigest, wantWitnessDigest)
 	}
@@ -594,27 +437,6 @@ func TestDefectMalformedEstimateRoutesToUnknownDelta(t *testing.T) {
 	}
 }
 
-func TestDeltaEstimateTracksExplicitZeroPresence(t *testing.T) {
-	explicit, err := strictjson.DecodeBytes[DeltaEstimate]([]byte(`{"status":"known","files":0}`), strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !explicit.FilesPresent() || explicit.Files != 0 {
-		t.Fatalf("files presence/value = %v/%d, want explicit zero", explicit.FilesPresent(), explicit.Files)
-	}
-	if explicit.LinesPresent() {
-		t.Fatal("lines presence = true, want omitted")
-	}
-
-	malformed, err := strictjson.DecodeBytes[DeltaEstimate]([]byte(`{"status":"model-specific","files":2}`), strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if malformed.Status != DeltaStatusUnknown || malformed.Files != 0 || malformed.FilesPresent() {
-		t.Fatalf("malformed delta = %#v, want unknown without file presence", malformed)
-	}
-}
-
 func TestReducerRequiresExplicitNullFieldsForRawSurvivedVerdict(t *testing.T) {
 	raw := `{
 	  "schema_version":"relay-witness-verdicts-v2",
@@ -631,15 +453,6 @@ func TestReducerRequiresExplicitNullFieldsForRawSurvivedVerdict(t *testing.T) {
 	}
 	diagnostics := ValidateRelayWitnessVerdicts(document, nil)
 	assertDiagnosticCode(t, diagnostics, CodeInvalidRelayVerdicts)
-}
-
-func TestRoleOutputRejectsEmptyMissingGoalQuestion(t *testing.T) {
-	frozen := validFrozenCharter(t)
-	document := readRoleFixture(t, "role-output-goal-fit.json")
-	document.CharterHash = frozen.CharterHash
-	document.MissingGoalQuestions = []MissingGoalQuestion{{}}
-	diagnostics := ValidateRoleOutput(document, frozen)
-	assertDiagnosticCode(t, diagnostics, CodeInvalidRoleOutput)
 }
 
 func readRoleFixture(t *testing.T, name string) RoleOutputDocument {

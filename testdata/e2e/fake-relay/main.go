@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/contract/canonjson"
+	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/internal/contracts"
-	"github.com/charlesnpx/witness/internal/digest"
 )
 
 const (

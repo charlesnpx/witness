@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/charter"
-	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/diag"
 )
 
 type driverGeneratedOutput struct {

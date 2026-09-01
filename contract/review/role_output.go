@@ -1,4 +1,4 @@
-package contracts
+package review
 
 import (
 	"bytes"
@@ -6,9 +6,10 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/charter"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/strictjson"
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 type ScopeAnchor = charter.ScopeAnchor
@@ -379,12 +380,34 @@ func RoleOutputCanonicalBytes(document RoleOutputDocument) ([]byte, error) {
 	return CanonicalBytes(document)
 }
 
-func canonicalFindingJSON(finding Finding) (json.RawMessage, error) {
+// FindingCanonicalJSON returns the filed canonical form of finding. It
+// verifies decoded cache data before returning it so mutations after decode
+// continue to fail closed.
+func FindingCanonicalJSON(finding Finding) (json.RawMessage, error) {
 	return canonicalJSONWithVerifiedCache(finding, finding.canonicalJSON, "finding")
 }
 
-func canonicalWitnessJSON(witness Witness) (json.RawMessage, error) {
+// WitnessCanonicalJSON returns the filed canonical form of witness. It
+// verifies decoded cache data before returning it so mutations after decode
+// continue to fail closed.
+func WitnessCanonicalJSON(witness Witness) (json.RawMessage, error) {
 	return canonicalJSONWithVerifiedCache(witness, witness.canonicalJSON, "witness")
+}
+
+func WitnessDigest(witness Witness) (string, error) {
+	canonical, err := WitnessCanonicalJSON(witness)
+	if err != nil {
+		return "", err
+	}
+	return digest.RawBytes(canonical), nil
+}
+
+func FindingDigest(finding Finding) (string, error) {
+	canonical, err := FindingCanonicalJSON(finding)
+	if err != nil {
+		return "", err
+	}
+	return digest.RawBytes(canonical), nil
 }
 
 func canonicalFindingRawMessage(data []byte, finding Finding) (json.RawMessage, error) {

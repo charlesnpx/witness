@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/internal/freeze"
 )
 

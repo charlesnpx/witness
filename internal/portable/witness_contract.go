@@ -6,10 +6,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charlesnpx/witness/internal/canonjson"
-	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/contract/canonjson"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/freeze"
-	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 const (

@@ -1,3 +1,4 @@
+// Package strictjson is part of the published contract surface: its one strict reader rejects duplicate keys, unknown fields, and trailing JSON as contract semantics versioned with the module.
 package strictjson
 
 import (
@@ -11,7 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charlesnpx/witness/internal/diag"
+	"github.com/charlesnpx/witness/contract/diag"
 )
 
 // DefaultMaxBytes is the default per-document or per-line input ceiling used

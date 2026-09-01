@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/strictjson"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 const (

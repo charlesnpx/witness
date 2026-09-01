@@ -6,7 +6,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/contract/canonjson"
 )
 
 const (

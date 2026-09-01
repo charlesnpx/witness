@@ -1,3 +1,4 @@
+// Package canonjson is part of the published contract surface: canonical JSON is a contract semantic versioned with the module.
 package canonjson
 
 import (

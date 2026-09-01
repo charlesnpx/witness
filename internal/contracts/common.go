@@ -4,19 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"regexp"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/canonjson"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/digest"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
 )
 
 const (
-	RoleOutputV3                   = "review-role-output-v3"
-	RoleOutputV4                   = "review-role-output-v4"
-	RoleOutputV5                   = "review-role-output-v5"
 	VerificationBatchV2            = "review-verification-batch-v2"
 	RelayWitnessVerdictsV2         = "relay-witness-verdicts-v2"
 	VerificationManifestV3         = "review-verification-manifest-v3"
@@ -26,25 +21,6 @@ const (
 	ExecutionReceiptV2             = "review-execution-receipt-v2"
 	RelayCompatibilityV3           = "review-relay-compatibility-v3"
 	DecisionRulesVersion           = "witness-decision-rules-v1"
-	RoleDefect                     = "defect"
-	RoleEconomy                    = "economy"
-	RoleGoalFit                    = "goal_fit"
-	FindingKindDefect              = "defect"
-	FindingKindEconomy             = "economy"
-	WitnessKindDefect              = "defect"
-	WitnessKindEquivalence         = "equivalence"
-	WitnessStrengthExecutable      = "executable"
-	WitnessStrengthConstructed     = "constructed"
-	WitnessStrengthArgued          = "argued"
-	SeverityCritical               = "critical"
-	SeverityHigh                   = "high"
-	SeverityMedium                 = "medium"
-	SeverityLow                    = "low"
-	DeltaStatusKnown               = "known"
-	DeltaStatusUnknown             = "unknown"
-	RemedyDirectionAdd             = "add"
-	RemedyDirectionChange          = "change"
-	RemedyDirectionRemove          = "remove"
 	BatchTaskDefect                = "defect"
 	BatchTaskEconomy               = "economy"
 	RecordStatusValid              = "valid"
@@ -71,189 +47,27 @@ const (
 	DispositionPendingVerification = "pending_verification"
 	DispositionOwnerOverride       = "owner_override"
 	ReasonOutOfDelta               = "out_of_delta"
-	FindingAttributionIntroduced   = "introduced"
-	FindingAttributionWorsened     = "worsened"
-	FindingAttributionPreExisting  = "pre-existing"
-	FindingAttributionUnattributed = "unattributed"
 	ReasonPreExisting              = "pre_existing"
 	ReasonAttributionUnattributed  = "attribution_unattributed"
 )
 
 const (
-	CodeInvalidContract          = "invalid_contract"
-	CodeInvalidRoleOutput        = "invalid_role_output"
 	CodeInvalidVerificationBatch = "invalid_verification_batch"
 	CodeInvalidRelayVerdicts     = "invalid_relay_witness_verdicts"
 	CodeInvalidManifest          = "invalid_verification_manifest"
 	CodeInvalidReceipt           = "invalid_execution_receipt"
 	CodeInvalidCompatibility     = "invalid_relay_compatibility"
-	CodeDigestMismatch           = "digest_mismatch"
 	CodeCoverageMismatch         = "coverage_mismatch"
 	CodeForbiddenExecutionField  = "forbidden_execution_field"
-	CodeMissingCharterTrace      = "missing_charter_trace"
-	CodeInvalidDelta             = "invalid_delta"
-	CodeInvalidRemedy            = "invalid_remedy"
-	CodeInvalidWitness           = "invalid_witness"
-	CodeFiledValueMutated        = "contracts_filed_value_mutated"
 )
 
 var stableIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
-
-type ValidationError struct {
-	Diagnostics []diag.Diagnostic
-}
-
-func (err *ValidationError) Error() string {
-	if err == nil || len(err.Diagnostics) == 0 {
-		return "contract validation failed"
-	}
-	first := err.Diagnostics[0]
-	if first.Path != "" {
-		return fmt.Sprintf("%s at %s: %s", first.Code, first.Path, first.Message)
-	}
-	return fmt.Sprintf("%s: %s", first.Code, first.Message)
-}
-
-func ErrorFromDiagnostics(diagnostics []diag.Diagnostic) error {
-	if len(diagnostics) == 0 {
-		return nil
-	}
-	return &ValidationError{Diagnostics: diagnostics}
-}
-
-func CanonicalBytes(value any) ([]byte, error) {
-	return canonjson.Marshal(value)
-}
-
-func SemanticDigest(value any) (string, error) {
-	return digest.SemanticJSON(value)
-}
 
 func decodeStrictContractJSON(data []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(value)
-}
-
-func canonicalRawMessage(data []byte) (json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	canonical, err := CanonicalBytes(value)
-	if err != nil {
-		return nil, err
-	}
-	return append(json.RawMessage(nil), canonical...), nil
-}
-
-func canonicalJSONWithVerifiedCache(value any, cached json.RawMessage, label string) (json.RawMessage, error) {
-	projectionCanonical, err := CanonicalBytes(value)
-	if err != nil {
-		return nil, err
-	}
-	if len(cached) == 0 {
-		return append(json.RawMessage(nil), projectionCanonical...), nil
-	}
-	projectionValue, err := decodeCanonicalJSONValue(projectionCanonical)
-	if err != nil {
-		return nil, err
-	}
-	cachedValue, err := decodeCanonicalJSONValue(cached)
-	if err != nil {
-		return nil, err
-	}
-	cachedCanonical, err := CanonicalBytes(cachedValue)
-	if err != nil {
-		return nil, err
-	}
-	mergedProjection := mergeOmittedCachedJSONValues(projectionValue, cachedValue)
-	mergedCanonical, err := CanonicalBytes(mergedProjection)
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(mergedCanonical, cachedCanonical) {
-		return nil, filedValueMutatedError(label)
-	}
-	return append(json.RawMessage(nil), cachedCanonical...), nil
-}
-
-func decodeCanonicalJSONValue(data []byte) (any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	return value, nil
-}
-
-func mergeOmittedCachedJSONValues(projected any, cached any) any {
-	switch projectedValue := projected.(type) {
-	case map[string]any:
-		cachedValue, ok := cached.(map[string]any)
-		if !ok {
-			return projected
-		}
-		merged := make(map[string]any, len(projectedValue)+len(cachedValue))
-		for key, value := range projectedValue {
-			if cachedItem, exists := cachedValue[key]; exists {
-				merged[key] = mergeOmittedCachedJSONValues(value, cachedItem)
-				continue
-			}
-			merged[key] = value
-		}
-		for key, cachedItem := range cachedValue {
-			if _, exists := projectedValue[key]; !exists && isOmittedJSONZeroValue(cachedItem) {
-				merged[key] = cachedItem
-			}
-		}
-		return merged
-	case []any:
-		cachedValue, ok := cached.([]any)
-		if !ok || len(projectedValue) != len(cachedValue) {
-			return projected
-		}
-		merged := make([]any, len(projectedValue))
-		for index, value := range projectedValue {
-			merged[index] = mergeOmittedCachedJSONValues(value, cachedValue[index])
-		}
-		return merged
-	default:
-		return projected
-	}
-}
-
-func isOmittedJSONZeroValue(value any) bool {
-	switch typed := value.(type) {
-	case nil:
-		return true
-	case bool:
-		return !typed
-	case string:
-		return typed == ""
-	case json.Number:
-		canonical, err := CanonicalBytes(typed)
-		return err == nil && string(canonical) == "0"
-	case []any:
-		return len(typed) == 0
-	case map[string]any:
-		return len(typed) == 0
-	default:
-		return false
-	}
-}
-
-func filedValueMutatedError(label string) error {
-	return &ValidationError{Diagnostics: []diag.Diagnostic{diagnostic(
-		CodeFiledValueMutated,
-		label+" was mutated after decode; cached canonical JSON no longer matches the current value.",
-		"",
-		map[string]any{"value": label},
-	)}}
 }
 
 func appendValidationErrorDiagnostics(diagnostics *[]diag.Diagnostic, path string, err error) bool {
@@ -342,9 +156,9 @@ func prefixDiagnostics(prefix string, diagnostics []diag.Diagnostic) []diag.Diag
 		return nil
 	}
 	prefixed := make([]diag.Diagnostic, len(diagnostics))
-	for i, item := range diagnostics {
-		prefixed[i] = item
-		prefixed[i].Path = prefix + item.Path
+	for index, item := range diagnostics {
+		prefixed[index] = item
+		prefixed[index].Path = prefix + item.Path
 	}
 	return prefixed
 }
@@ -385,4 +199,31 @@ func hasForbiddenExecutionFieldName(name string) bool {
 	default:
 		return false
 	}
+}
+
+func itoa(value int) string {
+	return strconvAppend(value)
+}
+
+func strconvAppend(value int) string {
+	var buffer [20]byte
+	return string(strconvAppendInt(buffer[:0], value))
+}
+
+func strconvAppendInt(destination []byte, value int) []byte {
+	if value == 0 {
+		return append(destination, '0')
+	}
+	if value < 0 {
+		destination = append(destination, '-')
+		value = -value
+	}
+	var digits [20]byte
+	index := len(digits)
+	for value > 0 {
+		index--
+		digits[index] = byte('0' + value%10)
+		value /= 10
+	}
+	return append(destination, digits[index:]...)
 }

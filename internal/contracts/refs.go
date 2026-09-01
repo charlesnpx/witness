@@ -1,21 +1,10 @@
 package contracts
 
-import "github.com/charlesnpx/witness/internal/diag"
+import (
+	"strings"
 
-type ArtifactRef struct {
-	Kind          string `json:"kind"`
-	ID            string `json:"id"`
-	Digest        string `json:"digest"`
-	DigestProfile string `json:"digest_profile,omitempty"`
-	MediaType     string `json:"media_type,omitempty"`
-}
-
-type SourceRef struct {
-	Kind          string `json:"kind"`
-	ID            string `json:"id"`
-	Digest        string `json:"digest"`
-	DigestProfile string `json:"digest_profile,omitempty"`
-}
+	"github.com/charlesnpx/witness/contract/diag"
+)
 
 func validateArtifactRef(ref ArtifactRef, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
@@ -41,4 +30,23 @@ func validateArtifactRefPointer(ref *ArtifactRef, path string, required bool) []
 		return nil
 	}
 	return validateArtifactRef(*ref, path)
+}
+
+func validateExecutableSpec(spec ExecutableSpec, path string, transformationRequired bool) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if len(spec.Argv) == 0 {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "executable specification requires structured argv.", path+"/argv", nil))
+	}
+	for index, item := range spec.Argv {
+		if strings.TrimSpace(item) == "" {
+			diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "argv entries must be non-empty strings.", path+"/argv/"+itoa(index), nil))
+		}
+	}
+	requireString(&diagnostics, path+"/cwd", "executable cwd", spec.CWD)
+	requireString(&diagnostics, path+"/expected_observation", "expected observation", spec.ExpectedObservation)
+	if transformationRequired && spec.TransformationRef == nil {
+		diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "economy executable witnesses require a patch artifact or deterministic transformation reference.", path+"/transformation_ref", nil))
+	}
+	diagnostics = append(diagnostics, validateArtifactRefPointer(spec.TransformationRef, path+"/transformation_ref", false)...)
+	return diagnostics
 }

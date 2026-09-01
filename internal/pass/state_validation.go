@@ -9,16 +9,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/adjudicate"
 	"github.com/charlesnpx/witness/internal/changesurface"
-	"github.com/charlesnpx/witness/internal/charter"
 	"github.com/charlesnpx/witness/internal/contracts"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/digest"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
-	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func validateLoadedState(state *State) error {

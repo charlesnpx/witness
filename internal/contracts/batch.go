@@ -1,12 +1,13 @@
 package contracts
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/digest"
-	"github.com/charlesnpx/witness/internal/strictjson"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/review"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 type VerificationBatchDocument struct {
@@ -47,15 +48,17 @@ func (finding VerificationBatchFinding) MarshalJSON() ([]byte, error) {
 }
 
 func canonicalBatchFiledFindingJSON(finding VerificationBatchFinding) (json.RawMessage, error) {
-	filedFinding, err := canonicalFindingJSON(finding.FiledFinding)
+	filedFinding, err := review.FindingCanonicalJSON(finding.FiledFinding)
 	if err != nil {
 		return nil, err
 	}
-	if len(finding.filedFindingCanonicalJSON) > 0 {
-		filedFinding, err = canonicalJSONWithVerifiedCache(finding.FiledFinding, finding.filedFindingCanonicalJSON, "filed finding")
-		if err != nil {
-			return nil, err
-		}
+	if len(finding.filedFindingCanonicalJSON) > 0 && !bytes.Equal(filedFinding, finding.filedFindingCanonicalJSON) {
+		return nil, ErrorFromDiagnostics([]diag.Diagnostic{diagnostic(
+			CodeFiledValueMutated,
+			"filed finding was mutated after decode; cached canonical JSON no longer matches the current value.",
+			"",
+			map[string]any{"value": "filed finding"},
+		)})
 	}
 	return filedFinding, nil
 }
@@ -71,7 +74,7 @@ func (finding *VerificationBatchFinding) UnmarshalJSON(data []byte) error {
 		if err := decodeStrictContractJSON(decoded.FiledFinding, &filedFinding); err != nil {
 			return err
 		}
-		canonical, err := canonicalFindingRawMessage(decoded.FiledFinding, filedFinding)
+		canonical, err := review.FindingCanonicalJSON(filedFinding)
 		if err != nil {
 			return err
 		}
@@ -178,7 +181,7 @@ func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *R
 			}
 		}
 		requireDigest(&diagnostics, path+"/witness_digest", "witness digest", item.WitnessDigest)
-		witnessDigest, err := WitnessDigest(item.FiledFinding.Witness)
+		witnessDigest, err := review.WitnessDigest(item.FiledFinding.Witness)
 		if err != nil {
 			if !appendValidationErrorDiagnostics(&diagnostics, path+"/filed_finding/witness", err) {
 				diagnostics = append(diagnostics, diagnostic(CodeInvalidVerificationBatch, "filed witness digest could not be recomputed.", path+"/witness_digest", map[string]any{"error": err.Error()}))
@@ -198,7 +201,7 @@ func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *R
 				continue
 			}
 			compareFindingValue(&diagnostics, path+"/filed_finding", "filed finding", item.FiledFinding, sourceFinding)
-			sourceWitnessDigest, err := WitnessDigest(sourceFinding.Witness)
+			sourceWitnessDigest, err := review.WitnessDigest(sourceFinding.Witness)
 			if err != nil {
 				if !appendValidationErrorDiagnostics(&diagnostics, path+"/witness_digest", err) {
 					diagnostics = append(diagnostics, diagnostic(CodeInvalidVerificationBatch, "source witness digest could not be recomputed.", path+"/witness_digest", map[string]any{"error": err.Error()}))
@@ -231,11 +234,11 @@ func NewVerificationBatch(roleOutput RoleOutputDocument, batchID string, finding
 				map[string]any{"finding_id": id},
 			)}}
 		}
-		witnessDigest, err := WitnessDigest(finding.Witness)
+		witnessDigest, err := review.WitnessDigest(finding.Witness)
 		if err != nil {
 			return VerificationBatchDocument{}, err
 		}
-		filedFinding, err := canonicalFindingJSON(finding)
+		filedFinding, err := review.FindingCanonicalJSON(finding)
 		if err != nil {
 			return VerificationBatchDocument{}, err
 		}
@@ -256,22 +259,6 @@ func NewVerificationBatch(roleOutput RoleOutputDocument, batchID string, finding
 		BatchID:                batchID,
 		Findings:               findings,
 	}, nil
-}
-
-func WitnessDigest(witness Witness) (string, error) {
-	canonical, err := canonicalWitnessJSON(witness)
-	if err != nil {
-		return "", err
-	}
-	return digest.RawBytes(canonical), nil
-}
-
-func FindingDigest(finding Finding) (string, error) {
-	canonical, err := canonicalFindingJSON(finding)
-	if err != nil {
-		return "", err
-	}
-	return digest.RawBytes(canonical), nil
 }
 
 func VerificationBatchDigest(document VerificationBatchDocument) (string, error) {
@@ -314,8 +301,8 @@ func compareSemanticValue(diagnostics *[]diag.Diagnostic, path string, label str
 }
 
 func compareFindingValue(diagnostics *[]diag.Diagnostic, path string, label string, actual Finding, expected Finding) {
-	actualDigest, actualErr := FindingDigest(actual)
-	expectedDigest, expectedErr := FindingDigest(expected)
+	actualDigest, actualErr := review.FindingDigest(actual)
+	expectedDigest, expectedErr := review.FindingDigest(expected)
 	if actualErr != nil {
 		if appendValidationErrorDiagnostics(diagnostics, path, actualErr) {
 			return
