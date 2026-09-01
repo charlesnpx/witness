@@ -67,6 +67,11 @@ func TestRoleOutputValidationAndV3Compatibility(t *testing.T) {
 		}
 		document := readRoleFixture(t, "role-output-defect.json")
 		document.CharterHash = frozen.CharterHash
+		document.Findings[0].Attribution = ""
+		assertDiagnosticCode(t, ValidateRoleOutput(document, frozen), CodeInvalidRoleOutput)
+
+		document = readRoleFixture(t, "role-output-defect.json")
+		document.CharterHash = frozen.CharterHash
 		document.Findings[0].Attribution = "unknown"
 		assertDiagnosticCode(t, ValidateRoleOutput(document, frozen), CodeInvalidRoleOutput)
 	})
@@ -112,6 +117,17 @@ func TestRoleOutputEvaluationRequiresV5(t *testing.T) {
 		t.Fatalf("valid v5 evaluation diagnostics = %#v", diagnostics)
 	}
 	valid.Evaluation.EvaluatedPaths = []string{"cmd/witness/main.go", "cmd/witness/main.go"}
+	assertDiagnosticCode(t, ValidateRoleOutput(valid, frozen), CodeInvalidRoleOutput)
+	valid.Evaluation.EvaluatedPaths = nil
+	assertDiagnosticCode(t, ValidateRoleOutput(valid, frozen), CodeInvalidRoleOutput)
+	valid.Evaluation.EvaluatedPaths = []string{" "}
+	assertDiagnosticCode(t, ValidateRoleOutput(valid, frozen), CodeInvalidContract)
+	valid.Evaluation.EvaluatedPaths = []string{"cmd/witness/main.go"}
+	valid.Evaluation.EvaluatedCharterGoalIDs = nil
+	assertDiagnosticCode(t, ValidateRoleOutput(valid, frozen), CodeInvalidRoleOutput)
+	valid.Evaluation.EvaluatedCharterGoalIDs = []string{" "}
+	assertDiagnosticCode(t, ValidateRoleOutput(valid, frozen), CodeInvalidContract)
+	valid.Evaluation.EvaluatedCharterGoalIDs = []string{"goal-cli", "goal-cli"}
 	assertDiagnosticCode(t, ValidateRoleOutput(valid, frozen), CodeInvalidRoleOutput)
 }
 

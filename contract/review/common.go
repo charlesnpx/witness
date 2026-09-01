@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/contract/digest"
-	"github.com/charlesnpx/witness/contract/internal/validate"
 )
 
 const (
@@ -74,14 +75,6 @@ func ErrorFromDiagnostics(diagnostics []diag.Diagnostic) error {
 	return &ValidationError{Diagnostics: diagnostics}
 }
 
-func CanonicalBytes(value any) ([]byte, error) {
-	return canonjson.Marshal(value)
-}
-
-func SemanticDigest(value any) (string, error) {
-	return digest.SemanticJSON(value)
-}
-
 func decodeStrictContractJSON(data []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -96,7 +89,7 @@ func canonicalRawMessage(data []byte) (json.RawMessage, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
-	canonical, err := CanonicalBytes(value)
+	canonical, err := canonjson.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +97,7 @@ func canonicalRawMessage(data []byte) (json.RawMessage, error) {
 }
 
 func canonicalJSONWithVerifiedCache(value any, cached json.RawMessage, label string) (json.RawMessage, error) {
-	projectionCanonical, err := CanonicalBytes(value)
+	projectionCanonical, err := canonjson.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
@@ -119,12 +112,12 @@ func canonicalJSONWithVerifiedCache(value any, cached json.RawMessage, label str
 	if err != nil {
 		return nil, err
 	}
-	cachedCanonical, err := CanonicalBytes(cachedValue)
+	cachedCanonical, err := canonjson.Marshal(cachedValue)
 	if err != nil {
 		return nil, err
 	}
 	mergedProjection := mergeOmittedCachedJSONValues(projectionValue, cachedValue)
-	mergedCanonical, err := CanonicalBytes(mergedProjection)
+	mergedCanonical, err := canonjson.Marshal(mergedProjection)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +182,7 @@ func isOmittedJSONZeroValue(value any) bool {
 	case string:
 		return typed == ""
 	case json.Number:
-		canonical, err := CanonicalBytes(typed)
+		canonical, err := canonjson.Marshal(typed)
 		return err == nil && string(canonical) == "0"
 	case []any:
 		return len(typed) == 0
@@ -201,7 +194,7 @@ func isOmittedJSONZeroValue(value any) bool {
 }
 
 func filedValueMutatedError(label string) error {
-	return &ValidationError{Diagnostics: []diag.Diagnostic{diagnostic(
+	return &ValidationError{Diagnostics: []diag.Diagnostic{Diagnostic(
 		CodeFiledValueMutated,
 		label+" was mutated after decode; cached canonical JSON no longer matches the current value.",
 		"",
@@ -214,42 +207,125 @@ func appendValidationErrorDiagnostics(diagnostics *[]diag.Diagnostic, path strin
 	if !errors.As(err, &validationErr) {
 		return false
 	}
-	*diagnostics = append(*diagnostics, prefixDiagnostics(path, validationErr.Diagnostics)...)
+	*diagnostics = append(*diagnostics, PrefixDiagnostics(path, validationErr.Diagnostics)...)
 	return true
 }
 
-func requireDigest(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
-	validate.RequireDigest(diagnostics, path, field, value, CodeInvalidContract)
+var stableIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
+
+func validDigest(value string) bool {
+	if !strings.HasPrefix(value, digest.Prefix) {
+		return false
+	}
+	hex := strings.TrimPrefix(value, digest.Prefix)
+	if len(hex) != 64 {
+		return false
+	}
+	for _, r := range hex {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
-func requireString(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
-	validate.RequireString(diagnostics, path, field, value, CodeInvalidContract)
+func validStableID(value string) bool {
+	return stableIDPattern.MatchString(value)
 }
 
-func requireStableID(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
-	validate.RequireStableID(diagnostics, path, field, value, CodeInvalidContract)
+func RequireDigest(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
+	if !validDigest(value) {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			CodeInvalidContract,
+			field+" must be a relay-root-digests-v1 sha256 digest.",
+			path,
+			map[string]any{"value": value},
+		))
+	}
 }
 
-func requireEnum(diagnostics *[]diag.Diagnostic, path string, field string, value string, allowed map[string]bool, code string) {
-	validate.RequireEnum(diagnostics, path, field, value, allowed, code)
+func RequireString(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
+	if strings.TrimSpace(value) == "" {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			CodeInvalidContract,
+			field+" is required.",
+			path,
+			nil,
+		))
+	}
 }
 
-func diagnostic(code string, message string, path string, details map[string]any) diag.Diagnostic {
-	return validate.Diagnostic(code, message, path, details)
+func RequireStableID(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
+	if !validStableID(value) {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			CodeInvalidContract,
+			field+" requires a stable ID.",
+			path,
+			map[string]any{"id": value},
+		))
+	}
 }
 
-func prefixDiagnostics(prefix string, diagnostics []diag.Diagnostic) []diag.Diagnostic {
-	return validate.PrefixDiagnostics(prefix, diagnostics)
+func RequireEnum(diagnostics *[]diag.Diagnostic, path string, field string, value string, allowed map[string]bool, code string) {
+	if !allowed[value] {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			code,
+			field+" has an unsupported value.",
+			path,
+			map[string]any{"value": value},
+		))
+	}
 }
 
-func stringSet(values ...string) map[string]bool {
-	return validate.StringSet(values...)
+func Diagnostic(code string, message string, path string, details map[string]any) diag.Diagnostic {
+	return diag.Diagnostic{
+		Code:    code,
+		Message: message,
+		Path:    path,
+		Details: details,
+	}
 }
 
-func compareDigest(diagnostics *[]diag.Diagnostic, path string, label string, actual string, expected string) {
-	validate.CompareDigest(diagnostics, path, label, actual, expected, CodeDigestMismatch)
+func PrefixDiagnostics(prefix string, diagnostics []diag.Diagnostic) []diag.Diagnostic {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	prefixed := make([]diag.Diagnostic, len(diagnostics))
+	for index, item := range diagnostics {
+		prefixed[index] = item
+		prefixed[index].Path = prefix + item.Path
+	}
+	return prefixed
 }
 
-func identityPresent(identity map[string]any) bool {
-	return validate.IdentityPresent(identity)
+func AppendPointer(path string, segment string) string {
+	escaped := strings.ReplaceAll(segment, "~", "~0")
+	escaped = strings.ReplaceAll(escaped, "/", "~1")
+	return path + "/" + escaped
+}
+
+func StringSet(values ...string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
+func CompareDigest(diagnostics *[]diag.Diagnostic, path string, label string, actual string, expected string) {
+	if actual != expected {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			CodeDigestMismatch,
+			label+" digest mismatch.",
+			path,
+			map[string]any{"actual": actual, "expected": expected},
+		))
+	}
+}
+
+func IdentityPresent(identity map[string]any) bool {
+	return len(identity) > 0
 }

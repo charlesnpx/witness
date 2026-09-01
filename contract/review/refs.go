@@ -19,11 +19,11 @@ type SourceRef struct {
 
 func validateArtifactRef(ref ArtifactRef, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireString(&diagnostics, path+"/kind", "artifact reference kind", ref.Kind)
-	requireStableID(&diagnostics, path+"/id", "artifact reference ID", ref.ID)
-	requireDigest(&diagnostics, path+"/digest", "artifact reference digest", ref.Digest)
+	RequireString(&diagnostics, path+"/kind", "artifact reference kind", ref.Kind)
+	RequireStableID(&diagnostics, path+"/id", "artifact reference ID", ref.ID)
+	RequireDigest(&diagnostics, path+"/digest", "artifact reference digest", ref.Digest)
 	if ref.DigestProfile != "" && ref.DigestProfile != "relay-root-digests-v1" {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidContract,
 			"artifact reference digest_profile must be relay-root-digests-v1 when present.",
 			path+"/digest_profile",
@@ -36,7 +36,7 @@ func validateArtifactRef(ref ArtifactRef, path string) []diag.Diagnostic {
 func validateArtifactRefPointer(ref *ArtifactRef, path string, required bool) []diag.Diagnostic {
 	if ref == nil {
 		if required {
-			return []diag.Diagnostic{diagnostic(CodeInvalidContract, "artifact reference is required.", path, nil)}
+			return []diag.Diagnostic{Diagnostic(CodeInvalidContract, "artifact reference is required.", path, nil)}
 		}
 		return nil
 	}

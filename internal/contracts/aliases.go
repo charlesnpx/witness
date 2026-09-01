@@ -2,10 +2,11 @@ package contracts
 
 import (
 	"encoding/json"
-	"io"
 
+	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/contract/review"
 )
 
@@ -24,7 +25,6 @@ type (
 	CharterRef               = review.CharterRef
 	RecurrenceRef            = review.RecurrenceRef
 	ArtifactRef              = review.ArtifactRef
-	SourceRef                = review.SourceRef
 	ValidationError          = review.ValidationError
 )
 
@@ -58,9 +58,6 @@ const (
 	CodeInvalidContract            = review.CodeInvalidContract
 	CodeInvalidRoleOutput          = review.CodeInvalidRoleOutput
 	CodeDigestMismatch             = review.CodeDigestMismatch
-	CodeMissingCharterTrace        = review.CodeMissingCharterTrace
-	CodeInvalidDelta               = review.CodeInvalidDelta
-	CodeInvalidRemedy              = review.CodeInvalidRemedy
 	CodeInvalidWitness             = review.CodeInvalidWitness
 	CodeFiledValueMutated          = review.CodeFiledValueMutated
 )
@@ -70,15 +67,11 @@ func ErrorFromDiagnostics(diagnostics []diag.Diagnostic) error {
 }
 
 func CanonicalBytes(value any) ([]byte, error) {
-	return review.CanonicalBytes(value)
+	return canonjson.Marshal(value)
 }
 
 func SemanticDigest(value any) (string, error) {
-	return review.SemanticDigest(value)
-}
-
-func ReadRoleOutput(reader io.Reader) (RoleOutputDocument, error) {
-	return review.ReadRoleOutput(reader)
+	return digest.SemanticJSON(value)
 }
 
 func ReadRoleOutputBytes(data []byte) (RoleOutputDocument, error) {
@@ -119,12 +112,4 @@ func WitnessDigest(witness Witness) (string, error) {
 
 func FindingDigest(finding Finding) (string, error) {
 	return review.FindingDigest(finding)
-}
-
-func DecodeAndValidateRoleOutput(data []byte, frozen *charter.FrozenCharter) (RoleOutputDocument, error) {
-	return review.DecodeAndValidateRoleOutput(data, frozen)
-}
-
-func DecodeRoleOutput(reader io.Reader, frozen *charter.FrozenCharter) (RoleOutputDocument, error) {
-	return review.DecodeRoleOutput(reader, frozen)
 }

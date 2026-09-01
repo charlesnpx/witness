@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"regexp"
-	"strings"
 
 	"github.com/charlesnpx/witness/contract/diag"
-	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/review"
 )
 
 const (
@@ -61,8 +59,6 @@ const (
 	CodeForbiddenExecutionField  = "forbidden_execution_field"
 )
 
-var stableIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
-
 func decodeStrictContractJSON(data []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -75,121 +71,8 @@ func appendValidationErrorDiagnostics(diagnostics *[]diag.Diagnostic, path strin
 	if !errors.As(err, &validationErr) {
 		return false
 	}
-	*diagnostics = append(*diagnostics, prefixDiagnostics(path, validationErr.Diagnostics)...)
+	*diagnostics = append(*diagnostics, review.PrefixDiagnostics(path, validationErr.Diagnostics)...)
 	return true
-}
-
-func validDigest(value string) bool {
-	if !strings.HasPrefix(value, digest.Prefix) {
-		return false
-	}
-	hex := strings.TrimPrefix(value, digest.Prefix)
-	if len(hex) != 64 {
-		return false
-	}
-	for _, r := range hex {
-		switch {
-		case r >= '0' && r <= '9':
-		case r >= 'a' && r <= 'f':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func requireDigest(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
-	if !validDigest(value) {
-		*diagnostics = append(*diagnostics, diagnostic(
-			CodeInvalidContract,
-			field+" must be a relay-root-digests-v1 sha256 digest.",
-			path,
-			map[string]any{"value": value},
-		))
-	}
-}
-
-func requireString(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
-	if strings.TrimSpace(value) == "" {
-		*diagnostics = append(*diagnostics, diagnostic(
-			CodeInvalidContract,
-			field+" is required.",
-			path,
-			nil,
-		))
-	}
-}
-
-func requireStableID(diagnostics *[]diag.Diagnostic, path string, field string, value string) {
-	if !stableIDPattern.MatchString(value) {
-		*diagnostics = append(*diagnostics, diagnostic(
-			CodeInvalidContract,
-			field+" requires a stable ID.",
-			path,
-			map[string]any{"id": value},
-		))
-	}
-}
-
-func requireEnum(diagnostics *[]diag.Diagnostic, path string, field string, value string, allowed map[string]bool, code string) {
-	if !allowed[value] {
-		*diagnostics = append(*diagnostics, diagnostic(
-			code,
-			field+" has an unsupported value.",
-			path,
-			map[string]any{"value": value},
-		))
-	}
-}
-
-func diagnostic(code string, message string, path string, details map[string]any) diag.Diagnostic {
-	return diag.Diagnostic{
-		Code:    code,
-		Message: message,
-		Path:    path,
-		Details: details,
-	}
-}
-
-func prefixDiagnostics(prefix string, diagnostics []diag.Diagnostic) []diag.Diagnostic {
-	if len(diagnostics) == 0 {
-		return nil
-	}
-	prefixed := make([]diag.Diagnostic, len(diagnostics))
-	for index, item := range diagnostics {
-		prefixed[index] = item
-		prefixed[index].Path = prefix + item.Path
-	}
-	return prefixed
-}
-
-func appendPointer(path string, segment string) string {
-	escaped := strings.ReplaceAll(segment, "~", "~0")
-	escaped = strings.ReplaceAll(escaped, "/", "~1")
-	return path + "/" + escaped
-}
-
-func stringSet(values ...string) map[string]bool {
-	set := make(map[string]bool, len(values))
-	for _, value := range values {
-		set[value] = true
-	}
-	return set
-}
-
-func compareDigest(diagnostics *[]diag.Diagnostic, path string, label string, actual string, expected string) {
-	if actual != expected {
-		*diagnostics = append(*diagnostics, diagnostic(
-			CodeDigestMismatch,
-			label+" digest mismatch.",
-			path,
-			map[string]any{"actual": actual, "expected": expected},
-		))
-	}
-}
-
-func identityPresent(identity map[string]any) bool {
-	return len(identity) > 0
 }
 
 func hasForbiddenExecutionFieldName(name string) bool {

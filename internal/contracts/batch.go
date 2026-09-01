@@ -53,7 +53,7 @@ func canonicalBatchFiledFindingJSON(finding VerificationBatchFinding) (json.RawM
 		return nil, err
 	}
 	if len(finding.filedFindingCanonicalJSON) > 0 && !bytes.Equal(filedFinding, finding.filedFindingCanonicalJSON) {
-		return nil, ErrorFromDiagnostics([]diag.Diagnostic{diagnostic(
+		return nil, ErrorFromDiagnostics([]diag.Diagnostic{review.Diagnostic(
 			CodeFiledValueMutated,
 			"filed finding was mutated after decode; cached canonical JSON no longer matches the current value.",
 			"",
@@ -104,24 +104,24 @@ func RequireValidVerificationBatch(document VerificationBatchDocument, roleOutpu
 func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *RoleOutputDocument) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if document.SchemaVersion != VerificationBatchV2 {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, review.Diagnostic(
 			CodeInvalidVerificationBatch,
 			"verification-batch document schema_version must be review-verification-batch-v2.",
 			"/schema_version",
 			map[string]any{"expected": VerificationBatchV2, "actual": document.SchemaVersion},
 		))
 	}
-	requireEnum(&diagnostics, "/task_shape", "task_shape", document.TaskShape, stringSet(BatchTaskDefect, BatchTaskEconomy), CodeInvalidVerificationBatch)
-	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
-	requireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
-	requireStableID(&diagnostics, "/batch_id", "batch ID", document.BatchID)
-	requireDigest(&diagnostics, "/source_role_output_digest", "source role-output digest", document.SourceRoleOutputDigest)
-	diagnostics = append(diagnostics, prefixDiagnostics("/source_role_output_ref", validateArtifactRef(document.SourceRoleOutputRef, ""))...)
+	review.RequireEnum(&diagnostics, "/task_shape", "task_shape", document.TaskShape, review.StringSet(BatchTaskDefect, BatchTaskEconomy), CodeInvalidVerificationBatch)
+	review.RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
+	review.RequireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
+	review.RequireStableID(&diagnostics, "/batch_id", "batch ID", document.BatchID)
+	review.RequireDigest(&diagnostics, "/source_role_output_digest", "source role-output digest", document.SourceRoleOutputDigest)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/source_role_output_ref", validateArtifactRef(document.SourceRoleOutputRef, ""))...)
 	if document.SourceRoleOutputRef.Digest != "" {
-		compareDigest(&diagnostics, "/source_role_output_ref/digest", "source role-output reference", document.SourceRoleOutputRef.Digest, document.SourceRoleOutputDigest)
+		review.CompareDigest(&diagnostics, "/source_role_output_ref/digest", "source role-output reference", document.SourceRoleOutputRef.Digest, document.SourceRoleOutputDigest)
 	}
 	if len(document.Findings) == 0 || len(document.Findings) > 8 {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, review.Diagnostic(
 			CodeInvalidVerificationBatch,
 			"verification batches must contain one to eight findings.",
 			"/findings",
@@ -133,15 +133,15 @@ func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *R
 	if roleOutput != nil {
 		roleDigest, err := RoleOutputDigest(*roleOutput)
 		if err != nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidVerificationBatch, "source role-output digest could not be recomputed.", "/source_role_output_digest", map[string]any{"error": err.Error()}))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, "source role-output digest could not be recomputed.", "/source_role_output_digest", map[string]any{"error": err.Error()}))
 		} else {
-			compareDigest(&diagnostics, "/source_role_output_digest", "source role-output", document.SourceRoleOutputDigest, roleDigest)
+			review.CompareDigest(&diagnostics, "/source_role_output_digest", "source role-output", document.SourceRoleOutputDigest, roleDigest)
 		}
-		compareDigest(&diagnostics, "/charter_hash", "charter", document.CharterHash, roleOutput.CharterHash)
-		compareDigest(&diagnostics, "/artifact_digest", "artifact", document.ArtifactDigest, roleOutput.ArtifactDigest)
+		review.CompareDigest(&diagnostics, "/charter_hash", "charter", document.CharterHash, roleOutput.CharterHash)
+		review.CompareDigest(&diagnostics, "/artifact_digest", "artifact", document.ArtifactDigest, roleOutput.ArtifactDigest)
 		expectedTask := taskShapeForRole(roleOutput.Role)
 		if expectedTask != "" && document.TaskShape != expectedTask {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, review.Diagnostic(
 				CodeInvalidVerificationBatch,
 				"verification batch task_shape must match the source role output.",
 				"/task_shape",
@@ -157,9 +157,9 @@ func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *R
 	seen := map[string]int{}
 	for index, item := range document.Findings {
 		path := "/findings/" + itoa(index)
-		requireStableID(&diagnostics, path+"/finding_id", "finding ID", item.FindingID)
+		review.RequireStableID(&diagnostics, path+"/finding_id", "finding ID", item.FindingID)
 		if item.FindingID != item.FiledFinding.ID {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, review.Diagnostic(
 				CodeInvalidVerificationBatch,
 				"batch finding_id must match the filed finding object ID.",
 				path+"/finding_id",
@@ -167,7 +167,7 @@ func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *R
 			))
 		}
 		if first, exists := seen[item.FindingID]; exists {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, review.Diagnostic(
 				CodeCoverageMismatch,
 				"verification batch must not contain duplicate finding IDs.",
 				path+"/finding_id",
@@ -177,22 +177,22 @@ func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *R
 		seen[item.FindingID] = index
 		if _, err := canonicalBatchFiledFindingJSON(item); err != nil {
 			if !appendValidationErrorDiagnostics(&diagnostics, path+"/filed_finding", err) {
-				diagnostics = append(diagnostics, diagnostic(CodeInvalidVerificationBatch, "filed finding canonical JSON could not be recomputed.", path+"/filed_finding", map[string]any{"error": err.Error()}))
+				diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, "filed finding canonical JSON could not be recomputed.", path+"/filed_finding", map[string]any{"error": err.Error()}))
 			}
 		}
-		requireDigest(&diagnostics, path+"/witness_digest", "witness digest", item.WitnessDigest)
+		review.RequireDigest(&diagnostics, path+"/witness_digest", "witness digest", item.WitnessDigest)
 		witnessDigest, err := review.WitnessDigest(item.FiledFinding.Witness)
 		if err != nil {
 			if !appendValidationErrorDiagnostics(&diagnostics, path+"/filed_finding/witness", err) {
-				diagnostics = append(diagnostics, diagnostic(CodeInvalidVerificationBatch, "filed witness digest could not be recomputed.", path+"/witness_digest", map[string]any{"error": err.Error()}))
+				diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, "filed witness digest could not be recomputed.", path+"/witness_digest", map[string]any{"error": err.Error()}))
 			}
 		} else {
-			compareDigest(&diagnostics, path+"/witness_digest", "filed witness", item.WitnessDigest, witnessDigest)
+			review.CompareDigest(&diagnostics, path+"/witness_digest", "filed witness", item.WitnessDigest, witnessDigest)
 		}
 		if roleFindings != nil {
 			sourceFinding, exists := roleFindings[item.FindingID]
 			if !exists {
-				diagnostics = append(diagnostics, diagnostic(
+				diagnostics = append(diagnostics, review.Diagnostic(
 					CodeCoverageMismatch,
 					"verification batch references a finding not present in the role-output document.",
 					path+"/finding_id",
@@ -204,10 +204,10 @@ func ValidateVerificationBatch(document VerificationBatchDocument, roleOutput *R
 			sourceWitnessDigest, err := review.WitnessDigest(sourceFinding.Witness)
 			if err != nil {
 				if !appendValidationErrorDiagnostics(&diagnostics, path+"/witness_digest", err) {
-					diagnostics = append(diagnostics, diagnostic(CodeInvalidVerificationBatch, "source witness digest could not be recomputed.", path+"/witness_digest", map[string]any{"error": err.Error()}))
+					diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, "source witness digest could not be recomputed.", path+"/witness_digest", map[string]any{"error": err.Error()}))
 				}
 			} else {
-				compareDigest(&diagnostics, path+"/witness_digest", "source witness", item.WitnessDigest, sourceWitnessDigest)
+				review.CompareDigest(&diagnostics, path+"/witness_digest", "source witness", item.WitnessDigest, sourceWitnessDigest)
 			}
 		}
 	}
@@ -227,7 +227,7 @@ func NewVerificationBatch(roleOutput RoleOutputDocument, batchID string, finding
 	for _, id := range findingIDs {
 		finding, exists := byID[id]
 		if !exists {
-			return VerificationBatchDocument{}, &ValidationError{Diagnostics: []diag.Diagnostic{diagnostic(
+			return VerificationBatchDocument{}, &ValidationError{Diagnostics: []diag.Diagnostic{review.Diagnostic(
 				CodeCoverageMismatch,
 				"requested batch finding is not present in the role-output document.",
 				"/findings",
@@ -287,17 +287,17 @@ func compareSemanticValue(diagnostics *[]diag.Diagnostic, path string, label str
 		if appendValidationErrorDiagnostics(diagnostics, path, actualErr) {
 			return
 		}
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidVerificationBatch, label+" actual value could not be digested.", path, map[string]any{"error": actualErr.Error()}))
+		*diagnostics = append(*diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, label+" actual value could not be digested.", path, map[string]any{"error": actualErr.Error()}))
 		return
 	}
 	if expectedErr != nil {
 		if appendValidationErrorDiagnostics(diagnostics, path, expectedErr) {
 			return
 		}
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidVerificationBatch, label+" expected value could not be digested.", path, map[string]any{"error": expectedErr.Error()}))
+		*diagnostics = append(*diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, label+" expected value could not be digested.", path, map[string]any{"error": expectedErr.Error()}))
 		return
 	}
-	compareDigest(diagnostics, path, label, actualDigest, expectedDigest)
+	review.CompareDigest(diagnostics, path, label, actualDigest, expectedDigest)
 }
 
 func compareFindingValue(diagnostics *[]diag.Diagnostic, path string, label string, actual Finding, expected Finding) {
@@ -307,15 +307,15 @@ func compareFindingValue(diagnostics *[]diag.Diagnostic, path string, label stri
 		if appendValidationErrorDiagnostics(diagnostics, path, actualErr) {
 			return
 		}
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidVerificationBatch, label+" actual value could not be digested.", path, map[string]any{"error": actualErr.Error()}))
+		*diagnostics = append(*diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, label+" actual value could not be digested.", path, map[string]any{"error": actualErr.Error()}))
 		return
 	}
 	if expectedErr != nil {
 		if appendValidationErrorDiagnostics(diagnostics, path, expectedErr) {
 			return
 		}
-		*diagnostics = append(*diagnostics, diagnostic(CodeInvalidVerificationBatch, label+" expected value could not be digested.", path, map[string]any{"error": expectedErr.Error()}))
+		*diagnostics = append(*diagnostics, review.Diagnostic(CodeInvalidVerificationBatch, label+" expected value could not be digested.", path, map[string]any{"error": expectedErr.Error()}))
 		return
 	}
-	compareDigest(diagnostics, path, label, actualDigest, expectedDigest)
+	review.CompareDigest(diagnostics, path, label, actualDigest, expectedDigest)
 }

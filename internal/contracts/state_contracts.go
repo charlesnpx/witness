@@ -7,6 +7,7 @@ import (
 
 	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/review"
 	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/changesurface"
 )
@@ -168,20 +169,20 @@ func RequireValidVerificationManifest(document VerificationManifest) error {
 func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if document.SchemaVersion != VerificationManifestV6 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v6.", "/schema_version", map[string]any{"expected": VerificationManifestV6, "actual": document.SchemaVersion}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "verification manifest schema_version must be review-verification-manifest-v6.", "/schema_version", map[string]any{"expected": VerificationManifestV6, "actual": document.SchemaVersion}))
 	}
-	requireDigest(&diagnostics, "/plan_digest", "plan_digest", document.PlanDigest)
-	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
-	requireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
+	review.RequireDigest(&diagnostics, "/plan_digest", "plan_digest", document.PlanDigest)
+	review.RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
+	review.RequireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
 	diagnostics = append(diagnostics, validateManifestChangeSurface(document)...)
-	diagnostics = append(diagnostics, prefixDiagnostics("/compatibility_manifest", validateArtifactRef(document.CompatibilityManifest, ""))...)
-	diagnostics = append(diagnostics, prefixDiagnostics("/relay_capabilities", validateArtifactRef(document.RelayCapabilities, ""))...)
-	diagnostics = append(diagnostics, prefixDiagnostics("/integration_bundle", validateArtifactRef(document.IntegrationBundle, ""))...)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/compatibility_manifest", validateArtifactRef(document.CompatibilityManifest, ""))...)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/relay_capabilities", validateArtifactRef(document.RelayCapabilities, ""))...)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/integration_bundle", validateArtifactRef(document.IntegrationBundle, ""))...)
 	for index, ref := range document.SelectedContracts {
-		diagnostics = append(diagnostics, prefixDiagnostics("/selected_contracts/"+itoa(index), validateArtifactRef(ref, ""))...)
+		diagnostics = append(diagnostics, review.PrefixDiagnostics("/selected_contracts/"+itoa(index), validateArtifactRef(ref, ""))...)
 	}
-	if !identityPresent(document.ConsumerIdentity) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "consumer_identity is required.", "/consumer_identity", nil))
+	if !review.IdentityPresent(document.ConsumerIdentity) {
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "consumer_identity is required.", "/consumer_identity", nil))
 	}
 	diagnostics = append(diagnostics, validateManifestRelayLaunchStatus(document)...)
 	for index, batch := range document.Batches {
@@ -210,14 +211,14 @@ func validateManifestRelayLaunchStatus(document VerificationManifest) []diag.Dia
 	globalStatus, globalStatusOK := manifestRelayLaunchStatus(globalValue)
 	globalStatusValid := globalMarkerPresent && globalStatusOK && validRelayLaunchStatus(globalStatus)
 	if !globalMarkerPresent {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, review.Diagnostic(
 			CodeInvalidManifest,
 			"consumer_identity witness_relay_launch_status is required when relay batch metadata is present.",
 			"/consumer_identity/"+VerificationManifestRelayLaunchStatusKey,
 			nil,
 		))
 	} else if !globalStatusOK || !validRelayLaunchStatus(globalStatus) {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, review.Diagnostic(
 			CodeInvalidManifest,
 			"consumer_identity witness_relay_launch_status has an unsupported value.",
 			"/consumer_identity/"+VerificationManifestRelayLaunchStatusKey,
@@ -229,7 +230,7 @@ func validateManifestRelayLaunchStatus(document VerificationManifest) []diag.Dia
 	}
 	batches, ok := rawBatches.(map[string]any)
 	if !ok {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, review.Diagnostic(
 			CodeInvalidManifest,
 			"consumer_identity witness_relay_batches must be an object when present.",
 			"/consumer_identity/"+VerificationManifestRelayBatchesKey,
@@ -240,11 +241,11 @@ func validateManifestRelayLaunchStatus(document VerificationManifest) []diag.Dia
 	knownBatchIDs := make(map[string]bool, len(document.Batches))
 	for _, batch := range document.Batches {
 		knownBatchIDs[batch.BatchID] = true
-		path := appendPointer("/consumer_identity/"+VerificationManifestRelayBatchesKey, batch.BatchID)
+		path := review.AppendPointer("/consumer_identity/"+VerificationManifestRelayBatchesKey, batch.BatchID)
 		raw, exists := batches[batch.BatchID]
 		if !exists {
 			if globalMarkerPresent {
-				diagnostics = append(diagnostics, diagnostic(
+				diagnostics = append(diagnostics, review.Diagnostic(
 					CodeInvalidManifest,
 					"consumer_identity relay batch metadata is required when relay launch status is recorded.",
 					path,
@@ -259,7 +260,7 @@ func validateManifestRelayLaunchStatus(document VerificationManifest) []diag.Dia
 		if knownBatchIDs[batchID] {
 			continue
 		}
-		path := appendPointer("/consumer_identity/"+VerificationManifestRelayBatchesKey, batchID)
+		path := review.AppendPointer("/consumer_identity/"+VerificationManifestRelayBatchesKey, batchID)
 		diagnostics = append(diagnostics, validateManifestExtraRelayBatchLaunchStatus(raw, path, globalStatus, globalStatusValid)...)
 	}
 	return diagnostics
@@ -268,13 +269,13 @@ func validateManifestRelayLaunchStatus(document VerificationManifest) []diag.Dia
 func validateManifestRelayBatchLaunchStatus(raw any, path string, globalStatus string, globalStatusValid bool) []diag.Diagnostic {
 	object, ok := raw.(map[string]any)
 	if !ok {
-		return []diag.Diagnostic{diagnostic(CodeInvalidManifest, "consumer_identity relay batch metadata must be an object.", path, nil)}
+		return []diag.Diagnostic{review.Diagnostic(CodeInvalidManifest, "consumer_identity relay batch metadata must be an object.", path, nil)}
 	}
 	value, exists := object[VerificationManifestBatchRelayLaunchStatusKey]
 	status, statusOK := manifestRelayLaunchStatus(value)
 	statusPath := path + "/" + VerificationManifestBatchRelayLaunchStatusKey
 	if !exists {
-		return []diag.Diagnostic{diagnostic(
+		return []diag.Diagnostic{review.Diagnostic(
 			CodeInvalidManifest,
 			"consumer_identity relay batch metadata requires relay_launch_status.",
 			statusPath,
@@ -299,7 +300,7 @@ func validateManifestExtraRelayBatchLaunchStatus(raw any, path string, globalSta
 
 func validateManifestRelayBatchStatusValue(value any, status string, statusOK bool, path string, globalStatus string, globalStatusValid bool) []diag.Diagnostic {
 	if !statusOK || !validRelayLaunchStatus(status) {
-		return []diag.Diagnostic{diagnostic(
+		return []diag.Diagnostic{review.Diagnostic(
 			CodeInvalidManifest,
 			"consumer_identity relay batch metadata relay_launch_status has an unsupported value.",
 			path,
@@ -307,7 +308,7 @@ func validateManifestRelayBatchStatusValue(value any, status string, statusOK bo
 		)}
 	}
 	if globalStatusValid && status != globalStatus {
-		return []diag.Diagnostic{diagnostic(
+		return []diag.Diagnostic{review.Diagnostic(
 			CodeInvalidManifest,
 			"consumer_identity relay batch metadata relay_launch_status does not match witness_relay_launch_status.",
 			path,
@@ -333,110 +334,110 @@ func validateManifestChangeSurface(document VerificationManifest) []diag.Diagnos
 	var diagnostics []diag.Diagnostic
 	scopePolicy := changesurface.ScopePolicy(document.ScopePolicy)
 	if !changesurface.ValidateScopePolicy(document.ScopePolicy) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "scope_policy must be delta_obligating or whole_tree when set.", "/scope_policy", map[string]any{"value": document.ScopePolicy}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "scope_policy must be delta_obligating or whole_tree when set.", "/scope_policy", map[string]any{"value": document.ScopePolicy}))
 	}
 	if document.ChangeSurface != nil {
 		surfaceDiagnostics := changesurface.Validate(*document.ChangeSurface)
 		for _, item := range surfaceDiagnostics {
 			item.Code = CodeInvalidManifest
-			diagnostics = append(diagnostics, prefixDiagnostics("/change_surface", []diag.Diagnostic{item})...)
+			diagnostics = append(diagnostics, review.PrefixDiagnostics("/change_surface", []diag.Diagnostic{item})...)
 		}
 		if len(surfaceDiagnostics) == 0 {
 			surfaceDigest, err := changesurface.Digest(*document.ChangeSurface)
 			if err != nil {
-				diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "change surface digest could not be computed.", "/change_surface_digest", map[string]any{"error": err.Error()}))
+				diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "change surface digest could not be computed.", "/change_surface_digest", map[string]any{"error": err.Error()}))
 			} else {
-				compareDigest(&diagnostics, "/change_surface_digest", "change surface", document.ChangeSurfaceDigest, surfaceDigest)
-				compareDigest(&diagnostics, "/change_surface/head_artifact_digest", "change surface head artifact", document.ChangeSurface.HeadArtifactDigest, document.ArtifactDigest)
+				review.CompareDigest(&diagnostics, "/change_surface_digest", "change surface", document.ChangeSurfaceDigest, surfaceDigest)
+				review.CompareDigest(&diagnostics, "/change_surface/head_artifact_digest", "change surface head artifact", document.ChangeSurface.HeadArtifactDigest, document.ArtifactDigest)
 			}
 		}
 	} else if document.ChangeSurfaceDigest != "" {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "change_surface_digest requires an embedded change_surface document.", "/change_surface_digest", nil))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "change_surface_digest requires an embedded change_surface document.", "/change_surface_digest", nil))
 	}
 	if document.BaselinePass != nil {
 		if !document.BaselinePass.Declared {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass marker must be declared when present.", "/baseline_pass/declared", nil))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "baseline_pass marker must be declared when present.", "/baseline_pass/declared", nil))
 		}
 		if document.BaselinePass.Reason == "" {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass reason is required.", "/baseline_pass/reason", nil))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "baseline_pass reason is required.", "/baseline_pass/reason", nil))
 		}
 		if document.ChangeSurface != nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "baseline_pass and change_surface are mutually exclusive.", "/baseline_pass", nil))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "baseline_pass and change_surface are mutually exclusive.", "/baseline_pass", nil))
 		}
 	}
 	if scopePolicy == changesurface.ScopePolicyDeltaObligating && document.ChangeSurface == nil && document.BaselinePass == nil {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "delta_obligating manifests require a change_surface or explicit baseline_pass.", "/change_surface", map[string]any{"scope_policy": scopePolicy}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "delta_obligating manifests require a change_surface or explicit baseline_pass.", "/change_surface", map[string]any{"scope_policy": scopePolicy}))
 	}
 	return diagnostics
 }
 
 func validateManifestBatch(batch VerificationManifestBatch, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/batch_id", "batch ID", batch.BatchID)
-	requireEnum(&diagnostics, path+"/status", "manifest record status", batch.Status, stringSet(RecordStatusValid, RecordStatusFailed, RecordStatusUnavailable, RecordStatusNotRequired), CodeInvalidManifest)
-	diagnostics = append(diagnostics, prefixDiagnostics(path+"/batch_ref", validateArtifactRef(batch.BatchRef, ""))...)
-	requireDigest(&diagnostics, path+"/batch_digest", "batch digest", batch.BatchDigest)
+	review.RequireStableID(&diagnostics, path+"/batch_id", "batch ID", batch.BatchID)
+	review.RequireEnum(&diagnostics, path+"/status", "manifest record status", batch.Status, review.StringSet(RecordStatusValid, RecordStatusFailed, RecordStatusUnavailable, RecordStatusNotRequired), CodeInvalidManifest)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics(path+"/batch_ref", validateArtifactRef(batch.BatchRef, ""))...)
+	review.RequireDigest(&diagnostics, path+"/batch_digest", "batch digest", batch.BatchDigest)
 	if batch.BatchRef.Digest != "" {
-		compareDigest(&diagnostics, path+"/batch_ref/digest", "batch ref", batch.BatchRef.Digest, batch.BatchDigest)
+		review.CompareDigest(&diagnostics, path+"/batch_ref/digest", "batch ref", batch.BatchRef.Digest, batch.BatchDigest)
 	}
 	if batch.Status == RecordStatusValid {
 		diagnostics = append(diagnostics, validateArtifactRefPointer(batch.PortableExportRef, path+"/portable_export_ref", true)...)
-		requireDigest(&diagnostics, path+"/portable_export_digest", "portable_export_digest", batch.PortableExportDigest)
-		requireDigest(&diagnostics, path+"/canonical_result_digest", "canonical_result_digest", batch.CanonicalResultDigest)
+		review.RequireDigest(&diagnostics, path+"/portable_export_digest", "portable_export_digest", batch.PortableExportDigest)
+		review.RequireDigest(&diagnostics, path+"/canonical_result_digest", "canonical_result_digest", batch.CanonicalResultDigest)
 		if batch.PortableExportRef != nil && batch.PortableExportDigest != "" {
-			compareDigest(&diagnostics, path+"/portable_export_ref/digest", "portable export ref", batch.PortableExportRef.Digest, batch.PortableExportDigest)
+			review.CompareDigest(&diagnostics, path+"/portable_export_ref/digest", "portable export ref", batch.PortableExportRef.Digest, batch.PortableExportDigest)
 		}
 		if batch.RelayVerdicts == nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "valid relay manifest records require relay_verdicts.", path+"/relay_verdicts", nil))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "valid relay manifest records require relay_verdicts.", path+"/relay_verdicts", nil))
 		} else {
-			diagnostics = append(diagnostics, prefixDiagnostics(path+"/relay_verdicts", ValidateRelayWitnessVerdicts(*batch.RelayVerdicts, nil))...)
+			diagnostics = append(diagnostics, review.PrefixDiagnostics(path+"/relay_verdicts", ValidateRelayWitnessVerdicts(*batch.RelayVerdicts, nil))...)
 			relayVerdictsDigest, err := RelayWitnessVerdictsDigest(*batch.RelayVerdicts)
 			if err != nil {
-				diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "embedded relay_verdicts digest could not be recomputed.", path+"/canonical_result_digest", map[string]any{"error": err.Error()}))
+				diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "embedded relay_verdicts digest could not be recomputed.", path+"/canonical_result_digest", map[string]any{"error": err.Error()}))
 			} else {
-				compareDigest(&diagnostics, path+"/canonical_result_digest", "embedded relay_verdicts", batch.CanonicalResultDigest, relayVerdictsDigest)
+				review.CompareDigest(&diagnostics, path+"/canonical_result_digest", "embedded relay_verdicts", batch.CanonicalResultDigest, relayVerdictsDigest)
 			}
 		}
 		return diagnostics
 	}
 	if batch.RelayVerdicts != nil {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "relay_verdicts may be present only when relay verification status is valid.", path+"/relay_verdicts", map[string]any{"status": batch.Status}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "relay_verdicts may be present only when relay verification status is valid.", path+"/relay_verdicts", map[string]any{"status": batch.Status}))
 	}
 	return diagnostics
 }
 
 func validateExecutionReceiptRecord(record ExecutionReceiptManifestRecord, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/finding_id", "finding ID", record.FindingID)
-	requireEnum(&diagnostics, path+"/status", "execution status", record.Status, stringSet(ExecutionStatusSatisfied, ExecutionStatusContradicted, ExecutionStatusFailed, ExecutionStatusUnavailable, ExecutionStatusNotRequired), CodeInvalidManifest)
+	review.RequireStableID(&diagnostics, path+"/finding_id", "finding ID", record.FindingID)
+	review.RequireEnum(&diagnostics, path+"/status", "execution status", record.Status, review.StringSet(ExecutionStatusSatisfied, ExecutionStatusContradicted, ExecutionStatusFailed, ExecutionStatusUnavailable, ExecutionStatusNotRequired), CodeInvalidManifest)
 	requiredReceipt := record.Status == ExecutionStatusSatisfied || record.Status == ExecutionStatusContradicted
 	diagnostics = append(diagnostics, validateArtifactRefPointer(record.ReceiptRef, path+"/receipt_ref", requiredReceipt)...)
 	if requiredReceipt {
-		requireDigest(&diagnostics, path+"/receipt_digest", "receipt digest", record.ReceiptDigest)
+		review.RequireDigest(&diagnostics, path+"/receipt_digest", "receipt digest", record.ReceiptDigest)
 	}
 	if record.ReceiptRef != nil && record.ReceiptDigest != "" {
-		compareDigest(&diagnostics, path+"/receipt_ref/digest", "receipt ref", record.ReceiptRef.Digest, record.ReceiptDigest)
+		review.CompareDigest(&diagnostics, path+"/receipt_ref/digest", "receipt ref", record.ReceiptRef.Digest, record.ReceiptDigest)
 	}
 	return diagnostics
 }
 
 func validateExcludedFindingRecord(record ExcludedFindingRecord, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireEnum(&diagnostics, path+"/role", "role", record.Role, stringSet(RoleDefect, RoleEconomy), CodeInvalidManifest)
-	requireStableID(&diagnostics, path+"/finding_id", "finding ID", record.FindingID)
-	diagnostics = append(diagnostics, prefixDiagnostics(path+"/source_role_output_ref", validateArtifactRef(record.SourceRoleOutputRef, ""))...)
+	review.RequireEnum(&diagnostics, path+"/role", "role", record.Role, review.StringSet(RoleDefect, RoleEconomy), CodeInvalidManifest)
+	review.RequireStableID(&diagnostics, path+"/finding_id", "finding ID", record.FindingID)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics(path+"/source_role_output_ref", validateArtifactRef(record.SourceRoleOutputRef, ""))...)
 	if record.SourceRoleOutputRef.Kind != "" && record.SourceRoleOutputRef.Kind != "role-output" {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding source_role_output_ref must reference a role-output artifact.", path+"/source_role_output_ref/kind", map[string]any{"actual": record.SourceRoleOutputRef.Kind, "expected": "role-output"}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "excluded finding source_role_output_ref must reference a role-output artifact.", path+"/source_role_output_ref/kind", map[string]any{"actual": record.SourceRoleOutputRef.Kind, "expected": "role-output"}))
 	}
-	requireDigest(&diagnostics, path+"/source_role_output_digest", "source role-output digest", record.SourceRoleOutputDigest)
+	review.RequireDigest(&diagnostics, path+"/source_role_output_digest", "source role-output digest", record.SourceRoleOutputDigest)
 	if record.SourceRoleOutputRef.Digest != "" && record.SourceRoleOutputDigest != "" {
-		compareDigest(&diagnostics, path+"/source_role_output_ref/digest", "source role-output reference", record.SourceRoleOutputRef.Digest, record.SourceRoleOutputDigest)
+		review.CompareDigest(&diagnostics, path+"/source_role_output_ref/digest", "source role-output reference", record.SourceRoleOutputRef.Digest, record.SourceRoleOutputDigest)
 	}
 	if !excludedFindingReason(record.Reason) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding reason must be out_of_delta, pre_existing, or attribution_unattributed.", path+"/reason", map[string]any{"actual": record.Reason, "expected": []string{ReasonOutOfDelta, ReasonPreExisting, ReasonAttributionUnattributed}}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "excluded finding reason must be out_of_delta, pre_existing, or attribution_unattributed.", path+"/reason", map[string]any{"actual": record.Reason, "expected": []string{ReasonOutOfDelta, ReasonPreExisting, ReasonAttributionUnattributed}}))
 	}
 	if record.Disposition != DispositionAdvisory {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidManifest, "excluded finding disposition must be advisory.", path+"/disposition", map[string]any{"actual": record.Disposition, "expected": DispositionAdvisory}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidManifest, "excluded finding disposition must be advisory.", path+"/disposition", map[string]any{"actual": record.Disposition, "expected": DispositionAdvisory}))
 	}
 	return diagnostics
 }
@@ -467,63 +468,63 @@ func RequireValidExecutionReceipt(document ExecutionReceipt) error {
 func ValidateExecutionReceipt(document ExecutionReceipt) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if document.SchemaVersion != ExecutionReceiptV2 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidReceipt, "execution receipt schema_version must be review-execution-receipt-v2.", "/schema_version", map[string]any{"expected": ExecutionReceiptV2, "actual": document.SchemaVersion}))
+		diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidReceipt, "execution receipt schema_version must be review-execution-receipt-v2.", "/schema_version", map[string]any{"expected": ExecutionReceiptV2, "actual": document.SchemaVersion}))
 	}
-	requireStableID(&diagnostics, "/receipt_id", "receipt ID", document.ReceiptID)
-	requireStableID(&diagnostics, "/finding_id", "finding ID", document.FindingID)
-	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
-	requireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
-	diagnostics = append(diagnostics, prefixDiagnostics("/frozen_source", validateArtifactRef(document.FrozenSource, ""))...)
+	review.RequireStableID(&diagnostics, "/receipt_id", "receipt ID", document.ReceiptID)
+	review.RequireStableID(&diagnostics, "/finding_id", "finding ID", document.FindingID)
+	review.RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
+	review.RequireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/frozen_source", validateArtifactRef(document.FrozenSource, ""))...)
 	diagnostics = append(diagnostics, validateHarness(document.Harness, "/harness")...)
 	diagnostics = append(diagnostics, validateIssuer(document.Issuer, "/issuer")...)
 	diagnostics = append(diagnostics, validateAuthentication(document.Authentication, "/authentication")...)
 	diagnostics = append(diagnostics, validateExecutableSpec(document.Command, "/command", false)...)
 	diagnostics = append(diagnostics, validateContainment(document.Containment, "/containment")...)
-	diagnostics = append(diagnostics, prefixDiagnostics("/source_inventory_before", validateArtifactRef(document.SourceInventoryBefore, ""))...)
-	diagnostics = append(diagnostics, prefixDiagnostics("/source_inventory_after", validateArtifactRef(document.SourceInventoryAfter, ""))...)
-	diagnostics = append(diagnostics, prefixDiagnostics("/workspace_inventory_before", validateArtifactRef(document.WorkspaceInventoryBefore, ""))...)
-	diagnostics = append(diagnostics, prefixDiagnostics("/workspace_inventory_after", validateArtifactRef(document.WorkspaceInventoryAfter, ""))...)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/source_inventory_before", validateArtifactRef(document.SourceInventoryBefore, ""))...)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/source_inventory_after", validateArtifactRef(document.SourceInventoryAfter, ""))...)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/workspace_inventory_before", validateArtifactRef(document.WorkspaceInventoryBefore, ""))...)
+	diagnostics = append(diagnostics, review.PrefixDiagnostics("/workspace_inventory_after", validateArtifactRef(document.WorkspaceInventoryAfter, ""))...)
 	diagnostics = append(diagnostics, validateCaptures(document.Captures, "/captures")...)
-	requireString(&diagnostics, "/expected_observation", "expected observation", document.ExpectedObservation)
-	requireString(&diagnostics, "/observed_observation", "observed observation", document.ObservedObservation)
-	requireEnum(&diagnostics, "/execution_status", "execution status", document.ExecutionStatus, stringSet(ExecutionStatusSatisfied, ExecutionStatusContradicted, ExecutionStatusFailed, ExecutionStatusUnavailable, ExecutionStatusNotRequired), CodeInvalidReceipt)
+	review.RequireString(&diagnostics, "/expected_observation", "expected observation", document.ExpectedObservation)
+	review.RequireString(&diagnostics, "/observed_observation", "observed observation", document.ObservedObservation)
+	review.RequireEnum(&diagnostics, "/execution_status", "execution status", document.ExecutionStatus, review.StringSet(ExecutionStatusSatisfied, ExecutionStatusContradicted, ExecutionStatusFailed, ExecutionStatusUnavailable, ExecutionStatusNotRequired), CodeInvalidReceipt)
 	diagnostics = append(diagnostics, validateArtifactRefPointer(document.TransformationRef, "/transformation_ref", false)...)
 	if document.ResultWorkspaceDigest != "" {
-		requireDigest(&diagnostics, "/result_workspace_digest", "result_workspace_digest", document.ResultWorkspaceDigest)
+		review.RequireDigest(&diagnostics, "/result_workspace_digest", "result_workspace_digest", document.ResultWorkspaceDigest)
 	}
 	return diagnostics
 }
 
 func validateHarness(harness HarnessIdentity, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/id", "harness ID", harness.ID)
-	requireString(&diagnostics, path+"/version", "harness version", harness.Version)
-	requireDigest(&diagnostics, path+"/build_digest", "harness build_digest", harness.BuildDigest)
+	review.RequireStableID(&diagnostics, path+"/id", "harness ID", harness.ID)
+	review.RequireString(&diagnostics, path+"/version", "harness version", harness.Version)
+	review.RequireDigest(&diagnostics, path+"/build_digest", "harness build_digest", harness.BuildDigest)
 	return diagnostics
 }
 
 func validateIssuer(issuer ReceiptIssuer, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/id", "issuer ID", issuer.ID)
-	requireString(&diagnostics, path+"/actor", "issuer actor", issuer.Actor)
-	requireString(&diagnostics, path+"/method", "issuer method", issuer.Method)
+	review.RequireStableID(&diagnostics, path+"/id", "issuer ID", issuer.ID)
+	review.RequireString(&diagnostics, path+"/actor", "issuer actor", issuer.Actor)
+	review.RequireString(&diagnostics, path+"/method", "issuer method", issuer.Method)
 	return diagnostics
 }
 
 func validateAuthentication(auth ReceiptAuthentication, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireString(&diagnostics, path+"/scheme", "authentication scheme", auth.Scheme)
-	requireString(&diagnostics, path+"/key_id", "authentication key_id", auth.KeyID)
-	requireDigest(&diagnostics, path+"/signed_digest", "authentication signed_digest", auth.SignedDigest)
-	requireString(&diagnostics, path+"/signature", "authentication signature", auth.Signature)
+	review.RequireString(&diagnostics, path+"/scheme", "authentication scheme", auth.Scheme)
+	review.RequireString(&diagnostics, path+"/key_id", "authentication key_id", auth.KeyID)
+	review.RequireDigest(&diagnostics, path+"/signed_digest", "authentication signed_digest", auth.SignedDigest)
+	review.RequireString(&diagnostics, path+"/signature", "authentication signature", auth.Signature)
 	return diagnostics
 }
 
 func validateContainment(containment ContainmentReport, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireString(&diagnostics, path+"/filesystem", "filesystem containment statement", containment.Filesystem)
-	requireString(&diagnostics, path+"/network", "network containment statement", containment.Network)
-	requireString(&diagnostics, path+"/process", "process containment statement", containment.Process)
+	review.RequireString(&diagnostics, path+"/filesystem", "filesystem containment statement", containment.Filesystem)
+	review.RequireString(&diagnostics, path+"/network", "network containment statement", containment.Network)
+	review.RequireString(&diagnostics, path+"/process", "process containment statement", containment.Process)
 	return diagnostics
 }
 
@@ -532,7 +533,7 @@ func validateCaptures(captures ExecutionCaptures, path string) []diag.Diagnostic
 	diagnostics = append(diagnostics, validateArtifactRefPointer(captures.Stdout, path+"/stdout", false)...)
 	diagnostics = append(diagnostics, validateArtifactRefPointer(captures.Stderr, path+"/stderr", false)...)
 	for index, ref := range captures.ProducedArtifacts {
-		diagnostics = append(diagnostics, prefixDiagnostics(path+"/produced_artifacts/"+itoa(index), validateArtifactRef(ref, ""))...)
+		diagnostics = append(diagnostics, review.PrefixDiagnostics(path+"/produced_artifacts/"+itoa(index), validateArtifactRef(ref, ""))...)
 	}
 	return diagnostics
 }
