@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charlesnpx/witness/internal/canonjson"
+	"github.com/charlesnpx/witness/contract/canonjson"
+	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/contracts"
-	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestShippedRelayIntegrationBundleReferencedBySkill(t *testing.T) {

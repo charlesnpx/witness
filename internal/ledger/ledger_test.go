@@ -9,10 +9,10 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/contracts"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/digest"
-	"github.com/charlesnpx/witness/internal/strictjson"
 )
 
 func TestAppendReplayRoundTripAndFilteredShow(t *testing.T) {

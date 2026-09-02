@@ -1,0 +1,37 @@
+{
+  "schema_version": "review-report-v1",
+  "role": "defect",
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "source_identity": {"kind": "git", "id": "source-head"},
+  "consumer_identity": {"kind": "delegate", "id": "consumer-c"},
+  "findings": [
+    {
+      "id": "finding-question",
+      "title": "The report needs a scope clarification.",
+      "claimed_severity": "low",
+      "charter_goal_ids": [],
+      "witness": {
+        "kind": "defect",
+        "strength": "argued",
+        "content": "The review input does not state the relevant scale bound."
+      }
+    }
+  ],
+  "evaluation": {
+    "evaluated_paths": ["api/response.go"],
+    "evaluated_goal_ids": ["goal-api"]
+  },
+  "missing_goal_questions": [
+    {
+      "id": "question-scale-bound",
+      "finding_id": "finding-question",
+      "dimension": "scale_bounds",
+      "anchor_index": 0,
+      "property": "request_rate",
+      "value": "20k requests",
+      "affected_decision": "whether to require load-handling work",
+      "statement": "For finding-question, what request_rate of 20k requests should constrain whether to require load-handling work?"
+    }
+  ]
+}

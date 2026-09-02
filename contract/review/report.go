@@ -1,0 +1,531 @@
+package review
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
+)
+
+const (
+	// ReviewReportV1 identifies the defect-review report boundary.
+	ReviewReportV1 = "review-report-v1"
+
+	// CodeInvalidReviewReport identifies a report that does not satisfy this
+	// boundary's structural or semantic rules.
+	CodeInvalidReviewReport = "invalid_review_report"
+)
+
+// ReviewReportDocument is the signed-off boundary between a defect reviewer
+// and its consumer. It deliberately does not accept role-output documents.
+type ReviewReportDocument struct {
+	SchemaVersion        string                        `json:"schema_version"`
+	Role                 string                        `json:"role"`
+	CharterHash          string                        `json:"charter_hash"`
+	ReviewInputDigest    string                        `json:"review_input_digest"`
+	SourceIdentity       Identity                      `json:"source_identity"`
+	ConsumerIdentity     Identity                      `json:"consumer_identity"`
+	Findings             []ReportFinding               `json:"findings"`
+	Evaluation           *ReportEvaluation             `json:"evaluation"`
+	MissingGoalQuestions []charter.MissingGoalQuestion `json:"missing_goal_questions,omitempty"`
+}
+
+// ReportFinding is a defect finding submitted at the report boundary.
+type ReportFinding struct {
+	ID              string             `json:"id"`
+	Title           string             `json:"title"`
+	ClaimedSeverity string             `json:"claimed_severity"`
+	CharterGoalIDs  []string           `json:"charter_goal_ids"`
+	Witness         ReportWitness      `json:"witness"`
+	Annotation      *FindingAnnotation `json:"annotation,omitempty"`
+	Remedy          *ReportRemedy      `json:"remedy,omitempty"`
+}
+
+// ReportWitness is the evidence carried by a review-report-v1 finding. It is
+// intentionally narrower than a role-output Witness.
+type ReportWitness struct {
+	Kind       string          `json:"kind"`
+	Strength   string          `json:"strength"`
+	Content    string          `json:"content"`
+	Executable *ExecutableSpec `json:"executable,omitempty"`
+}
+
+// FindingAnnotation is presentation-only location metadata. It carries no
+// epistemic weight; the witness is the report's evidence.
+type FindingAnnotation struct {
+	Path     string `json:"path,omitempty"`
+	Line     uint32 `json:"line,omitempty"`
+	Category string `json:"category,omitempty"`
+
+	pathPresent     bool
+	linePresent     bool
+	categoryPresent bool
+}
+
+// ReportRemedy describes a minimally scoped direction for resolving a report
+// finding. It is optional and is not itself evidence for the finding.
+type ReportRemedy struct {
+	Direction          string `json:"direction"`
+	Summary            string `json:"summary"`
+	MinimalityArgument string `json:"minimality_argument"`
+}
+
+// ReportEvaluation is the reviewer's self-attestation of coverage through
+// evaluated paths and Charter goal IDs. The validator checks goal IDs against
+// the frozen Charter but does not verify paths against the review input.
+type ReportEvaluation struct {
+	EvaluatedPaths   []string `json:"evaluated_paths"`
+	EvaluatedGoalIDs []string `json:"evaluated_goal_ids"`
+}
+
+func (document *ReviewReportDocument) UnmarshalJSON(data []byte) error {
+	type alias ReviewReportDocument
+	var decoded alias
+	if err := decodeStrictContractJSON(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, field := range []string{"schema_version", "role", "charter_hash", "review_input_digest", "source_identity", "consumer_identity", "findings"} {
+		if err := rejectRequiredJSONNull(fields, field); err != nil {
+			return err
+		}
+	}
+	*document = ReviewReportDocument(decoded)
+	return nil
+}
+
+func (finding *ReportFinding) UnmarshalJSON(data []byte) error {
+	type alias ReportFinding
+	var decoded alias
+	if err := decodeStrictContractJSON(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, field := range []string{"id", "title", "claimed_severity", "charter_goal_ids", "witness"} {
+		if err := rejectRequiredJSONNull(fields, field); err != nil {
+			return err
+		}
+	}
+	*finding = ReportFinding(decoded)
+	return nil
+}
+
+func (annotation *FindingAnnotation) UnmarshalJSON(data []byte) error {
+	type alias FindingAnnotation
+	var decoded alias
+	if err := decodeStrictContractJSON(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if err := rejectPresentJSONNull(fields, "path", "annotation path must be a string when present"); err != nil {
+		return err
+	}
+	if err := rejectPresentJSONNull(fields, "line", "annotation line must be an unsigned integer"); err != nil {
+		return err
+	}
+	*annotation = FindingAnnotation(decoded)
+	_, annotation.pathPresent = fields["path"]
+	_, annotation.linePresent = fields["line"]
+	_, annotation.categoryPresent = fields["category"]
+	return nil
+}
+
+func (evaluation *ReportEvaluation) UnmarshalJSON(data []byte) error {
+	type alias ReportEvaluation
+	var decoded alias
+	if err := decodeStrictContractJSON(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, field := range []string{"evaluated_paths", "evaluated_goal_ids"} {
+		if err := rejectRequiredJSONNull(fields, field); err != nil {
+			return err
+		}
+	}
+	*evaluation = ReportEvaluation(decoded)
+	return nil
+}
+
+func rejectRequiredJSONNull(fields map[string]json.RawMessage, field string) error {
+	return rejectPresentJSONNull(fields, field, "required field \""+field+"\" must not be null")
+}
+
+func rejectPresentJSONNull(fields map[string]json.RawMessage, field string, message string) error {
+	raw, present := fields[field]
+	if present && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("json: %s", message)
+	}
+	return nil
+}
+
+// DecodeAndValidateReviewReport strictly decodes data and validates its
+// bindings to frozen intent and expected reviewer input before returning it.
+func DecodeAndValidateReviewReport(data []byte, frozen charter.FrozenCharter, expectedInputDigest string) (ReviewReportDocument, error) {
+	document, err := strictjson.DecodeBytes[ReviewReportDocument](data, strictjson.DefaultMaxBytes)
+	if err != nil {
+		return ReviewReportDocument{}, err
+	}
+	if err := RequireValidReviewReport(document, frozen, expectedInputDigest); err != nil {
+		return ReviewReportDocument{}, err
+	}
+	return document, nil
+}
+
+// RequireValidReviewReport returns an aggregated validation error when a
+// report does not satisfy its boundary rules.
+func RequireValidReviewReport(document ReviewReportDocument, frozen charter.FrozenCharter, expectedInputDigest string) error {
+	return ErrorFromDiagnostics(ValidateReviewReport(document, frozen, expectedInputDigest))
+}
+
+// ValidateReviewReport returns every structural and semantic violation in a
+// review-report-v1 document.
+func ValidateReviewReport(document ReviewReportDocument, frozen charter.FrozenCharter, expectedInputDigest string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if document.SchemaVersion != ReviewReportV1 {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"review report schema_version must be review-report-v1.",
+			"/schema_version",
+			map[string]any{"expected": ReviewReportV1, "actual": document.SchemaVersion},
+		))
+	}
+	RequireEnum(&diagnostics, "/role", "role", document.Role, StringSet(RoleDefect), CodeInvalidReviewReport)
+	RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
+	RequireDigest(&diagnostics, "/review_input_digest", "review_input_digest", document.ReviewInputDigest)
+	RequireDigest(&diagnostics, "/review_input_digest", "expected_input_digest", expectedInputDigest)
+	CompareDigest(&diagnostics, "/charter_hash", "charter", document.CharterHash, frozen.CharterHash)
+	CompareDigest(&diagnostics, "/review_input_digest", "review input", document.ReviewInputDigest, expectedInputDigest)
+	validateReviewIdentity(&diagnostics, "/source_identity", "source_identity", document.SourceIdentity, CodeInvalidReviewReport)
+	validateReviewIdentity(&diagnostics, "/consumer_identity", "consumer_identity", document.ConsumerIdentity, CodeInvalidReviewReport)
+
+	if document.Findings == nil {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"findings is required and must be an array.",
+			"/findings",
+			nil,
+		))
+	}
+	goalIDs := charterGoalIDs(&frozen)
+	if document.Evaluation == nil {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"evaluation is required.",
+			"/evaluation",
+			nil,
+		))
+	} else {
+		diagnostics = append(diagnostics, validateReportEvaluation(*document.Evaluation, "/evaluation", goalIDs)...)
+	}
+
+	findingIDs := make(map[string]bool, len(document.Findings))
+	seen := map[string]int{}
+	for index, finding := range document.Findings {
+		path := "/findings/" + itoa(index)
+		if first, exists := seen[finding.ID]; exists {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"finding IDs must be unique.",
+				path+"/id",
+				map[string]any{"id": finding.ID, "duplicate_of": "/findings/" + itoa(first) + "/id"},
+			))
+		}
+		seen[finding.ID] = index
+		findingIDs[finding.ID] = true
+		diagnostics = append(diagnostics, validateReportFinding(finding, path, goalIDs)...)
+	}
+	questionPaths := map[string]string{}
+	for index, question := range document.MissingGoalQuestions {
+		path := "/missing_goal_questions/" + itoa(index)
+		diagnostics = append(diagnostics, validateReportMissingGoalQuestion(question, path, findingIDs)...)
+		if firstPath, exists := questionPaths[question.ID]; exists {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"missing-goal question IDs must be unique.",
+				path+"/id",
+				map[string]any{"id": question.ID, "duplicate_of": firstPath + "/id"},
+			))
+			continue
+		}
+		questionPaths[question.ID] = path
+	}
+	return diagnostics
+}
+
+// ReviewReportDigest returns the semantic JSON digest of document.
+func ReviewReportDigest(document ReviewReportDocument) (string, error) {
+	return digest.SemanticJSON(document)
+}
+
+func validateReviewIdentity(diagnostics *[]diag.Diagnostic, path string, label string, identity Identity, code string) {
+	if strings.TrimSpace(identity.Kind) == "" {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			code,
+			label+" requires a non-empty kind.",
+			path+"/kind",
+			nil,
+		))
+	}
+	if strings.TrimSpace(identity.ID) == "" {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			code,
+			label+" requires a non-empty id.",
+			path+"/id",
+			nil,
+		))
+	}
+}
+
+func validateReportEvaluation(evaluation ReportEvaluation, path string, goalIDs map[string]bool) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if len(evaluation.EvaluatedPaths) == 0 {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"evaluation requires at least one evaluated path.",
+			path+"/evaluated_paths",
+			nil,
+		))
+	}
+	for index, evaluatedPath := range evaluation.EvaluatedPaths {
+		if strings.TrimSpace(evaluatedPath) == "" {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"evaluated paths must be non-empty strings.",
+				path+"/evaluated_paths/"+itoa(index),
+				nil,
+			))
+		}
+	}
+	if evaluation.EvaluatedGoalIDs == nil {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"evaluation requires an evaluated_goal_ids array.",
+			path+"/evaluated_goal_ids",
+			nil,
+		))
+	}
+	if len(goalIDs) > 0 && len(evaluation.EvaluatedGoalIDs) == 0 {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"evaluation must name at least one evaluated Charter goal when the Charter declares goals.",
+			path+"/evaluated_goal_ids",
+			nil,
+		))
+	}
+	for index, goalID := range evaluation.EvaluatedGoalIDs {
+		goalPath := path + "/evaluated_goal_ids/" + itoa(index)
+		RequireStableID(&diagnostics, goalPath, "evaluated Charter goal ID", goalID)
+		if !goalIDs[goalID] {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"evaluation references a Charter goal that is not declared.",
+				goalPath,
+				map[string]any{"goal_id": goalID},
+			))
+		}
+	}
+	return diagnostics
+}
+
+func validateReportFinding(finding ReportFinding, path string, goalIDs map[string]bool) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	RequireStableID(&diagnostics, path+"/id", "finding ID", finding.ID)
+	if strings.TrimSpace(finding.Title) == "" {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "finding title is required.", path+"/title", nil))
+	}
+	if len(finding.Title) > 8192 {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"finding title must not exceed 8192 bytes.",
+			path+"/title",
+			map[string]any{"length_bytes": len(finding.Title), "maximum_bytes": 8192},
+		))
+	}
+	RequireEnum(&diagnostics, path+"/claimed_severity", "claimed_severity", finding.ClaimedSeverity, StringSet(SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow), CodeInvalidReviewReport)
+	if finding.CharterGoalIDs == nil {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"charter_goal_ids is required and must be an array; use [] for an unbound finding.",
+			path+"/charter_goal_ids",
+			nil,
+		))
+	}
+	for index, goalID := range finding.CharterGoalIDs {
+		goalPath := path + "/charter_goal_ids/" + itoa(index)
+		RequireStableID(&diagnostics, goalPath, "Charter goal ID", goalID)
+		if !goalIDs[goalID] {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"finding references a Charter goal that is not declared.",
+				goalPath,
+				map[string]any{"goal_id": goalID},
+			))
+		}
+	}
+	diagnostics = append(diagnostics, validateReportWitness(finding.Witness, path+"/witness")...)
+	if severityWithinEvidenceCap(finding.ClaimedSeverity, finding.Witness.Strength) == false {
+		if maximum, ok := maximumSeverityForEvidence(finding.Witness.Strength); ok {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"claimed_severity exceeds the witness strength cap.",
+				path+"/claimed_severity",
+				map[string]any{"claimed_severity": finding.ClaimedSeverity, "maximum_severity": maximum, "witness_strength": finding.Witness.Strength},
+			))
+		}
+	}
+	if finding.Annotation != nil {
+		diagnostics = append(diagnostics, validateFindingAnnotation(*finding.Annotation, path+"/annotation")...)
+	}
+	if finding.Remedy != nil {
+		diagnostics = append(diagnostics, validateReportRemedy(*finding.Remedy, path+"/remedy")...)
+	}
+	return diagnostics
+}
+
+func validateReportWitness(witness ReportWitness, path string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	RequireEnum(&diagnostics, path+"/kind", "witness kind", witness.Kind, StringSet(WitnessKindDefect), CodeInvalidReviewReport)
+	RequireEnum(&diagnostics, path+"/strength", "witness strength", witness.Strength, StringSet(WitnessStrengthExecutable, WitnessStrengthConstructed, WitnessStrengthArgued), CodeInvalidReviewReport)
+	if strings.TrimSpace(witness.Content) == "" {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "witness content is required.", path+"/content", nil))
+	}
+	if witness.Strength == WitnessStrengthExecutable {
+		if witness.Executable == nil {
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "executable witness strength requires an executable specification.", path+"/executable", nil))
+		} else {
+			diagnostics = append(diagnostics, validateExecutableSpec(*witness.Executable, path+"/executable", false)...)
+		}
+	} else if witness.Executable != nil {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "an executable specification requires executable witness strength.", path+"/executable", nil))
+	}
+	return diagnostics
+}
+
+func severityWithinEvidenceCap(severity string, strength string) bool {
+	maximum, ok := maximumSeverityForEvidence(strength)
+	if !ok {
+		return true
+	}
+	severityRank, knownSeverity := severityRanks[severity]
+	maximumRank, knownMaximum := severityRanks[maximum]
+	return !knownSeverity || !knownMaximum || severityRank <= maximumRank
+}
+
+var severityRanks = map[string]int{
+	SeverityLow:      1,
+	SeverityMedium:   2,
+	SeverityHigh:     3,
+	SeverityCritical: 4,
+}
+
+func maximumSeverityForEvidence(strength string) (string, bool) {
+	switch strength {
+	case WitnessStrengthArgued:
+		return SeverityMedium, true
+	case WitnessStrengthConstructed:
+		return SeverityHigh, true
+	case WitnessStrengthExecutable:
+		return SeverityCritical, true
+	default:
+		return "", false
+	}
+}
+
+func validateFindingAnnotation(annotation FindingAnnotation, path string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	if annotation.pathPresent || annotation.Path != "" {
+		if strings.TrimSpace(annotation.Path) == "" {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"annotation path must be non-empty when present.",
+				path+"/path",
+				nil,
+			))
+		}
+	}
+	if annotation.linePresent || annotation.Line != 0 {
+		if strings.TrimSpace(annotation.Path) == "" {
+			diagnostics = append(diagnostics, Diagnostic(
+				CodeInvalidReviewReport,
+				"annotation line requires a non-empty path.",
+				path+"/path",
+				nil,
+			))
+		}
+	}
+	if annotation.categoryPresent || annotation.Category != "" {
+		RequireStableID(&diagnostics, path+"/category", "annotation category", annotation.Category)
+	}
+	return diagnostics
+}
+
+func validateReportMissingGoalQuestion(question charter.MissingGoalQuestion, path string, findingIDs map[string]bool) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	RequireStableID(&diagnostics, path+"/id", "missing-goal question ID", question.ID)
+	RequireStableID(&diagnostics, path+"/finding_id", "missing-goal question finding ID", question.FindingID)
+	if validStableID(question.FindingID) && !findingIDs[question.FindingID] {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"missing-goal question references a finding that is not declared.",
+			path+"/finding_id",
+			map[string]any{"finding_id": question.FindingID},
+		))
+	}
+	RequireEnum(
+		&diagnostics,
+		path+"/dimension",
+		"Operational Envelope dimension",
+		question.Dimension,
+		StringSet(
+			charter.DimensionEntryPoints,
+			charter.DimensionInputSurface,
+			charter.DimensionValidStates,
+			charter.DimensionEnvironments,
+			charter.DimensionScaleBounds,
+			charter.DimensionCompatibilityPromises,
+			charter.DimensionThreatModel,
+		),
+		CodeInvalidReviewReport,
+	)
+	if question.AnchorIndex < 0 {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"missing-goal question anchor_index must identify the originating anchor.",
+			path+"/anchor_index",
+			map[string]any{"anchor_index": question.AnchorIndex},
+		))
+	}
+	RequireString(&diagnostics, path+"/property", "missing-goal question unstated property", question.Property)
+	RequireString(&diagnostics, path+"/affected_decision", "missing-goal question affected decision", question.AffectedDecision)
+	RequireString(&diagnostics, path+"/statement", "missing-goal question statement", question.Statement)
+	return diagnostics
+}
+
+func validateReportRemedy(remedy ReportRemedy, path string) []diag.Diagnostic {
+	var diagnostics []diag.Diagnostic
+	RequireEnum(&diagnostics, path+"/direction", "remedy direction", remedy.Direction, StringSet(RemedyDirectionAdd, RemedyDirectionChange, RemedyDirectionRemove), CodeInvalidReviewReport)
+	if strings.TrimSpace(remedy.Summary) == "" {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "remedy summary is required.", path+"/summary", nil))
+	}
+	if strings.TrimSpace(remedy.MinimalityArgument) == "" {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidReviewReport, "remedy minimality_argument is required.", path+"/minimality_argument", nil))
+	}
+	return diagnostics
+}

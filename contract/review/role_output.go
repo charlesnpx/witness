@@ -1,4 +1,4 @@
-package contracts
+package review
 
 import (
 	"bytes"
@@ -6,14 +6,20 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charlesnpx/witness/internal/charter"
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/strictjson"
+	"github.com/charlesnpx/witness/contract/canonjson"
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 type ScopeAnchor = charter.ScopeAnchor
 type MissingGoalQuestion = charter.MissingGoalQuestion
 
+// RoleOutputDocument and the review-role-output-v3 through review-role-output-v5
+// family are Witness-internal compatibility structures retained for the Witness
+// engine. They are not part of the review-request-v1/review-report-v1 adapter
+// contract.
 type RoleOutputDocument struct {
 	SchemaVersion        string                `json:"schema_version"`
 	Role                 string                `json:"role"`
@@ -241,7 +247,7 @@ func ValidateRoleEvaluation(evaluation RoleEvaluation) []diag.Diagnostic {
 
 	var diagnostics []diag.Diagnostic
 	if len(evaluation.EvaluatedPaths) == 0 {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidRoleOutput,
 			"evaluation requires at least one evaluated path.",
 			path+"/evaluated_paths",
@@ -251,9 +257,9 @@ func ValidateRoleEvaluation(evaluation RoleEvaluation) []diag.Diagnostic {
 	paths := map[string]int{}
 	for index, evaluatedPath := range evaluation.EvaluatedPaths {
 		itemPath := path + "/evaluated_paths/" + itoa(index)
-		requireString(&diagnostics, itemPath, "evaluated path", evaluatedPath)
+		RequireString(&diagnostics, itemPath, "evaluated path", evaluatedPath)
 		if first, exists := paths[evaluatedPath]; exists {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, Diagnostic(
 				CodeInvalidRoleOutput,
 				"evaluation paths must be unique.",
 				itemPath,
@@ -263,7 +269,7 @@ func ValidateRoleEvaluation(evaluation RoleEvaluation) []diag.Diagnostic {
 		paths[evaluatedPath] = index
 	}
 	if len(evaluation.EvaluatedCharterGoalIDs) == 0 {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidRoleOutput,
 			"evaluation requires at least one evaluated Charter goal ID.",
 			path+"/evaluated_charter_goal_ids",
@@ -273,9 +279,9 @@ func ValidateRoleEvaluation(evaluation RoleEvaluation) []diag.Diagnostic {
 	goalIDs := map[string]int{}
 	for index, goalID := range evaluation.EvaluatedCharterGoalIDs {
 		itemPath := path + "/evaluated_charter_goal_ids/" + itoa(index)
-		requireString(&diagnostics, itemPath, "evaluated Charter goal ID", goalID)
+		RequireString(&diagnostics, itemPath, "evaluated Charter goal ID", goalID)
 		if first, exists := goalIDs[goalID]; exists {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, Diagnostic(
 				CodeInvalidRoleOutput,
 				"evaluation Charter goal IDs must be unique.",
 				itemPath,
@@ -290,27 +296,27 @@ func ValidateRoleEvaluation(evaluation RoleEvaluation) []diag.Diagnostic {
 func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenCharter) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if document.SchemaVersion != RoleOutputV3 && document.SchemaVersion != RoleOutputV4 && document.SchemaVersion != RoleOutputV5 {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidRoleOutput,
 			"role-output document schema_version must be review-role-output-v3, review-role-output-v4, or review-role-output-v5.",
 			"/schema_version",
 			map[string]any{"expected": []string{RoleOutputV3, RoleOutputV4, RoleOutputV5}, "actual": document.SchemaVersion},
 		))
 	}
-	requireEnum(&diagnostics, "/role", "role", document.Role, stringSet(RoleDefect, RoleEconomy, RoleGoalFit), CodeInvalidRoleOutput)
-	requireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
-	requireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
+	RequireEnum(&diagnostics, "/role", "role", document.Role, StringSet(RoleDefect, RoleEconomy, RoleGoalFit), CodeInvalidRoleOutput)
+	RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
+	RequireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
 	if frozen != nil {
-		compareDigest(&diagnostics, "/charter_hash", "charter", document.CharterHash, frozen.CharterHash)
+		CompareDigest(&diagnostics, "/charter_hash", "charter", document.CharterHash, frozen.CharterHash)
 	}
-	if !identityPresent(document.SourceIdentity) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "source_identity is required.", "/source_identity", nil))
+	if !IdentityPresent(document.SourceIdentity) {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidRoleOutput, "source_identity is required.", "/source_identity", nil))
 	}
-	if !identityPresent(document.ConsumerIdentity) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "consumer_identity is required.", "/consumer_identity", nil))
+	if !IdentityPresent(document.ConsumerIdentity) {
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidRoleOutput, "consumer_identity is required.", "/consumer_identity", nil))
 	}
 	if document.Role == RoleGoalFit && len(document.Findings) > 0 {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidRoleOutput,
 			"goal-fit role output must not contain findings.",
 			"/findings",
@@ -318,7 +324,7 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 		))
 	}
 	if (document.Role == RoleDefect || document.Role == RoleEconomy) && document.Findings == nil {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidRoleOutput,
 			"defect and economy role outputs require a findings array.",
 			"/findings",
@@ -326,7 +332,7 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 		))
 	}
 	if document.SchemaVersion != RoleOutputV5 && (document.Evaluation != nil || document.evaluationPresent) {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidRoleOutput,
 			"evaluation is only supported by review-role-output-v5.",
 			"/evaluation",
@@ -343,7 +349,7 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 		path := "/missing_goal_questions/" + itoa(index)
 		diagnostics = append(diagnostics, validateMissingGoalQuestion(question, path)...)
 		if firstPath, exists := questionPaths[question.ID]; exists {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, Diagnostic(
 				CodeInvalidRoleOutput,
 				"missing-goal question IDs must be unique.",
 				path+"/id",
@@ -358,7 +364,7 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 	for index, finding := range document.Findings {
 		path := "/findings/" + itoa(index)
 		if first, exists := seenFindings[finding.ID]; exists {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, Diagnostic(
 				CodeInvalidRoleOutput,
 				"finding IDs must be unique.",
 				path+"/id",
@@ -372,19 +378,41 @@ func ValidateRoleOutput(document RoleOutputDocument, frozen *charter.FrozenChart
 }
 
 func RoleOutputDigest(document RoleOutputDocument) (string, error) {
-	return SemanticDigest(document)
+	return digest.SemanticJSON(document)
 }
 
 func RoleOutputCanonicalBytes(document RoleOutputDocument) ([]byte, error) {
-	return CanonicalBytes(document)
+	return canonjson.Marshal(document)
 }
 
-func canonicalFindingJSON(finding Finding) (json.RawMessage, error) {
+// FindingCanonicalJSON returns the filed canonical form of finding. It
+// verifies decoded cache data before returning it so mutations after decode
+// continue to fail closed.
+func FindingCanonicalJSON(finding Finding) (json.RawMessage, error) {
 	return canonicalJSONWithVerifiedCache(finding, finding.canonicalJSON, "finding")
 }
 
-func canonicalWitnessJSON(witness Witness) (json.RawMessage, error) {
+// WitnessCanonicalJSON returns the filed canonical form of witness. It
+// verifies decoded cache data before returning it so mutations after decode
+// continue to fail closed.
+func WitnessCanonicalJSON(witness Witness) (json.RawMessage, error) {
 	return canonicalJSONWithVerifiedCache(witness, witness.canonicalJSON, "witness")
+}
+
+func WitnessDigest(witness Witness) (string, error) {
+	canonical, err := WitnessCanonicalJSON(witness)
+	if err != nil {
+		return "", err
+	}
+	return digest.RawBytes(canonical), nil
+}
+
+func FindingDigest(finding Finding) (string, error) {
+	canonical, err := FindingCanonicalJSON(finding)
+	if err != nil {
+		return "", err
+	}
+	return digest.RawBytes(canonical), nil
 }
 
 func canonicalFindingRawMessage(data []byte, finding Finding) (json.RawMessage, error) {
@@ -407,7 +435,7 @@ func canonicalFindingCacheWithNormalizedDelta(cached json.RawMessage, finding Fi
 	if !normalizeCachedSplitDelta(cachedObject["estimated_delta"], finding.EstimatedDelta) {
 		return append(json.RawMessage(nil), cached...), nil
 	}
-	canonical, err := CanonicalBytes(cachedValue)
+	canonical, err := canonjson.Marshal(cachedValue)
 	if err != nil {
 		return nil, err
 	}
@@ -449,25 +477,25 @@ func cachedDeltaEstimateValue(delta DeltaEstimate) map[string]any {
 
 func validateFinding(schemaVersion string, role string, finding Finding, path string, frozen *charter.FrozenCharter, goalIDs map[string]bool, questions map[string]MissingGoalQuestion, questionPaths map[string]string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/id", "finding ID", finding.ID)
-	requireString(&diagnostics, path+"/title", "finding title", finding.Title)
-	requireEnum(&diagnostics, path+"/claimed_severity", "claimed_severity", finding.ClaimedSeverity, stringSet(SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow), CodeInvalidRoleOutput)
+	RequireStableID(&diagnostics, path+"/id", "finding ID", finding.ID)
+	RequireString(&diagnostics, path+"/title", "finding title", finding.Title)
+	RequireEnum(&diagnostics, path+"/claimed_severity", "claimed_severity", finding.ClaimedSeverity, StringSet(SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow), CodeInvalidRoleOutput)
 	switch schemaVersion {
 	case RoleOutputV4, RoleOutputV5:
-		requireEnum(&diagnostics, path+"/attribution", "attribution", finding.Attribution, stringSet(FindingAttributionIntroduced, FindingAttributionWorsened, FindingAttributionPreExisting, FindingAttributionUnattributed), CodeInvalidRoleOutput)
+		RequireEnum(&diagnostics, path+"/attribution", "attribution", finding.Attribution, StringSet(FindingAttributionIntroduced, FindingAttributionWorsened, FindingAttributionPreExisting, FindingAttributionUnattributed), CodeInvalidRoleOutput)
 	case RoleOutputV3:
 		if finding.Attribution != "" {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "review-role-output-v3 findings must not carry attribution.", path+"/attribution", map[string]any{"value": finding.Attribution}))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidRoleOutput, "review-role-output-v3 findings must not carry attribution.", path+"/attribution", map[string]any{"value": finding.Attribution}))
 		}
 	}
 	if len(finding.CharterGoalIDs) == 0 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "findings must name at least one Charter goal.", path+"/charter_goal_ids", nil))
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidRoleOutput, "findings must name at least one Charter goal.", path+"/charter_goal_ids", nil))
 	}
 	for goalIndex, goalID := range finding.CharterGoalIDs {
 		goalPath := path + "/charter_goal_ids/" + itoa(goalIndex)
-		requireStableID(&diagnostics, goalPath, "Charter goal ID", goalID)
+		RequireStableID(&diagnostics, goalPath, "Charter goal ID", goalID)
 		if goalIDs != nil && !goalIDs[goalID] {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, Diagnostic(
 				CodeInvalidRoleOutput,
 				"finding references a Charter goal that is not declared.",
 				goalPath,
@@ -478,20 +506,20 @@ func validateFinding(schemaVersion string, role string, finding Finding, path st
 	switch role {
 	case RoleDefect:
 		if finding.Kind != FindingKindDefect {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "defect role findings must have kind defect.", path+"/kind", map[string]any{"kind": finding.Kind}))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidRoleOutput, "defect role findings must have kind defect.", path+"/kind", map[string]any{"kind": finding.Kind}))
 		}
 		if finding.Witness.Kind != WitnessKindDefect {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "defect findings require defect witnesses.", path+"/witness/kind", map[string]any{"kind": finding.Witness.Kind}))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidWitness, "defect findings require defect witnesses.", path+"/witness/kind", map[string]any{"kind": finding.Witness.Kind}))
 		}
 	case RoleEconomy:
 		if finding.Kind != FindingKindEconomy {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "economy role findings must have kind economy.", path+"/kind", map[string]any{"kind": finding.Kind}))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidRoleOutput, "economy role findings must have kind economy.", path+"/kind", map[string]any{"kind": finding.Kind}))
 		}
 		if finding.Witness.Kind != WitnessKindEquivalence {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "economy findings require equivalence witnesses.", path+"/witness/kind", map[string]any{"kind": finding.Witness.Kind}))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidWitness, "economy findings require equivalence witnesses.", path+"/witness/kind", map[string]any{"kind": finding.Witness.Kind}))
 		}
 		if !hasNegativeDelta(finding.EstimatedDelta) {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidDelta, "economy findings require a structured negative production or test delta.", path+"/estimated_delta", nil))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidDelta, "economy findings require a structured negative production or test delta.", path+"/estimated_delta", nil))
 		}
 	}
 	diagnostics = append(diagnostics, validateWitness(finding.Kind, finding.Witness, path+"/witness", frozen)...)
@@ -504,11 +532,11 @@ func validateFinding(schemaVersion string, role string, finding Finding, path st
 			Kind:      charter.FindingKindDefect,
 			Anchors:   finding.ScopeAnchors,
 		})
-		diagnostics = append(diagnostics, prefixDiagnostics(path+"/scope_anchors", scope.Diagnostics)...)
+		diagnostics = append(diagnostics, PrefixDiagnostics(path+"/scope_anchors", scope.Diagnostics)...)
 		for _, expected := range scope.Questions {
 			actual, exists := questions[expected.ID]
 			if !exists {
-				diagnostics = append(diagnostics, diagnostic(
+				diagnostics = append(diagnostics, Diagnostic(
 					CodeInvalidRoleOutput,
 					"scope anchor on an unspecified Operational Envelope dimension requires a linked missing-goal question.",
 					path+"/scope_anchors",
@@ -517,7 +545,7 @@ func validateFinding(schemaVersion string, role string, finding Finding, path st
 				continue
 			}
 			if actual != expected {
-				diagnostics = append(diagnostics, diagnostic(
+				diagnostics = append(diagnostics, Diagnostic(
 					CodeInvalidRoleOutput,
 					"linked missing-goal question must match the deterministic Charter-derived question.",
 					questionPaths[expected.ID],
@@ -534,17 +562,17 @@ func validateFinding(schemaVersion string, role string, finding Finding, path st
 
 func validateWitness(findingKind string, witness Witness, path string, frozen *charter.FrozenCharter) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireEnum(&diagnostics, path+"/kind", "witness kind", witness.Kind, stringSet(WitnessKindDefect, WitnessKindEquivalence), CodeInvalidWitness)
-	requireEnum(&diagnostics, path+"/strength", "witness strength", witness.Strength, stringSet(WitnessStrengthExecutable, WitnessStrengthConstructed, WitnessStrengthArgued), CodeInvalidWitness)
+	RequireEnum(&diagnostics, path+"/kind", "witness kind", witness.Kind, StringSet(WitnessKindDefect, WitnessKindEquivalence), CodeInvalidWitness)
+	RequireEnum(&diagnostics, path+"/strength", "witness strength", witness.Strength, StringSet(WitnessStrengthExecutable, WitnessStrengthConstructed, WitnessStrengthArgued), CodeInvalidWitness)
 	if strings.TrimSpace(witness.Content) == "" && len(witness.ArtifactRefs) == 0 && witness.Executable == nil {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "witness requires content, artifact references, or an executable specification.", path, nil))
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidWitness, "witness requires content, artifact references, or an executable specification.", path, nil))
 	}
 	for index, ref := range witness.ArtifactRefs {
-		diagnostics = append(diagnostics, prefixDiagnostics(path+"/artifact_refs/"+itoa(index), validateArtifactRef(ref, ""))...)
+		diagnostics = append(diagnostics, PrefixDiagnostics(path+"/artifact_refs/"+itoa(index), validateArtifactRef(ref, ""))...)
 	}
 	if witness.Strength == WitnessStrengthExecutable {
 		if witness.Executable == nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "executable witness strength requires an executable specification.", path+"/executable", nil))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidWitness, "executable witness strength requires an executable specification.", path+"/executable", nil))
 		} else {
 			diagnostics = append(diagnostics, validateExecutableSpec(*witness.Executable, path+"/executable", findingKind == FindingKindEconomy)...)
 		}
@@ -560,7 +588,7 @@ func validateWitness(findingKind string, witness Witness, path string, frozen *c
 			EntryPoint:        witness.EntryPoint,
 			ReachabilityChain: witness.ReachabilityChain,
 		})
-		diagnostics = append(diagnostics, prefixDiagnostics(path, result.Diagnostics)...)
+		diagnostics = append(diagnostics, PrefixDiagnostics(path, result.Diagnostics)...)
 	}
 	return diagnostics
 }
@@ -568,17 +596,17 @@ func validateWitness(findingKind string, witness Witness, path string, frozen *c
 func validateExecutableSpec(spec ExecutableSpec, path string, transformationRequired bool) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if len(spec.Argv) == 0 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "executable specification requires structured argv.", path+"/argv", nil))
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidWitness, "executable specification requires structured argv.", path+"/argv", nil))
 	}
 	for index, item := range spec.Argv {
 		if strings.TrimSpace(item) == "" {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "argv entries must be non-empty strings.", path+"/argv/"+itoa(index), nil))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidWitness, "argv entries must be non-empty strings.", path+"/argv/"+itoa(index), nil))
 		}
 	}
-	requireString(&diagnostics, path+"/cwd", "executable cwd", spec.CWD)
-	requireString(&diagnostics, path+"/expected_observation", "expected observation", spec.ExpectedObservation)
+	RequireString(&diagnostics, path+"/cwd", "executable cwd", spec.CWD)
+	RequireString(&diagnostics, path+"/expected_observation", "expected observation", spec.ExpectedObservation)
 	if transformationRequired && spec.TransformationRef == nil {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidWitness, "economy executable witnesses require a patch artifact or deterministic transformation reference.", path+"/transformation_ref", nil))
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidWitness, "economy executable witnesses require a patch artifact or deterministic transformation reference.", path+"/transformation_ref", nil))
 	}
 	diagnostics = append(diagnostics, validateArtifactRefPointer(spec.TransformationRef, path+"/transformation_ref", false)...)
 	return diagnostics
@@ -586,16 +614,16 @@ func validateExecutableSpec(spec ExecutableSpec, path string, transformationRequ
 
 func validateMissingGoalQuestion(question MissingGoalQuestion, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/id", "missing-goal question ID", question.ID)
+	RequireStableID(&diagnostics, path+"/id", "missing-goal question ID", question.ID)
 	if strings.TrimSpace(question.FindingID) != "" {
-		requireStableID(&diagnostics, path+"/finding_id", "missing-goal question finding ID", question.FindingID)
+		RequireStableID(&diagnostics, path+"/finding_id", "missing-goal question finding ID", question.FindingID)
 	}
-	requireEnum(
+	RequireEnum(
 		&diagnostics,
 		path+"/dimension",
 		"Operational Envelope dimension",
 		question.Dimension,
-		stringSet(
+		StringSet(
 			charter.DimensionEntryPoints,
 			charter.DimensionInputSurface,
 			charter.DimensionValidStates,
@@ -607,12 +635,12 @@ func validateMissingGoalQuestion(question MissingGoalQuestion, path string) []di
 		CodeInvalidRoleOutput,
 	)
 	if question.AnchorIndex < 0 {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidRoleOutput, "missing-goal question anchor_index must identify the originating anchor.", path+"/anchor_index", map[string]any{"anchor_index": question.AnchorIndex}))
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidRoleOutput, "missing-goal question anchor_index must identify the originating anchor.", path+"/anchor_index", map[string]any{"anchor_index": question.AnchorIndex}))
 	}
-	requireString(&diagnostics, path+"/property", "missing-goal question unstated property", question.Property)
-	requireString(&diagnostics, path+"/value", "missing-goal question unstated value", question.Value)
-	requireString(&diagnostics, path+"/affected_decision", "missing-goal question affected decision", question.AffectedDecision)
-	requireString(&diagnostics, path+"/statement", "missing-goal question statement", question.Statement)
+	RequireString(&diagnostics, path+"/property", "missing-goal question unstated property", question.Property)
+	RequireString(&diagnostics, path+"/value", "missing-goal question unstated value", question.Value)
+	RequireString(&diagnostics, path+"/affected_decision", "missing-goal question affected decision", question.AffectedDecision)
+	RequireString(&diagnostics, path+"/statement", "missing-goal question statement", question.Statement)
 	return diagnostics
 }
 
@@ -629,11 +657,11 @@ func validateDeltaComponent(delta DeltaEstimate, path string, malformedAsUnknown
 		if malformedAsUnknown {
 			return nil
 		}
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidDelta, "delta status has an unsupported value.", path+"/status", map[string]any{"value": delta.Status}))
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidDelta, "delta status has an unsupported value.", path+"/status", map[string]any{"value": delta.Status}))
 		return diagnostics
 	}
 	if delta.Status == DeltaStatusUnknown && (delta.Lines != 0 || delta.Files != 0) {
-		diagnostics = append(diagnostics, diagnostic(CodeInvalidDelta, "unknown deltas must not carry line or file counts.", path, nil))
+		diagnostics = append(diagnostics, Diagnostic(CodeInvalidDelta, "unknown deltas must not carry line or file counts.", path, nil))
 	}
 	return diagnostics
 }
@@ -645,15 +673,15 @@ func hasNegativeDelta(delta SplitDeltaEstimate) bool {
 
 func validateRemedy(role string, remedy SmallestSufficientRemedy, delta SplitDeltaEstimate, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireEnum(&diagnostics, path+"/direction", "remedy direction", remedy.Direction, stringSet(RemedyDirectionAdd, RemedyDirectionChange, RemedyDirectionRemove), CodeInvalidRemedy)
-	requireString(&diagnostics, path+"/summary", "remedy summary", remedy.Summary)
-	requireString(&diagnostics, path+"/minimality_argument", "smallest sufficient remedy minimality argument", remedy.MinimalityArgument)
+	RequireEnum(&diagnostics, path+"/direction", "remedy direction", remedy.Direction, StringSet(RemedyDirectionAdd, RemedyDirectionChange, RemedyDirectionRemove), CodeInvalidRemedy)
+	RequireString(&diagnostics, path+"/summary", "remedy summary", remedy.Summary)
+	RequireString(&diagnostics, path+"/minimality_argument", "smallest sufficient remedy minimality argument", remedy.MinimalityArgument)
 	if role == RoleEconomy {
 		if remedy.Direction != RemedyDirectionRemove && remedy.Direction != RemedyDirectionChange {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRemedy, "economy remedies must remove code or make a size-reducing change.", path+"/direction", map[string]any{"direction": remedy.Direction}))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidRemedy, "economy remedies must remove code or make a size-reducing change.", path+"/direction", map[string]any{"direction": remedy.Direction}))
 		}
 		if remedy.Direction == RemedyDirectionChange && !hasNegativeDelta(delta) {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRemedy, "economy change remedies must carry a negative production or test delta estimate.", path, nil))
+			diagnostics = append(diagnostics, Diagnostic(CodeInvalidRemedy, "economy change remedies must carry a negative production or test delta estimate.", path, nil))
 		}
 	}
 	return diagnostics
@@ -664,11 +692,11 @@ func validateProposedTests(tests []ProposedTest, path string, frozen *charter.Fr
 	partitions := map[string]int{}
 	for index, test := range tests {
 		testPath := path + "/" + itoa(index)
-		requireStableID(&diagnostics, testPath+"/id", "proposed test ID", test.ID)
-		requireString(&diagnostics, testPath+"/name", "proposed test name", test.Name)
-		requireString(&diagnostics, testPath+"/reachable_partition", "reachable behavioral partition", test.ReachablePartition)
+		RequireStableID(&diagnostics, testPath+"/id", "proposed test ID", test.ID)
+		RequireString(&diagnostics, testPath+"/name", "proposed test name", test.Name)
+		RequireString(&diagnostics, testPath+"/reachable_partition", "reachable behavioral partition", test.ReachablePartition)
 		if first, exists := partitions[test.ReachablePartition]; exists && test.ReachablePartition != "" {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, Diagnostic(
 				CodeInvalidRoleOutput,
 				"at most one proposed test may target a distinct reachable behavioral partition.",
 				testPath+"/reachable_partition",
@@ -677,18 +705,18 @@ func validateProposedTests(tests []ProposedTest, path string, frozen *charter.Fr
 		}
 		partitions[test.ReachablePartition] = index
 		if len(test.CharterRefs) == 0 {
-			diagnostics = append(diagnostics, diagnostic(CodeMissingCharterTrace, "proposed tests must reference a Charter goal or scope anchor.", testPath+"/charter_refs", nil))
+			diagnostics = append(diagnostics, Diagnostic(CodeMissingCharterTrace, "proposed tests must reference a Charter goal or scope anchor.", testPath+"/charter_refs", nil))
 			continue
 		}
 		for refIndex, ref := range test.CharterRefs {
 			refPath := testPath + "/charter_refs/" + itoa(refIndex)
 			if strings.TrimSpace(ref.GoalID) == "" && ref.Anchor == nil {
-				diagnostics = append(diagnostics, diagnostic(CodeMissingCharterTrace, "Charter trace must include a goal_id or anchor.", refPath, nil))
+				diagnostics = append(diagnostics, Diagnostic(CodeMissingCharterTrace, "Charter trace must include a goal_id or anchor.", refPath, nil))
 			}
 			if ref.GoalID != "" {
-				requireStableID(&diagnostics, refPath+"/goal_id", "Charter goal ID", ref.GoalID)
+				RequireStableID(&diagnostics, refPath+"/goal_id", "Charter goal ID", ref.GoalID)
 				if goalIDs != nil && !goalIDs[ref.GoalID] {
-					diagnostics = append(diagnostics, diagnostic(CodeMissingCharterTrace, "proposed test references a Charter goal that is not declared.", refPath+"/goal_id", map[string]any{"goal_id": ref.GoalID}))
+					diagnostics = append(diagnostics, Diagnostic(CodeMissingCharterTrace, "proposed test references a Charter goal that is not declared.", refPath+"/goal_id", map[string]any{"goal_id": ref.GoalID}))
 				}
 			}
 			if ref.Anchor != nil && frozen != nil {
@@ -697,7 +725,7 @@ func validateProposedTests(tests []ProposedTest, path string, frozen *charter.Fr
 					Kind:      charter.FindingKindDefect,
 					Anchors:   []ScopeAnchor{*ref.Anchor},
 				})
-				diagnostics = append(diagnostics, prefixDiagnostics(refPath+"/anchor", scope.Diagnostics)...)
+				diagnostics = append(diagnostics, PrefixDiagnostics(refPath+"/anchor", scope.Diagnostics)...)
 			}
 		}
 	}
@@ -706,10 +734,10 @@ func validateProposedTests(tests []ProposedTest, path string, frozen *charter.Fr
 
 func validateRecurrence(recurrence RecurrenceRef, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/prior_finding_id", "prior finding ID", recurrence.PriorFindingID)
-	requireString(&diagnostics, path+"/finding_key", "finding key", recurrence.FindingKey)
-	requireDigest(&diagnostics, path+"/witness_digest", "recurrence witness_digest", recurrence.WitnessDigest)
-	requireDigest(&diagnostics, path+"/artifact_digest", "recurrence artifact_digest", recurrence.ArtifactDigest)
+	RequireStableID(&diagnostics, path+"/prior_finding_id", "prior finding ID", recurrence.PriorFindingID)
+	RequireString(&diagnostics, path+"/finding_key", "finding key", recurrence.FindingKey)
+	RequireDigest(&diagnostics, path+"/witness_digest", "recurrence witness_digest", recurrence.WitnessDigest)
+	RequireDigest(&diagnostics, path+"/artifact_digest", "recurrence artifact_digest", recurrence.ArtifactDigest)
 	return diagnostics
 }
 

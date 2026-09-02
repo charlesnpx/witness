@@ -1,0 +1,10 @@
+{
+  "schema_version": "review-report-v1",
+  "role": "defect",
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:1919191919191919191919191919191919191919191919191919191919191919",
+  "source_identity": {"kind": "git", "id": "source-head"},
+  "consumer_identity": {"kind": "delegate", "id": "consumer-invented"},
+  "findings": [],
+  "evaluation": {"evaluated_paths": ["api/response.go"], "evaluated_goal_ids": ["goal-api"]}
+}

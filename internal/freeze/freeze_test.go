@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/digest"
-	"github.com/charlesnpx/witness/internal/strictjson"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 func TestCreateDeterministicManifestDigest(t *testing.T) {

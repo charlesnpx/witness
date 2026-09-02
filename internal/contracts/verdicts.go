@@ -5,8 +5,9 @@ import (
 	"io"
 	"sort"
 
-	"github.com/charlesnpx/witness/internal/diag"
-	"github.com/charlesnpx/witness/internal/strictjson"
+	"github.com/charlesnpx/witness/contract/diag"
+	"github.com/charlesnpx/witness/contract/review"
+	"github.com/charlesnpx/witness/contract/strictjson"
 )
 
 type RelayWitnessVerdictsDocument struct {
@@ -80,16 +81,16 @@ func RequireValidRelayWitnessVerdicts(document RelayWitnessVerdictsDocument, bat
 func ValidateRelayWitnessVerdicts(document RelayWitnessVerdictsDocument, batch *VerificationBatchDocument) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
 	if document.SchemaVersion != RelayWitnessVerdictsV2 {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, review.Diagnostic(
 			CodeInvalidRelayVerdicts,
 			"relay witness verdicts schema_version must be relay-witness-verdicts-v2.",
 			"/schema_version",
 			map[string]any{"expected": RelayWitnessVerdictsV2, "actual": document.SchemaVersion},
 		))
 	}
-	requireStableID(&diagnostics, "/batch_id", "batch ID", document.BatchID)
+	review.RequireStableID(&diagnostics, "/batch_id", "batch ID", document.BatchID)
 	if batch != nil && document.BatchID != batch.BatchID {
-		diagnostics = append(diagnostics, diagnostic(
+		diagnostics = append(diagnostics, review.Diagnostic(
 			CodeCoverageMismatch,
 			"relay witness verdicts batch_id must match the verification batch.",
 			"/batch_id",
@@ -108,7 +109,7 @@ func ValidateRelayWitnessVerdicts(document RelayWitnessVerdictsDocument, batch *
 		path := "/verdicts/" + itoa(index)
 		diagnostics = append(diagnostics, validateWitnessVerdict(verdict, path)...)
 		if first, exists := seen[verdict.FindingID]; exists {
-			diagnostics = append(diagnostics, diagnostic(
+			diagnostics = append(diagnostics, review.Diagnostic(
 				CodeCoverageMismatch,
 				"relay witness verdicts must contain exactly one verdict per finding ID.",
 				path+"/finding_id",
@@ -119,7 +120,7 @@ func ValidateRelayWitnessVerdicts(document RelayWitnessVerdictsDocument, batch *
 		if batch != nil {
 			expectedDigest, exists := expected[verdict.FindingID]
 			if !exists {
-				diagnostics = append(diagnostics, diagnostic(
+				diagnostics = append(diagnostics, review.Diagnostic(
 					CodeCoverageMismatch,
 					"relay witness verdicts contain an unexpected finding ID.",
 					path+"/finding_id",
@@ -127,13 +128,13 @@ func ValidateRelayWitnessVerdicts(document RelayWitnessVerdictsDocument, batch *
 				))
 				continue
 			}
-			compareDigest(&diagnostics, path+"/witness_digest", "verdict witness", verdict.WitnessDigest, expectedDigest)
+			review.CompareDigest(&diagnostics, path+"/witness_digest", "verdict witness", verdict.WitnessDigest, expectedDigest)
 		}
 	}
 	if batch != nil {
 		for _, id := range sortedStringKeys(expected) {
 			if _, exists := seen[id]; !exists {
-				diagnostics = append(diagnostics, diagnostic(
+				diagnostics = append(diagnostics, review.Diagnostic(
 					CodeCoverageMismatch,
 					"relay witness verdicts are missing a planned finding ID.",
 					"/verdicts",
@@ -147,34 +148,34 @@ func ValidateRelayWitnessVerdicts(document RelayWitnessVerdictsDocument, batch *
 
 func validateWitnessVerdict(verdict WitnessVerdict, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireStableID(&diagnostics, path+"/finding_id", "finding ID", verdict.FindingID)
-	requireDigest(&diagnostics, path+"/witness_digest", "witness digest", verdict.WitnessDigest)
-	requireEnum(&diagnostics, path+"/verdict", "verdict", verdict.Verdict, stringSet(VerdictSurvived, VerdictWeakened, VerdictBroken), CodeInvalidRelayVerdicts)
+	review.RequireStableID(&diagnostics, path+"/finding_id", "finding ID", verdict.FindingID)
+	review.RequireDigest(&diagnostics, path+"/witness_digest", "witness digest", verdict.WitnessDigest)
+	review.RequireEnum(&diagnostics, path+"/verdict", "verdict", verdict.Verdict, review.StringSet(VerdictSurvived, VerdictWeakened, VerdictBroken), CodeInvalidRelayVerdicts)
 	if verdict.presence.decoded {
 		if !verdict.presence.verdictClassPresent {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRelayVerdicts, "verdict_class is required by the relay reducer schema.", path+"/verdict_class", nil))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidRelayVerdicts, "verdict_class is required by the relay reducer schema.", path+"/verdict_class", nil))
 		}
 		if !verdict.presence.counterWitnessPresent {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRelayVerdicts, "counter_witness is required by the relay reducer schema.", path+"/counter_witness", nil))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidRelayVerdicts, "counter_witness is required by the relay reducer schema.", path+"/counter_witness", nil))
 		}
 	}
 	if verdict.Verdict == VerdictSurvived {
 		if verdict.VerdictClass != nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRelayVerdicts, "verdict_class must be null when verdict is survived.", path+"/verdict_class", map[string]any{"verdict": verdict.Verdict}))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidRelayVerdicts, "verdict_class must be null when verdict is survived.", path+"/verdict_class", map[string]any{"verdict": verdict.Verdict}))
 		}
 		if verdict.CounterWitness != nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRelayVerdicts, "counter_witness must be null when verdict is survived.", path+"/counter_witness", map[string]any{"verdict": verdict.Verdict}))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidRelayVerdicts, "counter_witness must be null when verdict is survived.", path+"/counter_witness", map[string]any{"verdict": verdict.Verdict}))
 		}
 		return diagnostics
 	}
 	if verdict.Verdict == VerdictWeakened || verdict.Verdict == VerdictBroken {
 		if verdict.VerdictClass == nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRelayVerdicts, "verdict_class is required for weakened and broken verdicts.", path+"/verdict_class", map[string]any{"verdict": verdict.Verdict}))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidRelayVerdicts, "verdict_class is required for weakened and broken verdicts.", path+"/verdict_class", map[string]any{"verdict": verdict.Verdict}))
 		} else {
 			class := *verdict.VerdictClass
-			requireEnum(&diagnostics, path+"/verdict_class", "verdict_class", class, stringSet(VerdictClassLogic, VerdictClassUnreachable, VerdictClassOutsideEnvelope, VerdictClassMissingPremise, VerdictClassOther), CodeInvalidRelayVerdicts)
+			review.RequireEnum(&diagnostics, path+"/verdict_class", "verdict_class", class, review.StringSet(VerdictClassLogic, VerdictClassUnreachable, VerdictClassOutsideEnvelope, VerdictClassMissingPremise, VerdictClassOther), CodeInvalidRelayVerdicts)
 			if (class == VerdictClassUnreachable || class == VerdictClassOutsideEnvelope) && verdict.Verdict != VerdictBroken {
-				diagnostics = append(diagnostics, diagnostic(
+				diagnostics = append(diagnostics, review.Diagnostic(
 					CodeInvalidRelayVerdicts,
 					"unreachable and outside_envelope verdict classes are valid only with broken verdicts.",
 					path+"/verdict_class",
@@ -183,7 +184,7 @@ func validateWitnessVerdict(verdict WitnessVerdict, path string) []diag.Diagnost
 			}
 		}
 		if verdict.CounterWitness == nil {
-			diagnostics = append(diagnostics, diagnostic(CodeInvalidRelayVerdicts, "weakened and broken verdicts require a concrete counter-witness.", path+"/counter_witness", map[string]any{"verdict": verdict.Verdict}))
+			diagnostics = append(diagnostics, review.Diagnostic(CodeInvalidRelayVerdicts, "weakened and broken verdicts require a concrete counter-witness.", path+"/counter_witness", map[string]any{"verdict": verdict.Verdict}))
 		} else {
 			diagnostics = append(diagnostics, validateCounterWitness(*verdict.CounterWitness, path+"/counter_witness")...)
 		}
@@ -193,10 +194,10 @@ func validateWitnessVerdict(verdict WitnessVerdict, path string) []diag.Diagnost
 
 func validateCounterWitness(counter CounterWitness, path string) []diag.Diagnostic {
 	var diagnostics []diag.Diagnostic
-	requireString(&diagnostics, path+"/summary", "counter-witness summary", counter.Summary)
-	requireString(&diagnostics, path+"/evidence", "counter-witness evidence", counter.Evidence)
+	review.RequireString(&diagnostics, path+"/summary", "counter-witness summary", counter.Summary)
+	review.RequireString(&diagnostics, path+"/evidence", "counter-witness evidence", counter.Evidence)
 	for index, ref := range counter.ArtifactRefs {
-		diagnostics = append(diagnostics, prefixDiagnostics(path+"/artifact_refs/"+itoa(index), validateArtifactRef(ref, ""))...)
+		diagnostics = append(diagnostics, review.PrefixDiagnostics(path+"/artifact_refs/"+itoa(index), validateArtifactRef(ref, ""))...)
 	}
 	return diagnostics
 }
@@ -225,9 +226,9 @@ func scanForbiddenExecutionFields(value any, path string) (diag.Diagnostic, bool
 	case map[string]any:
 		for _, key := range sortedAnyKeys(typed) {
 			child := typed[key]
-			childPath := appendPointer(path, key)
+			childPath := review.AppendPointer(path, key)
 			if hasForbiddenExecutionFieldName(key) {
-				return diagnostic(
+				return review.Diagnostic(
 					CodeForbiddenExecutionField,
 					"relay witness verdicts must not contain execution attestation or execution contradiction fields.",
 					childPath,

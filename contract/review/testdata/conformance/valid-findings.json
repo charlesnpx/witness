@@ -1,0 +1,46 @@
+{
+  "schema_version": "review-report-v1",
+  "role": "defect",
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "source_identity": {"kind": "git", "id": "source-head"},
+  "consumer_identity": {"kind": "delegate", "id": "consumer-a"},
+  "findings": [
+    {
+      "id": "finding-bound",
+      "title": "The documented response omits a required field.",
+      "claimed_severity": "high",
+      "charter_goal_ids": ["goal-api"],
+      "witness": {
+        "kind": "defect",
+        "strength": "constructed",
+        "content": "Following the documented response path reaches an object without the required field."
+      },
+      "annotation": {
+        "path": "api/response.go",
+        "line": 42,
+        "category": "response.contract"
+      },
+      "remedy": {
+        "direction": "change",
+        "summary": "Populate the missing response field.",
+        "minimality_argument": "Only the response construction needs to change."
+      }
+    },
+    {
+      "id": "finding-unbound",
+      "title": "The diagnostic text identifies an unrelated defect.",
+      "claimed_severity": "medium",
+      "charter_goal_ids": [],
+      "witness": {
+        "kind": "defect",
+        "strength": "argued",
+        "content": "The diagnostic text contradicts the observed failure path."
+      }
+    }
+  ],
+  "evaluation": {
+    "evaluated_paths": ["api/response.go"],
+    "evaluated_goal_ids": ["goal-api"]
+  }
+}

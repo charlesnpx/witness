@@ -1,0 +1,18 @@
+{
+  "schema_version": "review-report-v1",
+  "role": "defect",
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:1717171717171717171717171717171717171717171717171717171717171717",
+  "source_identity": {"kind": "git", "id": "source-head"},
+  "consumer_identity": {"kind": "delegate", "id": "consumer-q"},
+  "findings": [
+    {
+      "id": "finding-empty-question",
+      "title": "A report carries an incomplete missing-goal question.",
+      "claimed_severity": "low",
+      "charter_goal_ids": [],
+      "witness": {"kind": "defect", "strength": "argued", "content": "The question does not identify its Charter linkage."}
+    }
+  ],
+  "missing_goal_questions": [{}]
+}
