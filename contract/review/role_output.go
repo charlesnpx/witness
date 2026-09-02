@@ -16,6 +16,10 @@ import (
 type ScopeAnchor = charter.ScopeAnchor
 type MissingGoalQuestion = charter.MissingGoalQuestion
 
+// RoleOutputDocument and the review-role-output-v3 through review-role-output-v5
+// family are Witness-internal compatibility structures retained for the Witness
+// engine. They are not part of the review-request-v1/review-report-v1 adapter
+// contract.
 type RoleOutputDocument struct {
 	SchemaVersion        string                `json:"schema_version"`
 	Role                 string                `json:"role"`

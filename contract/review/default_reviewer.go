@@ -10,16 +10,15 @@ import (
 
 // DefaultReviewerBriefText is the compact prompt-side contract for a defect
 // reviewer. The decoder remains authoritative for cross-field requirements.
-const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else, following this skeleton exactly (replace values, never field names or nesting): {"schema_version":"review-report-v1","role":"defect","charter_hash":"<echo the supplied value>","review_input_digest":"<echo the supplied value>","source_identity":{"kind":"<category>","id":"<identifier>"},"consumer_identity":"<echo the supplied consumer identity object exactly>","findings":[{"id":"<kebab-id>","title":"<one line>","claimed_severity":"critical|high|medium|low","charter_goal_ids":["<goal-id>"],"witness":{"kind":"defect","strength":"argued|constructed|executable","content":"<concrete failure path>"},"annotation":{"path":"<file>","line":1,"category":"<kebab-id>"}}],"evaluation":{"evaluated_paths":["<path>"],"evaluated_goal_ids":["<goal-id>"]}} Rules: claimed severity is capped by witness strength (argued at most medium, constructed at most high, only executable evidence can claim critical, and executable strength requires an executable specification object on the witness). At most 128 findings. Empty findings REQUIRE the evaluation object with BOTH evaluated_paths and evaluated_goal_ids; omit evaluation when findings are present, or include it truthfully. annotation is optional presentation-only file:line metadata with zero epistemic weight. An unbound finding uses an empty charter_goal_ids array. Optional remedy {direction, summary, minimality_argument} and missing_goal_questions surfaces carry review-protocol discipline.`
+const DefaultReviewerBriefText = `Emit exactly one review-report-v1 JSON object and nothing else, following this skeleton exactly (replace values, never field names or nesting): {"schema_version":"review-report-v1","role":"defect","charter_hash":"<echo the supplied value>","review_input_digest":"<echo the supplied value>","source_identity":{"kind":"<category>","id":"<identifier>"},"consumer_identity":{"kind":"<supplied kind>","id":"<supplied id>"},"findings":[{"id":"<kebab-id>","title":"<one line>","claimed_severity":"critical|high|medium|low","charter_goal_ids":["<goal-id>"],"witness":{"kind":"defect","strength":"argued|constructed|executable","content":"<concrete failure path>"},"annotation":{"path":"<file>","line":1,"category":"<kebab-id>"}}],"evaluation":{"evaluated_paths":["<path>"],"evaluated_goal_ids":["<goal-id>"]}} Rules: claimed severity is capped by witness strength (argued at most medium, constructed at most high, only executable evidence can claim critical, and executable strength requires an executable specification object on the witness). At most 128 findings. The evaluation object is always required and must truthfully list the paths and Charter goal IDs you actually evaluated; when the Charter declares goals, evaluated_goal_ids must name at least one. annotation is optional presentation-only file:line metadata with zero epistemic weight. An unbound finding uses an empty charter_goal_ids array. Optional remedy {direction, summary, minimality_argument} and missing_goal_questions surfaces carry review-protocol discipline.`
 
 // The schema contains only the relay-supported Draft 2020-12 keyword subset.
-// It cannot express the severity-cap cross-field rule or the empty-findings to
-// evaluation dependency. Goal existence is expressed through the injected
-// enum; byte-based title length and annotation line-to-path binding remain the
-// decoder's job.
+// It cannot express the severity-cap cross-field rule. Goal existence is
+// expressed through the injected enum; byte-based title length and annotation
+// line-to-path binding remain the decoder's job.
 const defaultReviewerSchemaTemplate = `{
   "type": "object",
-  "required": ["schema_version", "role", "charter_hash", "review_input_digest", "source_identity", "consumer_identity", "findings"],
+  "required": ["schema_version", "role", "charter_hash", "review_input_digest", "source_identity", "consumer_identity", "findings", "evaluation"],
   "properties": {
     "schema_version": {"const": %s},
     "role": {"const": "defect"},
@@ -32,7 +31,7 @@ const defaultReviewerSchemaTemplate = `{
         "kind": {"type": "string", "minLength": 1, "pattern": "\\S"},
         "id": {"type": "string", "minLength": 1, "pattern": "\\S"}
       },
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "consumer_identity": {
       "type": "object",
@@ -117,7 +116,7 @@ const defaultReviewerSchemaTemplate = `{
       "required": ["evaluated_paths", "evaluated_goal_ids"],
       "properties": {
         "evaluated_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "evaluated_goal_ids": {"type": "array", "items": {"enum": %s}}
+        "evaluated_goal_ids": {"type": "array"%s, "items": {"enum": %s}}
       },
       "additionalProperties": false
     },
@@ -146,16 +145,18 @@ const defaultReviewerSchemaTemplate = `{
 // DefaultReviewerSchema returns a $comment-free Draft 2020-12 schema for the
 // report document pinned to frozen, the exact reviewer input digest, and the
 // requesting consumer identity.
-func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest string, expectedConsumerIdentity map[string]any) (json.RawMessage, error) {
+func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest string, expectedConsumerIdentity Identity) (json.RawMessage, error) {
 	if !validDigest(frozen.CharterHash) {
 		return nil, fmt.Errorf("frozen charter_hash must be a sha256 digest")
 	}
 	if !validDigest(reviewInputDigest) {
 		return nil, fmt.Errorf("review_input_digest must be a sha256 digest")
 	}
-	expectedConsumerKind, expectedConsumerID, err := defaultReviewerConsumerIdentity(expectedConsumerIdentity)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(expectedConsumerIdentity.Kind) == "" {
+		return nil, fmt.Errorf("expected consumer_identity requires a non-empty kind")
+	}
+	if strings.TrimSpace(expectedConsumerIdentity.ID) == "" {
+		return nil, fmt.Errorf("expected consumer_identity requires a non-empty id")
 	}
 	goalIDs := make([]string, len(frozen.Charter.Goals))
 	for index, goal := range frozen.Charter.Goals {
@@ -177,17 +178,21 @@ func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest strin
 	if err != nil {
 		return nil, err
 	}
-	expectedConsumerKindJSON, err := json.Marshal(expectedConsumerKind)
+	expectedConsumerKindJSON, err := json.Marshal(expectedConsumerIdentity.Kind)
 	if err != nil {
 		return nil, err
 	}
-	expectedConsumerIDJSON, err := json.Marshal(expectedConsumerID)
+	expectedConsumerIDJSON, err := json.Marshal(expectedConsumerIdentity.ID)
 	if err != nil {
 		return nil, err
 	}
 	goalIDsJSON, err := json.Marshal(goalIDs)
 	if err != nil {
 		return nil, err
+	}
+	evaluatedGoalIDsMinItems := ""
+	if len(frozen.Charter.Goals) > 0 {
+		evaluatedGoalIDsMinItems = `, "minItems": 1`
 	}
 	rendered := fmt.Sprintf(
 		defaultReviewerSchemaTemplate,
@@ -197,17 +202,8 @@ func DefaultReviewerSchema(frozen charter.FrozenCharter, reviewInputDigest strin
 		expectedConsumerKindJSON,
 		expectedConsumerIDJSON,
 		goalIDsJSON,
+		evaluatedGoalIDsMinItems,
 		goalIDsJSON,
 	)
 	return append(json.RawMessage(nil), rendered...), nil
-}
-
-func defaultReviewerConsumerIdentity(expectedConsumerIdentity map[string]any) (string, string, error) {
-	for _, field := range []string{"kind", "id"} {
-		value, ok := expectedConsumerIdentity[field].(string)
-		if !ok || strings.TrimSpace(value) == "" {
-			return "", "", fmt.Errorf("expected consumer_identity requires a non-empty %s", field)
-		}
-	}
-	return expectedConsumerIdentity["kind"].(string), expectedConsumerIdentity["id"].(string), nil
 }

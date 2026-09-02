@@ -22,7 +22,7 @@ const (
 // exact reviewer input before a review-report-v1 document is requested.
 type ReviewRequestDocument struct {
 	SchemaVersion     string         `json:"schema_version"`
-	ConsumerIdentity  map[string]any `json:"consumer_identity"`
+	ConsumerIdentity  Identity       `json:"consumer_identity"`
 	Subject           RequestSubject `json:"subject"`
 	CharterHash       string         `json:"charter_hash"`
 	ReviewInputDigest string         `json:"review_input_digest"`

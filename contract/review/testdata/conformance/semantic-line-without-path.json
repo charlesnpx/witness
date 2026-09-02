@@ -14,5 +14,6 @@
       "witness": {"kind": "defect", "strength": "argued", "content": "The claim has evidence text."},
       "annotation": {"line": 7, "category": "location"}
     }
-  ]
+  ],
+  "evaluation": {"evaluated_paths": ["api/response.go"], "evaluated_goal_ids": ["goal-api"]}
 }

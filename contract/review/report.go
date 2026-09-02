@@ -28,10 +28,10 @@ type ReviewReportDocument struct {
 	Role                 string                        `json:"role"`
 	CharterHash          string                        `json:"charter_hash"`
 	ReviewInputDigest    string                        `json:"review_input_digest"`
-	SourceIdentity       map[string]any                `json:"source_identity"`
-	ConsumerIdentity     map[string]any                `json:"consumer_identity"`
+	SourceIdentity       Identity                      `json:"source_identity"`
+	ConsumerIdentity     Identity                      `json:"consumer_identity"`
 	Findings             []ReportFinding               `json:"findings"`
-	Evaluation           *ReportEvaluation             `json:"evaluation,omitempty"`
+	Evaluation           *ReportEvaluation             `json:"evaluation"`
 	MissingGoalQuestions []charter.MissingGoalQuestion `json:"missing_goal_questions,omitempty"`
 }
 
@@ -75,8 +75,9 @@ type ReportRemedy struct {
 	MinimalityArgument string `json:"minimality_argument"`
 }
 
-// ReportEvaluation attests to an empty defect review. An evaluation is also
-// allowed alongside findings when it provides useful coverage context.
+// ReportEvaluation is the reviewer's self-attestation of coverage through
+// evaluated paths and Charter goal IDs. The validator checks goal IDs against
+// the frozen Charter but does not verify paths against the review input.
 type ReportEvaluation struct {
 	EvaluatedPaths   []string `json:"evaluated_paths"`
 	EvaluatedGoalIDs []string `json:"evaluated_goal_ids"`
@@ -222,17 +223,15 @@ func ValidateReviewReport(document ReviewReportDocument, frozen charter.FrozenCh
 			nil,
 		))
 	}
-	if len(document.Findings) == 0 && document.Evaluation == nil {
+	goalIDs := charterGoalIDs(&frozen)
+	if document.Evaluation == nil {
 		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidReviewReport,
-			"an empty findings array requires an evaluation attestation.",
+			"evaluation is required.",
 			"/evaluation",
 			nil,
 		))
-	}
-
-	goalIDs := charterGoalIDs(&frozen)
-	if document.Evaluation != nil {
+	} else {
 		diagnostics = append(diagnostics, validateReportEvaluation(*document.Evaluation, "/evaluation", goalIDs)...)
 	}
 
@@ -275,21 +274,22 @@ func ReviewReportDigest(document ReviewReportDocument) (string, error) {
 	return digest.SemanticJSON(document)
 }
 
-func validateReviewIdentity(diagnostics *[]diag.Diagnostic, path string, label string, identity map[string]any, code string) {
-	if len(identity) == 0 {
-		*diagnostics = append(*diagnostics, Diagnostic(code, label+" is required.", path, nil))
-		return
+func validateReviewIdentity(diagnostics *[]diag.Diagnostic, path string, label string, identity Identity, code string) {
+	if strings.TrimSpace(identity.Kind) == "" {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			code,
+			label+" requires a non-empty kind.",
+			path+"/kind",
+			nil,
+		))
 	}
-	for _, field := range []string{"kind", "id"} {
-		value, ok := identity[field].(string)
-		if !ok || strings.TrimSpace(value) == "" {
-			*diagnostics = append(*diagnostics, Diagnostic(
-				code,
-				label+" requires a non-empty "+field+".",
-				path+"/"+field,
-				nil,
-			))
-		}
+	if strings.TrimSpace(identity.ID) == "" {
+		*diagnostics = append(*diagnostics, Diagnostic(
+			code,
+			label+" requires a non-empty id.",
+			path+"/id",
+			nil,
+		))
 	}
 }
 
@@ -317,6 +317,14 @@ func validateReportEvaluation(evaluation ReportEvaluation, path string, goalIDs 
 		diagnostics = append(diagnostics, Diagnostic(
 			CodeInvalidReviewReport,
 			"evaluation requires an evaluated_goal_ids array.",
+			path+"/evaluated_goal_ids",
+			nil,
+		))
+	}
+	if len(goalIDs) > 0 && len(evaluation.EvaluatedGoalIDs) == 0 {
+		diagnostics = append(diagnostics, Diagnostic(
+			CodeInvalidReviewReport,
+			"evaluation must name at least one evaluated Charter goal when the Charter declares goals.",
 			path+"/evaluated_goal_ids",
 			nil,
 		))

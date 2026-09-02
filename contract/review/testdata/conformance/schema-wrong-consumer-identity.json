@@ -6,5 +6,5 @@
   "source_identity": {"kind": "git", "id": "source-head"},
   "consumer_identity": {"kind": "delegate", "id": "consumer-invented"},
   "findings": [],
-  "evaluation": {"evaluated_paths": ["api/response.go"], "evaluated_goal_ids": []}
+  "evaluation": {"evaluated_paths": ["api/response.go"], "evaluated_goal_ids": ["goal-api"]}
 }

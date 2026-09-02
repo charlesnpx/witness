@@ -135,6 +135,6 @@
     {"id": "finding-127", "title": "Minimal valid finding.", "claimed_severity": "low", "charter_goal_ids": [], "witness": {"kind": "defect", "strength": "argued", "content": "Minimal witness."}},
     {"id": "finding-128", "title": "Minimal valid finding.", "claimed_severity": "low", "charter_goal_ids": [], "witness": {"kind": "defect", "strength": "argued", "content": "Minimal witness."}},
     {"id": "finding-129", "title": "Minimal valid finding.", "claimed_severity": "low", "charter_goal_ids": [], "witness": {"kind": "defect", "strength": "argued", "content": "Minimal witness."}}
-  ]
+  ],
+  "evaluation": {"evaluated_paths": ["api/response.go"], "evaluated_goal_ids": ["goal-api"]}
 }
-

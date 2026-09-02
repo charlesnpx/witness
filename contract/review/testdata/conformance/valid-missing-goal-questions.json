@@ -18,6 +18,10 @@
       }
     }
   ],
+  "evaluation": {
+    "evaluated_paths": ["api/response.go"],
+    "evaluated_goal_ids": ["goal-api"]
+  },
   "missing_goal_questions": [
     {
       "id": "question-scale-bound",

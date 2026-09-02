@@ -22,5 +22,6 @@
         }
       }
     }
-  ]
+  ],
+  "evaluation": {"evaluated_paths": ["api/response.go"], "evaluated_goal_ids": ["goal-api"]}
 }

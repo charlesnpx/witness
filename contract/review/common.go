@@ -53,6 +53,13 @@ const (
 	CodeFiledValueMutated   = "contracts_filed_value_mutated"
 )
 
+// Identity identifies one side of a review-request-v1 or review-report-v1
+// boundary.
+type Identity struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
 type ValidationError struct {
 	Diagnostics []diag.Diagnostic
 }
