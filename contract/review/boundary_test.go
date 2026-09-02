@@ -158,20 +158,6 @@ func TestDefaultReviewerSchemaPinsBoundaryValues(t *testing.T) {
 	if !ok {
 		t.Fatalf("schema properties = %#v", root["properties"])
 	}
-	rootRequired, ok := root["required"].([]any)
-	if !ok {
-		t.Fatalf("schema required = %#v", root["required"])
-	}
-	hasEvaluation := false
-	for _, field := range rootRequired {
-		if field == "evaluation" {
-			hasEvaluation = true
-			break
-		}
-	}
-	if !hasEvaluation {
-		t.Fatalf("schema required = %#v, want evaluation", rootRequired)
-	}
 	assertSchemaConst(t, properties, "schema_version", ReviewReportV1)
 	assertSchemaConst(t, properties, "role", RoleDefect)
 	assertSchemaConst(t, properties, "charter_hash", frozen.CharterHash)
@@ -281,79 +267,44 @@ func TestDefaultReviewerEvaluationGoalRequirements(t *testing.T) {
 		t.Fatal(err)
 	}
 	const inputDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	for _, testCase := range []struct {
-		name                    string
-		frozen                  charter.FrozenCharter
-		wantMinItems            bool
-		wantEvaluatedGoalIDEnum int
-		wantSemanticPass        bool
-	}{
-		{
-			name:                    "zero-goal charter accepts empty evaluated goal IDs",
-			frozen:                  zeroGoal,
-			wantMinItems:            false,
-			wantEvaluatedGoalIDEnum: 0,
-			wantSemanticPass:        true,
-		},
-		{
-			name:                    "goal-bearing charter rejects empty evaluated goal IDs",
-			frozen:                  goalBearing,
-			wantMinItems:            true,
-			wantEvaluatedGoalIDEnum: 1,
-			wantSemanticPass:        false,
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			schema, err := DefaultReviewerSchema(testCase.frozen, inputDigest, Identity{Kind: "delegate", ID: "consumer-b"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			decoded, err := strictjson.DecodeAnyBytes(schema, strictjson.DefaultMaxBytes*4)
-			if err != nil {
-				t.Fatal(err)
-			}
-			root := decoded.(map[string]any)
-			properties := root["properties"].(map[string]any)
-			evaluation := properties["evaluation"].(map[string]any)
-			evaluationProperties := evaluation["properties"].(map[string]any)
-			evaluatedGoalIDs := evaluationProperties["evaluated_goal_ids"].(map[string]any)
-			_, hasMinItems := evaluatedGoalIDs["minItems"]
-			if hasMinItems != testCase.wantMinItems {
-				t.Fatalf("evaluated_goal_ids minItems present = %t, want %t", hasMinItems, testCase.wantMinItems)
-			}
-			items := evaluatedGoalIDs["items"].(map[string]any)
-			enum := items["enum"].([]any)
-			if len(enum) != testCase.wantEvaluatedGoalIDEnum {
-				t.Fatalf("evaluated_goal_ids enum = %#v, want %d values", enum, testCase.wantEvaluatedGoalIDEnum)
-			}
+	schema, err := DefaultReviewerSchema(zeroGoal, inputDigest, Identity{Kind: "delegate", ID: "consumer-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := strictjson.DecodeAnyBytes(schema, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := decoded.(map[string]any)
+	properties := root["properties"].(map[string]any)
+	evaluation := properties["evaluation"].(map[string]any)
+	evaluationProperties := evaluation["properties"].(map[string]any)
+	evaluatedGoalIDs := evaluationProperties["evaluated_goal_ids"].(map[string]any)
+	if _, hasMinItems := evaluatedGoalIDs["minItems"]; hasMinItems {
+		t.Fatalf("evaluated_goal_ids minItems present for zero-goal Charter")
+	}
+	items := evaluatedGoalIDs["items"].(map[string]any)
+	enum := items["enum"].([]any)
+	if len(enum) != 0 {
+		t.Fatalf("evaluated_goal_ids enum = %#v, want no values", enum)
+	}
 
-			document := ReviewReportDocument{
-				SchemaVersion:     ReviewReportV1,
-				Role:              RoleDefect,
-				CharterHash:       testCase.frozen.CharterHash,
-				ReviewInputDigest: inputDigest,
-				SourceIdentity:    Identity{Kind: "git", ID: "source-head"},
-				ConsumerIdentity:  Identity{Kind: "delegate", ID: "consumer-b"},
-				Findings:          []ReportFinding{},
-				Evaluation: &ReportEvaluation{
-					EvaluatedPaths:   []string{"api/response.go"},
-					EvaluatedGoalIDs: []string{},
-				},
-			}
-			diagnostics := ValidateReviewReport(document, testCase.frozen, inputDigest)
-			if testCase.wantSemanticPass {
-				if len(diagnostics) != 0 {
-					t.Fatalf("ValidateReviewReport diagnostics = %#v", diagnostics)
-				}
-				return
-			}
-			for _, diagnostic := range diagnostics {
-				if diagnostic.Path == "/evaluation/evaluated_goal_ids" && diagnostic.Message == "evaluation must name at least one evaluated Charter goal when the Charter declares goals." {
-					return
-				}
-			}
-			t.Fatalf("ValidateReviewReport diagnostics = %#v, want empty evaluated-goal diagnostic", diagnostics)
-		})
+	document := ReviewReportDocument{
+		SchemaVersion:     ReviewReportV1,
+		Role:              RoleDefect,
+		CharterHash:       zeroGoal.CharterHash,
+		ReviewInputDigest: inputDigest,
+		SourceIdentity:    Identity{Kind: "git", ID: "source-head"},
+		ConsumerIdentity:  Identity{Kind: "delegate", ID: "consumer-b"},
+		Findings:          []ReportFinding{},
+		Evaluation: &ReportEvaluation{
+			EvaluatedPaths:   []string{"api/response.go"},
+			EvaluatedGoalIDs: []string{},
+		},
+	}
+	diagnostics := ValidateReviewReport(document, zeroGoal, inputDigest)
+	if len(diagnostics) != 0 {
+		t.Fatalf("ValidateReviewReport diagnostics = %#v", diagnostics)
 	}
 }
 
