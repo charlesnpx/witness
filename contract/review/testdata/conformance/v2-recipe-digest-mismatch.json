@@ -1,0 +1,16 @@
+{
+  "schema_version": "review-request-v2",
+  "consumer_identity": {"kind": "delegate", "id": "consumer-v2"},
+  "subject": {"head": "a1b2c3", "tree": "tree-a", "branch": "main"},
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "frozen_recipe": {
+    "recipe_id": "defect-and-economy",
+    "instructions": "Inspect for defects and economy.",
+    "required_outputs": ["defect", "economy"],
+    "policy": {"allow_unbound_findings": true, "severity_cap": "evidence"}
+  },
+  "recipe_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "adapter": "adapter-a",
+  "required_outputs": ["defect", "economy"]
+}

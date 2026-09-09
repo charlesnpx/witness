@@ -21,6 +21,23 @@ against the review input.
 
 The default-reviewer schema caps a report at 128 findings; consumers may enforce their own bounds.
 
+`review-request-v2` adds the recipe boundary. It stores the strict JSON recipe
+bytes, their semantic canonical-JSON digest, the adapter identifier, and the
+open reviewer identifiers required by both the request and recipe. A recipe's
+instructions, required outputs, and policy are validated for shape without an
+enum or registry of recipe or reviewer names.
+
+`review-report-v2` binds each report to the v2 request digest, recipe digest,
+and required reviewer identifier. It retains the v1 report surfaces and adds
+finding kind/attribution plus economy equivalence evidence: the behavior
+preserved by a removal and the declared Charter goals it serves.
+
+`review-completion-v1` is host-facing. Its `HostExecutionEvidence` has private
+state and can only be initialized from `ObservedReviewExecution` through
+`NewHostExecutionEvidence`; JSON decoding deliberately leaves that state
+untrusted. Therefore a model-written report or completion JSON cannot supply
+evidence that permits the `satisfied` verdict.
+
 The `review-role-output-v3` through `review-role-output-v5` family consists of
 Witness-internal compatibility structures retained for the Witness engine. It is
 not part of the `review-request-v1`/`review-report-v1` adapter contract, and this

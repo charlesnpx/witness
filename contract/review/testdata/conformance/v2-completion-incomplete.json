@@ -1,0 +1,14 @@
+{
+  "request_digest": "sha256:8c4d9e039f602d9896c77c2687fedb3f681c9243f9ec5063193de423d4cfa39c",
+  "adapter": "adapter-a",
+  "required_report_digests": {
+    "defect": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "economy": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "observed_execution": {
+    "complete": false,
+    "result_artifact_available": true,
+    "report_outcomes": {"defect": {"status": "valid"}, "economy": {"status": "valid"}}
+  },
+  "verdict": "satisfied"
+}

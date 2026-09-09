@@ -1,0 +1,21 @@
+{
+  "schema_version": "review-report-v2",
+  "request_digest": "sha256:8c4d9e039f602d9896c77c2687fedb3f681c9243f9ec5063193de423d4cfa39c",
+  "recipe_digest": "sha256:88e5d1331550d0270ebab87c21994569799cad59e1428b000955106d4a862764",
+  "reviewer": "economy",
+  "charter_hash": "sha256:4ee6839d81e3da60d9e70cbd22b1a4e3f589402e459e7db61c2e4a83b516e976",
+  "review_input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "source_identity": {"kind": "git", "id": "source-head"},
+  "consumer_identity": {"kind": "delegate", "id": "consumer-v2"},
+  "findings": [{
+    "id": "finding-economy",
+    "kind": "economy",
+    "title": "A redundant adapter branch can be removed.",
+    "claimed_severity": "low",
+    "attribution": "introduced",
+    "charter_goal_ids": ["goal-api"],
+    "witness": {"kind": "equivalence", "strength": "argued", "content": "The branch appears redundant."},
+    "remedy": {"direction": "remove", "summary": "Remove the redundant branch.", "minimality_argument": "Only the duplicate branch is removed."}
+  }],
+  "evaluation": {"evaluated_paths": ["api/response.go"], "evaluated_goal_ids": ["goal-api"]}
+}

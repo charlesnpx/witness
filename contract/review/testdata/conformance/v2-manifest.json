@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {"name": "request-round-trip-and-digest", "kind": "request", "file": "v2-valid-request.json", "valid": true},
+    {"name": "request-recipe-digest-mismatch", "kind": "request", "file": "v2-recipe-digest-mismatch.json", "valid": false},
+    {"name": "report-request-binding-mismatch", "kind": "report", "file": "v2-report-request-mismatch.json", "valid": false},
+    {"name": "report-severity-over-evidence-cap", "kind": "report", "file": "v2-report-severity-over-cap.json", "valid": false},
+    {"name": "report-economy-without-equivalence", "kind": "report", "file": "v2-report-economy-without-equivalence.json", "valid": false},
+    {"name": "completion-missing-report-digest", "kind": "completion", "file": "v2-completion-missing-report-digest.json", "valid": false},
+    {"name": "completion-satisfied-incomplete-execution", "kind": "completion", "file": "v2-completion-incomplete.json", "valid": false},
+    {"name": "v1-report-cannot-satisfy-v2", "kind": "v1-report", "file": "valid-empty-evaluation.json", "valid": false}
+  ]
+}
