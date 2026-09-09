@@ -40,11 +40,16 @@ type PreparedReview struct {
 	FrozenCharter charter.FrozenCharter
 	Recipe        contractreview.ReviewRecipe
 	Packets       []ReviewerPacket
+	// SourceDirectory and SourceDigest identify the source tree captured before
+	// reviewer execution. The adapter re-hashes this directory after collection
+	// and refuses a satisfied completion if the digest moved.
+	SourceDirectory string
+	SourceDigest    string
 }
 
-// Prepare freezes/loads the Charter, derives a source input digest when the
-// caller did not provide one, and writes one prompt/schema packet per required
-// reviewer.
+// Prepare freezes/loads the Charter, captures the source digest, derives a
+// source input digest when the caller did not provide one, and writes one
+// prompt/schema packet per required reviewer.
 func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err := ValidateConfig(options.Config); err != nil {
 		return PreparedReview{}, fmt.Errorf("validate review configuration: %w", err)
@@ -82,12 +87,13 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err != nil {
 		return PreparedReview{}, fmt.Errorf("digest frozen review recipe: %w", err)
 	}
+	sourceDigest, err := SourceDigest(sourceDirectory)
+	if err != nil {
+		return PreparedReview{}, fmt.Errorf("derive review source digest: %w", err)
+	}
 	inputDigest := options.ReviewInputDigest
 	if strings.TrimSpace(inputDigest) == "" {
-		inputDigest, err = SourceDigest(sourceDirectory)
-		if err != nil {
-			return PreparedReview{}, fmt.Errorf("derive review input digest: %w", err)
-		}
+		inputDigest = sourceDigest
 	}
 	if !digest.WellFormed(inputDigest) {
 		return PreparedReview{}, fmt.Errorf("review input digest %q is not a relay-root-digests-v1 sha256 digest", inputDigest)
@@ -148,7 +154,14 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 		}
 		packets = append(packets, ReviewerPacket{Reviewer: reviewer, PromptPath: promptPath, SchemaPath: schemaPath})
 	}
-	return PreparedReview{Request: request, FrozenCharter: frozen, Recipe: recipe, Packets: packets}, nil
+	return PreparedReview{
+		Request:         request,
+		FrozenCharter:   frozen,
+		Recipe:          recipe,
+		Packets:         packets,
+		SourceDirectory: sourceDirectory,
+		SourceDigest:    sourceDigest,
+	}, nil
 }
 
 // Run executes the bundled workflow after preparing its request and packets.
@@ -167,7 +180,8 @@ func Run(ctx context.Context, prepareOptions PrepareOptions, adapterOptions Simp
 		Request:          prepared.Request,
 		FrozenCharter:    prepared.FrozenCharter,
 		Packets:          prepared.Packets,
-		WorkingDirectory: prepareOptions.SourceDir,
+		WorkingDirectory: prepared.SourceDirectory,
+		SourceDigest:     prepared.SourceDigest,
 	})
 	if err != nil {
 		return prepared, SimpleRunResult{}, err
@@ -193,7 +207,7 @@ func WriteCompletion(path string, completion contractreview.ReviewCompletionDocu
 
 // SourceDigest returns a deterministic semantic digest of all regular files
 // below root, excluding the root's .git directory. File contents are read at
-// preparation time, so the request is bound to what the adapter was given.
+// the time of the call.
 func SourceDigest(root string) (string, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {

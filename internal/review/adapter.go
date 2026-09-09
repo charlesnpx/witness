@@ -69,9 +69,14 @@ type SimpleRunOptions struct {
 	FrozenCharter    charter.FrozenCharter
 	Packets          []ReviewerPacket
 	WorkingDirectory string
+	// SourceDigest is the source-tree digest captured during preparation. A
+	// direct adapter caller may leave it empty; the adapter then captures the
+	// digest before submitting any jobs.
+	SourceDigest string
 }
 
-// TranscriptItem is the captured, forward-paged Agentbus transcript item.
+// TranscriptItem is a parsed, forward-paged Agentbus transcript item. Items
+// are used to advance the cursor but are not retained after paging.
 type TranscriptItem struct {
 	Ordinal   int       `json:"ordinal"`
 	At        time.Time `json:"at,omitempty"`
@@ -84,12 +89,9 @@ type TranscriptItem struct {
 // TranscriptObservation keeps transcript completeness separate from report
 // validity. Gap is meaningful only after the selected job is terminal.
 type TranscriptObservation struct {
-	Items       []TranscriptItem `json:"items"`
-	Complete    bool             `json:"complete"`
-	Gap         bool             `json:"gap"`
-	LastOrdinal int              `json:"last_ordinal"`
-	Pages       int              `json:"pages"`
-	Error       string           `json:"error,omitempty"`
+	Complete bool   `json:"complete"`
+	Gap      bool   `json:"gap"`
+	Error    string `json:"error,omitempty"`
 }
 
 // JobObservation is the host's observation of one submitted reviewer job.
@@ -117,6 +119,7 @@ type SimpleRunResult struct {
 	ObservedExecution  contractreview.ObservedReviewExecution           `json:"observed_execution"`
 	Evidence           contractreview.HostExecutionEvidence             `json:"-"`
 	TranscriptComplete bool                                             `json:"transcript_complete"`
+	Diagnostics        []string                                         `json:"diagnostics,omitempty"`
 	Completion         contractreview.ReviewCompletionDocument          `json:"-"`
 }
 
@@ -179,6 +182,13 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 	if err != nil {
 		return SimpleRunResult{}, err
 	}
+	sourceDigest := options.SourceDigest
+	if sourceDigest == "" {
+		sourceDigest, err = SourceDigest(workingDirectory)
+		if err != nil {
+			return SimpleRunResult{}, fmt.Errorf("capture review source digest before adapter run: %w", err)
+		}
+	}
 
 	type submittedJob struct {
 		reviewer string
@@ -209,6 +219,9 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 			return SimpleRunResult{}, fmt.Errorf("observe reviewer %q job %q: %w", job.reviewer, job.jobID, err)
 		}
 		result.Jobs = append(result.Jobs, observation)
+		if observation.ResultError != "" {
+			result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("reviewer %q: %s", job.reviewer, observation.ResultError))
+		}
 		observed.ReportOutcomes[job.reviewer] = contractreview.ObservedReportOutcome{Status: observation.ReportStatus}
 		if !isTerminalState(observation.State) {
 			observed.Complete = false
@@ -220,6 +233,13 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 			result.Reports[job.reviewer] = *observation.Report
 			result.ReportDigests[job.reviewer] = observation.ReportDigest
 		}
+	}
+	currentSourceDigest, sourceDigestErr := SourceDigest(workingDirectory)
+	sourceStable := sourceDigestErr == nil && currentSourceDigest == sourceDigest
+	if sourceDigestErr != nil {
+		result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("review source could not be re-hashed after reviewer collection; digest before %q; after: %v", sourceDigest, sourceDigestErr))
+	} else if currentSourceDigest != sourceDigest {
+		result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("review source changed during reviewer collection; digest before %q, after %q", sourceDigest, currentSourceDigest))
 	}
 	result.ObservedExecution = observed
 	result.Evidence, err = contractreview.NewHostExecutionEvidence(observed)
@@ -241,7 +261,7 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 			break
 		}
 	}
-	if !observed.Complete || !allJobsCompleted || !observed.ResultArtifactAvailable || !allReportsValid(observed, options.Request.RequiredOutputs) || (requireTranscript && !result.TranscriptComplete) {
+	if !observed.Complete || !allJobsCompleted || !observed.ResultArtifactAvailable || !allReportsValid(observed, options.Request.RequiredOutputs) || (requireTranscript && !result.TranscriptComplete) || !sourceStable {
 		verdict = contractreview.CompletionVerdictFailedToRun
 	}
 	result.Completion, err = contractreview.NewReviewCompletionDocument(options.Request, result.Evidence, result.ReportDigests, verdict)
@@ -350,12 +370,8 @@ func (adapter SimpleAdapter) observe(ctx context.Context, reviewer string, jobID
 		Reviewer:     reviewer,
 		JobID:        jobID,
 		ReportStatus: contractreview.ExecutionReportMissing,
-		Transcript: TranscriptObservation{
-			Items: make([]TranscriptItem, 0),
-		},
 	}
 	cursor := 0
-	seenOrdinals := make(map[int]bool)
 	for {
 		record, exitCode, err := adapter.readJobRecord(ctx, "status", jobID)
 		if err != nil {
@@ -364,7 +380,7 @@ func (adapter SimpleAdapter) observe(ctx context.Context, reviewer string, jobID
 		observation.State = record.State
 		observation.StateExitCode = exitCode
 		terminal := isTerminalState(record.State) || isTerminalJobOutcomeExitCode(exitCode)
-		if err := adapter.pageTranscript(ctx, jobID, &cursor, seenOrdinals, &observation.Transcript, terminal); err != nil {
+		if err := adapter.pageTranscript(ctx, jobID, &cursor, &observation.Transcript, terminal); err != nil {
 			// Transcript capture is a separate claim. Keep the gap visible and
 			// allow a result-valid run when policy does not require a transcript.
 			observation.Transcript.Error = err.Error()
@@ -388,7 +404,7 @@ func (adapter SimpleAdapter) observe(ctx context.Context, reviewer string, jobID
 			if observation.StateExitCode == JobExitQueuedOrRunning || (resultExitCode != JobExitCompleted && isTerminalJobOutcomeExitCode(resultExitCode)) {
 				observation.StateExitCode = resultExitCode
 			}
-			status, report, reportDigest, available, resultPath, resultErr := validateObservedReport(resultRecord, request, frozen)
+			status, report, reportDigest, available, resultPath, resultErr := validateObservedReport(resultRecord, request, frozen, reviewer)
 			outcomeCode := exitCode
 			if resultExitCode != JobExitCompleted && resultExitCode != JobExitQueuedOrRunning && isJobOutcomeExitCode(resultExitCode) {
 				outcomeCode = resultExitCode
@@ -487,7 +503,7 @@ func selectedStatusObject(response map[string]any, jobID string) (map[string]any
 	return selected, nil
 }
 
-func (adapter SimpleAdapter) pageTranscript(ctx context.Context, jobID string, cursor *int, seen map[int]bool, capture *TranscriptObservation, terminal bool) error {
+func (adapter SimpleAdapter) pageTranscript(ctx context.Context, jobID string, cursor *int, capture *TranscriptObservation, terminal bool) error {
 	for {
 		args := []string{
 			"transcript",
@@ -509,7 +525,6 @@ func (adapter SimpleAdapter) pageTranscript(ctx context.Context, jobID string, c
 		if parseErr != nil {
 			return fmt.Errorf("parse Agentbus transcript for job %q: %w", jobID, parseErr)
 		}
-		capture.Pages++
 		if terminal && page.Gap {
 			capture.Gap = true
 		}
@@ -519,15 +534,9 @@ func (adapter SimpleAdapter) pageTranscript(ctx context.Context, jobID string, c
 			if item.Ordinal > highest {
 				highest = item.Ordinal
 			}
-			if seen[item.Ordinal] {
-				continue
-			}
-			seen[item.Ordinal] = true
-			capture.Items = append(capture.Items, item)
 		}
 		if highest > *cursor {
 			*cursor = highest
-			capture.LastOrdinal = highest
 		}
 		if len(page.Items) == 0 || len(page.Items) < adapter.options.TranscriptPageSize {
 			return nil
@@ -542,7 +551,7 @@ func (adapter SimpleAdapter) pageTranscript(ctx context.Context, jobID string, c
 	}
 }
 
-func validateObservedReport(record jobRecord, request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter) (string, *contractreview.ReviewReportV2Document, string, bool, string, error) {
+func validateObservedReport(record jobRecord, request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, expectedReviewer string) (string, *contractreview.ReviewReportV2Document, string, bool, string, error) {
 	if record.Result == nil || !record.Result.MetadataComplete || strings.TrimSpace(record.Result.ResultPath) == "" {
 		return contractreview.ExecutionReportMissing, nil, "", false, "", errors.New("result artifact is missing")
 	}
@@ -567,6 +576,9 @@ func validateObservedReport(record jobRecord, request contractreview.ReviewReque
 	report, err := contractreview.DecodeAndValidateReviewReportV2(data, request, frozen)
 	if err != nil {
 		return contractreview.ExecutionReportInvalid, nil, "", true, result.ResultPath, fmt.Errorf("validate review report: %w", err)
+	}
+	if report.Reviewer != expectedReviewer {
+		return contractreview.ExecutionReportMissing, nil, "", true, result.ResultPath, fmt.Errorf("reviewer %q job produced report for reviewer %q; required output for reviewer %q is missing", expectedReviewer, report.Reviewer, expectedReviewer)
 	}
 	reportDigest, err := contractreview.ReviewReportV2Digest(report)
 	if err != nil {

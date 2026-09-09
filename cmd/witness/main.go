@@ -83,6 +83,10 @@ var verificationAssembleRelayRunner relayclient.Runner
 
 func main() {
 	if err := route(os.Args[1:]); err != nil {
+		var exitCoder interface{ processExitCode() int }
+		if errors.As(err, &exitCoder) {
+			os.Exit(exitCoder.processExitCode())
+		}
 		if diagnostics := diagnosticsFromError(err); len(diagnostics) > 0 {
 			_ = diag.WriteCanonical(os.Stderr, map[string]any{
 				"ok":          false,

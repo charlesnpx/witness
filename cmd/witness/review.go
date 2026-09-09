@@ -12,6 +12,29 @@ import (
 	internalreview "github.com/charlesnpx/witness/internal/review"
 )
 
+const (
+	// ReviewRunExitNotSatisfied means the review completed with a negative
+	// consumer verdict.
+	ReviewRunExitNotSatisfied = 20
+	// ReviewRunExitFailedToRun means the review did not produce a usable run.
+	ReviewRunExitFailedToRun = 21
+)
+
+const reviewRunDescription = "Prepare and execute an independent defect plus economy review. Exit status: 0=satisfied, 20=not_satisfied, 21=failed_to_run; other command errors use 2."
+
+type reviewRunExitError struct {
+	verdict string
+	code    int
+}
+
+func (err reviewRunExitError) Error() string {
+	return fmt.Sprintf("review run verdict %q", err.verdict)
+}
+
+func (err reviewRunExitError) processExitCode() int {
+	return err.code
+}
+
 func runReview(command string, args []string) error {
 	switch command {
 	case "run":
@@ -73,7 +96,7 @@ func runReviewConfigure(args []string) error {
 }
 
 func runReviewRun(args []string) error {
-	flags := newFlagSet("witness review run", "Prepare and execute an independent defect plus economy review.")
+	flags := newFlagSet("witness review run", reviewRunDescription)
 	configPath := flags.String("config", "", "explicit review configuration path")
 	charterPath := flags.String("charter", "", "Charter or frozen Charter JSON path")
 	charterFreezePath := flags.String("charter-freeze", "", "alias for a frozen Charter JSON path")
@@ -151,7 +174,7 @@ func runReviewRun(args []string) error {
 	}
 	jobSummaries := make([]map[string]any, 0, len(result.Jobs))
 	for _, job := range result.Jobs {
-		jobSummaries = append(jobSummaries, map[string]any{
+		summary := map[string]any{
 			"reviewer":                  job.Reviewer,
 			"job_id":                    job.JobID,
 			"state":                     job.State,
@@ -160,16 +183,36 @@ func runReviewRun(args []string) error {
 			"result_artifact_available": job.ResultArtifactAvailable,
 			"transcript_complete":       job.Transcript.Complete,
 			"transcript_gap":            job.Transcript.Gap,
-		})
+		}
+		if job.ResultError != "" {
+			summary["result_error"] = job.ResultError
+		}
+		jobSummaries = append(jobSummaries, summary)
 	}
-	return diag.WriteCanonical(os.Stdout, map[string]any{
-		"ok":                  true,
+	output := map[string]any{
+		"ok":                  result.Completion.Verdict == review.CompletionVerdictSatisfied,
 		"verdict":             result.Completion.Verdict,
 		"request_path":        requestPath,
 		"charter_freeze_path": charterOutputPath,
 		"completion_path":     completionPath,
 		"jobs":                jobSummaries,
-	})
+	}
+	if len(result.Diagnostics) > 0 {
+		output["diagnostics"] = result.Diagnostics
+	}
+	if err := diag.WriteCanonical(os.Stdout, output); err != nil {
+		return err
+	}
+	switch result.Completion.Verdict {
+	case review.CompletionVerdictSatisfied:
+		return nil
+	case review.CompletionVerdictNotSatisfied:
+		return reviewRunExitError{verdict: result.Completion.Verdict, code: ReviewRunExitNotSatisfied}
+	case review.CompletionVerdictFailedToRun:
+		return reviewRunExitError{verdict: result.Completion.Verdict, code: ReviewRunExitFailedToRun}
+	default:
+		return fmt.Errorf("review run returned unsupported verdict %q", result.Completion.Verdict)
+	}
 }
 
 func loadReviewConfig(path string) (internalreview.Config, error) {
