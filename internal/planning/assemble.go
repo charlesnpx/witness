@@ -20,7 +20,6 @@ import (
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
-	"github.com/charlesnpx/witness/internal/portable"
 )
 
 const (
@@ -228,222 +227,32 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
-		if !hasRelay || (relay.PortableExportDir == "" && relay.VerifiedBundle == nil) {
+		if !hasRelay || relay.VerifiedBundle == nil {
 			record.FailureReason = relayUnavailableFailureReason(relay)
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
-		if relay.VerifiedBundle != nil {
-			assembled, err := assembleRelayV2Evidence(relay, planned, options.Plan, batchDoc)
-			if err != nil {
-				record.Status = contracts.RecordStatusFailed
-				record.FailureReason = "relay_v2_bundle_invalid"
-				diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "relay v2 bundle evidence could not be bound to the planned verification batch.", diag.WithDetail("batch_id", planned.BatchID))))
-				result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-				manifest.Batches = append(manifest.Batches, record)
-				continue
-			}
-			record.Status = contracts.RecordStatusValid
-			record.PortableExportDigest = assembled.verified.Manifest.ManifestDigest
-			record.CanonicalResultDigest = assembled.resultDigest
-			record.RelayVerdicts = &assembled.verdicts
-			if relay.PortableExportRef != nil {
-				record.PortableExportRef = relay.PortableExportRef
-			} else {
-				record.PortableExportRef = &contracts.ArtifactRef{
-					Kind:          "relay-root-portable-export",
-					ID:            planned.BatchID,
-					Digest:        assembled.verified.Manifest.ManifestDigest,
-					DigestProfile: digest.Profile,
-					MediaType:     "application/json",
-				}
-			}
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		portableReport, err := portable.VerifyDirectoryDetailed(relay.PortableExportDir)
+		assembled, err := assembleRelayV2Evidence(relay, planned, options.Plan, batchDoc)
 		if err != nil {
 			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export failed Witness validation.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		exportResult, err := portable.ReducerResultFromReport(portableReport)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_missing_canonical_result"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export canonical reducer result could not be validated.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		findingsDigest, err := portable.NamedInputRawDigest(portableReport, "findings")
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_batch_input_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export contract-designated findings input could not be validated.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if findingsDigest != planned.BatchDigest {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_batch_input_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export contract-designated findings input does not match the planned verification-batch digest.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("actual_batch_digest", findingsDigest),
-				diag.WithDetail("expected_batch_digest", planned.BatchDigest),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if bindingDiagnostics, failureReason := validatePortablePassBindings(portableReport, options.Plan, planned); len(bindingDiagnostics) > 0 {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = failureReason
-			diagnostics = append(diagnostics, prefixAssembleDiagnostics(CodeInvalidRelay, planned.BatchID, bindingDiagnostics)...)
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		contractBinding, err := portable.ContractBindingFromReport(portableReport)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_binding_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export selected contract binding could not be validated.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if !selectedContractDigestClaimed(options.EvidenceRefs.SelectedContracts, contractBinding.ContractDigest) {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_manifest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export selected contract digest is not claimed by verification manifest selected_contracts.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("contract_id", contractBinding.ContractID),
-				diag.WithDetail("contract_digest", contractBinding.ContractDigest),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		contractDigestPresent, err := selectedContractEvidenceDigestPresent(options.EvidenceRefs.SelectedContractEvidence, contractBinding.ContractDigest)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_evidence_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "selected-contract evidence could not be authenticated.", diag.WithDetail("batch_id", planned.BatchID), diag.WithDetail("contract_id", contractBinding.ContractID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if !contractDigestPresent {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_digest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export selected contract digest does not match authenticated retained selected-contract evidence.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("contract_id", contractBinding.ContractID),
-				diag.WithDetail("contract_digest", contractBinding.ContractDigest),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		unverified, requiredMissing := classifyPortableUnverifiedRelationships(planned.BatchID, portableReport.UnverifiedRelationships)
-		result.UnverifiedRelationships = append(result.UnverifiedRelationships, unverified...)
-		if len(requiredMissing) > 0 {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_required_relationship_unverified"
-			for _, item := range requiredMissing {
-				diagnostics = append(diagnostics, diag.FromError(diag.New(
-					CodeInvalidRelay,
-					"portable export is missing required relationship evidence.",
-					diag.WithDetail("batch_id", planned.BatchID),
-					diag.WithDetail("relationship", item.Relationship),
-					diag.WithDetail("unverified_code", item.Code),
-					diag.WithDetail("reason", item.Reason),
-				)))
-			}
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		verdicts := relay.Verdicts
-		if verdicts == nil {
-			decoded, err := decodeExportVerdicts(exportResult.Value)
-			if err != nil {
-				record.Status = contracts.RecordStatusFailed
-				record.FailureReason = "portable_export_canonical_result_invalid"
-				diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export canonical reducer result is not a relay verdict document.", diag.WithDetail("batch_id", planned.BatchID))))
-				result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-				manifest.Batches = append(manifest.Batches, record)
-				continue
-			}
-			verdicts = &decoded
-		}
-		verdictDiagnostics := contracts.ValidateRelayWitnessVerdicts(*verdicts, &batchDoc)
-		if len(verdictDiagnostics) > 0 {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "relay_verdicts_invalid"
-			diagnostics = append(diagnostics, prefixAssembleDiagnostics(CodeInvalidRelay, planned.BatchID, verdictDiagnostics)...)
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		resultDigest, err := contracts.RelayWitnessVerdictsDigest(*verdicts)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "relay_verdicts_digest_failed"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "relay verdict digest could not be recomputed.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if resultDigest != exportResult.Digest {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "relay_verdicts_export_digest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"relay verdicts are not the portable export canonical reducer result.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("verdict_digest", resultDigest),
-				diag.WithDetail("export_canonical_result_digest", exportResult.Digest),
-			)))
+			record.FailureReason = "relay_v2_bundle_invalid"
+			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "relay v2 bundle evidence could not be bound to the planned verification batch.", diag.WithDetail("batch_id", planned.BatchID))))
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
 		record.Status = contracts.RecordStatusValid
-		record.PortableExportDigest = portableReport.ManifestDigest
-		record.CanonicalResultDigest = resultDigest
-		if record.CanonicalResultDigest != exportResult.Digest {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "manifest_canonical_result_digest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"verification manifest canonical_result_digest does not match the portable export canonical reducer result.",
-				diag.WithDetail("batch_id", planned.BatchID),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		record.RelayVerdicts = verdicts
+		record.PortableExportDigest = assembled.verified.Manifest.ManifestDigest
+		record.CanonicalResultDigest = assembled.resultDigest
+		record.RelayVerdicts = &assembled.verdicts
 		if relay.PortableExportRef != nil {
 			record.PortableExportRef = relay.PortableExportRef
 		} else {
 			record.PortableExportRef = &contracts.ArtifactRef{
 				Kind:          "relay-root-portable-export",
 				ID:            planned.BatchID,
-				Digest:        portableReport.ManifestDigest,
+				Digest:        assembled.verified.Manifest.ManifestDigest,
 				DigestProfile: digest.Profile,
 				MediaType:     "application/json",
 			}
@@ -1228,14 +1037,6 @@ func prefixDiagnosticPaths(prefix string, diagnostics []diag.Diagnostic) []diag.
 	return result
 }
 
-func decodeExportVerdicts(value any) (contracts.RelayWitnessVerdictsDocument, error) {
-	data, err := contracts.CanonicalBytes(value)
-	if err != nil {
-		return contracts.RelayWitnessVerdictsDocument{}, err
-	}
-	return contracts.ReadRelayWitnessVerdictsBytes(data)
-}
-
 func assembleReceiptRecords(options AssembleOptions) ([]contracts.ExecutionReceiptManifestRecord, []diag.Diagnostic, []string) {
 	var records []contracts.ExecutionReceiptManifestRecord
 	var diagnostics []diag.Diagnostic
@@ -1425,88 +1226,6 @@ func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) 
 	return diagnostics
 }
 
-func validatePortablePassBindings(report *portable.DetailedReport, plan PlanDocument, planned BatchPlan) ([]diag.Diagnostic, string) {
-	var diagnostics []diag.Diagnostic
-	charterDigest := firstNonEmpty(planned.CharterDigest, plan.CharterDigest)
-	if charterDigest != "" {
-		actual, err := portable.NamedInputRawDigest(report, "charter")
-		if err != nil {
-			return []diag.Diagnostic{diag.FromError(err)}, "portable_export_charter_input_invalid"
-		}
-		if actual != charterDigest {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export charter named input does not match the planned frozen Charter bytes.",
-				diag.WithDetail("actual_digest", actual),
-				diag.WithDetail("expected_digest", charterDigest),
-			)))
-			return diagnostics, "portable_export_charter_input_mismatch"
-		}
-	}
-	expectedArtifactDigests := plannedArtifactDigests(planned.ArtifactDigest, plan.ArtifactDigest)
-	if len(expectedArtifactDigests) == 0 {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export artifact named input requires a planned reviewed artifact digest.",
-		)))
-		return diagnostics, "portable_export_artifact_input_missing"
-	}
-	artifactDigestSets, err := portable.NamedInputArtifactDigestSets(report, "artifact")
-	if err != nil {
-		return []diag.Diagnostic{diag.FromError(err)}, "portable_export_artifact_input_invalid"
-	}
-	if len(artifactDigestSets) == 0 {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export requires at least one artifact named input.",
-			diag.WithDetail("expected_digests", expectedArtifactDigests),
-		)))
-		return diagnostics, "portable_export_artifact_input_missing"
-	}
-	plannedArtifactSet := stringSet(expectedArtifactDigests)
-	presentArtifactDigests := map[string]bool{}
-	var unplannedArtifactDigests []string
-	for _, digestSet := range artifactDigestSets {
-		if matched := markPlannedArtifactDigests(presentArtifactDigests, plannedArtifactSet, digestSet); !matched {
-			unplannedArtifactDigests = append(unplannedArtifactDigests, digestSet...)
-		}
-	}
-	missingArtifactDigests := missingPlannedArtifactDigests(expectedArtifactDigests, presentArtifactDigests)
-	if len(unplannedArtifactDigests) > 0 || len(missingArtifactDigests) > 0 {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export artifact named inputs do not match the planned reviewed artifact digests.",
-			diag.WithDetail("actual_digest_sets", artifactDigestSets),
-			diag.WithDetail("expected_digests", expectedArtifactDigests),
-			diag.WithDetail("missing_digests", missingArtifactDigests),
-			diag.WithDetail("unplanned_digests", uniqueStrings(unplannedArtifactDigests)),
-		)))
-		return diagnostics, "portable_export_artifact_input_mismatch"
-	}
-	expectedBundleDigest := firstNonEmpty(planned.IntegrationBundleDigest, plan.IntegrationBundleDigest)
-	if expectedBundleDigest == "" {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export integration bundle binding requires a planned pass bundle digest.",
-		)))
-		return diagnostics, "portable_export_bundle_identity_missing"
-	}
-	binding, err := portable.IntegrationBundleBindingFromReport(report)
-	if err != nil {
-		return []diag.Diagnostic{diag.FromError(err)}, "portable_export_bundle_identity_invalid"
-	}
-	if binding.BundleDigest != expectedBundleDigest {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export root recipe plan integration bundle digest does not match the planned pass bundle.",
-			diag.WithDetail("actual_digest", binding.BundleDigest),
-			diag.WithDetail("expected_digest", expectedBundleDigest),
-		)))
-		return diagnostics, "portable_export_bundle_identity_mismatch"
-	}
-	return nil, ""
-}
-
 func appendDigestMismatch(diagnostics *[]diag.Diagnostic, code string, message string, label string, actual string, expected string) {
 	actual = strings.TrimSpace(actual)
 	expected = strings.TrimSpace(expected)
@@ -1608,35 +1327,6 @@ func uniqueStrings(values []string) []string {
 	}
 	sort.Strings(unique)
 	return unique
-}
-
-func classifyPortableUnverifiedRelationships(batchID string, items []portable.UnverifiedRelationship) ([]ManifestUnverifiedRelationship, []ManifestUnverifiedRelationship) {
-	records := make([]ManifestUnverifiedRelationship, 0, len(items))
-	var requiredMissing []ManifestUnverifiedRelationship
-	for _, item := range items {
-		classification := "supplementary"
-		// The signed root recipe/selected-contract prompt_context contract makes
-		// trace-only facilitator-ledger projection checkable only through retained
-		// rendered_prompt artifacts. When that evidence is absent, the relationship
-		// is REQUIRED-missing; ambiguous retained strings remain supplementary and
-		// are surfaced without invalidating the batch.
-		if item.Relationship == "trace_only_facilitator_ledger_prompt_projection" &&
-			(item.Code == "rendered_prompt_ref_missing" || item.Code == "rendered_prompt_unavailable") {
-			classification = "required"
-		}
-		record := ManifestUnverifiedRelationship{
-			BatchID:        batchID,
-			Classification: classification,
-			Code:           item.Code,
-			Relationship:   item.Relationship,
-			Reason:         item.Reason,
-		}
-		records = append(records, record)
-		if classification == "required" {
-			requiredMissing = append(requiredMissing, record)
-		}
-	}
-	return records, requiredMissing
 }
 
 func prefixAssembleDiagnostics(code string, batchID string, diagnostics []diag.Diagnostic) []diag.Diagnostic {

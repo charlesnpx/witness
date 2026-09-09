@@ -20,7 +20,6 @@ import (
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/planning"
-	"github.com/charlesnpx/witness/internal/portable"
 	"github.com/charlesnpx/witness/internal/relayv2"
 )
 
@@ -32,7 +31,6 @@ const (
 	CodeRelayExportFailed = "relayrun_export_failed"
 	CodeRelayVerifyFailed = "relayrun_producer_verify_failed"
 	CodeRelayNotInstalled = "relayrun_relay_not_installed"
-	CodePortableInvalid   = "relayrun_portable_invalid"
 	CodeOutputFailed      = "relayrun_output_failed"
 	CodeInvalidBatchInput = "relayrun_invalid_batch_input"
 	// CodeNamedInputBudgetExceeded identifies relay named inputs whose raw
@@ -149,8 +147,6 @@ type RunRecord struct {
 	ProviderInvocationCount        int                                     `json:"provider_invocation_count"`
 	ProviderInvocationCountPresent bool                                    `json:"provider_invocation_count_present,omitempty"`
 	VerifiedBundle                 *bundle.Verification                    `json:"verified_bundle,omitempty"`
-	ProducerCheck                  map[string]any                          `json:"producer_check,omitempty"`
-	WitnessCheck                   *portable.Report                        `json:"witness_check,omitempty"`
 	Diagnostics                    []diag.Diagnostic                       `json:"diagnostics,omitempty"`
 }
 
