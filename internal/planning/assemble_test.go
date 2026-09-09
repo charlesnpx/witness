@@ -64,15 +64,19 @@ func TestAssembleInvalidReceiptAndMissingRelayRemainPending(t *testing.T) {
 	}
 }
 
-func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
+func TestAssembleRelayAbsentPreflightRecordsLaunchStatus(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
 	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
-	refs := relayAbsentManifestEvidenceRefs()
+	refs := validManifestEvidenceRefs()
 	planResult, err := Run(Options{
 		FrozenCharter: frozen,
 		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Preflight:     planningTestPreflightBindingForRefs(t, refs),
+		Preflight: PreflightBinding{
+			SnapshotDigest:          testDigest("artifact"),
+			RelayPresent:            false,
+			IntegrationBundleDigest: refs.IntegrationBundle.Digest,
+		},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -102,6 +106,50 @@ func TestAssembleRelayAbsentCompatibilityRecordsLaunchStatus(t *testing.T) {
 	}
 	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].Status != contracts.RecordStatusUnavailable {
 		t.Fatalf("manifest batches = %#v, want unavailable relay-absent batch", result.Manifest.Batches)
+	}
+}
+
+func TestRelayUnavailableFailureReasonRequiresStartFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		record map[string]any
+		want   string
+	}{
+		{
+			name: "provider false without start failure",
+			record: map[string]any{
+				"status":           "launch_failed",
+				"provider_invoked": "false",
+				"relay_launch":     map[string]any{"start_failed": false},
+			},
+			want: "relay_run_recorded_unavailable",
+		},
+		{
+			name: "provider unknown",
+			record: map[string]any{
+				"status":           "launch_failed",
+				"provider_invoked": "unknown",
+				"relay_launch":     map[string]any{"start_failed": true},
+			},
+			want: "relay_run_recorded_unavailable",
+		},
+		{
+			name: "explicit start failure",
+			record: map[string]any{
+				"status":           "launch_failed",
+				"provider_invoked": "false",
+				"relay_launch":     map[string]any{"start_failed": true},
+			},
+			want: "relay_launch_failed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := relayUnavailableFailureReason(RelayEvidence{RunRecords: []map[string]any{test.record}})
+			if got != test.want {
+				t.Fatalf("failure reason = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -157,6 +205,7 @@ func TestAssembleRetainsLaunchFailureAndPrefersConsumingRetry(t *testing.T) {
 					"consumes_batch":   true,
 					"status":           contracts.RecordStatusUnavailable,
 					"provider_invoked": "unknown",
+					"plan_digest":      testDigest("plan"),
 				},
 			},
 		}},
@@ -228,6 +277,7 @@ func TestAssembleRejectsRunRecordRecipeMismatchToPlannedBatch(t *testing.T) {
 				"status":           contracts.RecordStatusUnavailable,
 				"provider_invoked": "unknown",
 				"consumes_batch":   true,
+				"plan_digest":      testDigest("plan"),
 			}},
 		}},
 		EvidenceRefs: validManifestEvidenceRefs(),
@@ -292,6 +342,7 @@ func TestAssembleAllowListsRelayRunRecordMetadata(t *testing.T) {
 				"status":           contracts.RecordStatusUnavailable,
 				"provider_invoked": "unknown",
 				"consumes_batch":   true,
+				"plan_digest":      testDigest("plan"),
 				"input_bindings":   []string{"token=" + sentinel},
 				"relay_run_result": map[string]any{"provider_response": sentinel},
 				"session_dir":      sentinel,
@@ -1413,14 +1464,12 @@ func planningTestPreflightBindingForRefs(t *testing.T, refs ManifestEvidenceRefs
 	t.Helper()
 	return PreflightBinding{
 		SnapshotDigest:          testDigest("artifact"),
-		CompatibilityDigest:     refs.CompatibilityManifest.Digest,
-		RelayCapabilitiesDigest: refs.RelayCapabilities.Digest,
 		IntegrationBundleDigest: refs.IntegrationBundle.Digest,
+		RelayPresent:            true,
 	}
 }
 
 func validManifestEvidenceRefs() ManifestEvidenceRefs {
-	selectedContracts := make([]contracts.ContractDigest, 0, 2)
 	selectedContractRefs := make([]contracts.ArtifactRef, 0, 2)
 	selectedContractEvidence := make([]SelectedContractEvidence, 0, 2)
 	for index, contractID := range []string{
@@ -1441,10 +1490,6 @@ func validManifestEvidenceRefs() ManifestEvidenceRefs {
 			DigestProfile: digest.Profile,
 			MediaType:     "application/json",
 		}
-		selectedContracts = append(selectedContracts, contracts.ContractDigest{
-			ContractID: contractID,
-			Digest:     contractDigest,
-		})
 		selectedContractRefs = append(selectedContractRefs, selectedContractRef)
 		selectedContractEvidence = append(selectedContractEvidence, SelectedContractEvidence{
 			Ref:        selectedContractRef,
@@ -1452,86 +1497,12 @@ func validManifestEvidenceRefs() ManifestEvidenceRefs {
 			RawBytes:   canonjson.MustMarshal(selectedContract),
 		})
 	}
-	capabilities := map[string]bool{}
-	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
-		capabilities[requirement.Key] = true
-	}
-	recipePlans := make([]contracts.RecipePlanDigest, 0, len(contracts.RequiredWitnessRecipeContractsV2))
-	compileReports := make([]contracts.CompileReportRef, 0, len(contracts.RequiredWitnessRecipeContractsV2))
-	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
-		planDigest := testDigest("recipe:" + requirement.RecipeID)
-		reportDigest := testDigest("compile:" + requirement.RecipeID)
-		recipePlans = append(recipePlans, contracts.RecipePlanDigest{
-			RecipeID:   requirement.RecipeID,
-			ContractID: requirement.ContractID,
-			Digest:     planDigest,
-		})
-		compileReports = append(compileReports, contracts.CompileReportRef{
-			RecipeID: requirement.RecipeID,
-			Status:   "retained",
-			Ref: contracts.ArtifactRef{
-				Kind:          "compile-report",
-				ID:            requirement.RecipeID,
-				Digest:        reportDigest,
-				DigestProfile: digest.Profile,
-				MediaType:     "application/json",
-			},
-			Digest: reportDigest,
-		})
-	}
-	compatibility := contracts.RelayCompatibility{
-		SchemaVersion:           contracts.RelayCompatibilityV3,
-		ConvoRelayVersion:       "v1.4.0",
-		DigestProfile:           digest.Profile,
-		Capabilities:            capabilities,
-		CapabilitiesDigest:      testDigest("capabilities"),
-		IntegrationBundleDigest: testDigest("bundle"),
-		SelectedContracts:       selectedContracts,
-		RecipePlans:             recipePlans,
-		CompileReports:          compileReports,
-		BackendStatus: []contracts.BackendStatus{
-			{Backend: "codex", Status: "available"},
-			{Backend: "claude", Status: "available"},
-		},
-		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
-	}
-	compatibilityDigest, _ := contracts.RelayCompatibilityDigest(compatibility)
 	return ManifestEvidenceRefs{
-		CompatibilityManifest: contracts.ArtifactRef{
-			Kind:          "compatibility-manifest",
-			ID:            "compatibility",
-			Digest:        compatibilityDigest,
-			DigestProfile: digest.Profile,
-			MediaType:     "application/json",
-		},
-		RelayCompatibility:       &compatibility,
-		RelayCapabilities:        testArtifactRef("relay-capabilities", "capabilities", "capabilities"),
 		IntegrationBundle:        testArtifactRef("integration-bundle", "bundle", "bundle"),
 		SelectedContracts:        selectedContractRefs,
 		SelectedContractEvidence: selectedContractEvidence,
 		ConsumerIdentity:         map[string]any{"kind": "test", "id": "consumer"},
 	}
-}
-
-func relayAbsentManifestEvidenceRefs() ManifestEvidenceRefs {
-	refs := validManifestEvidenceRefs()
-	compatibility := *refs.RelayCompatibility
-	compatibility.ConvoRelayVersion = ""
-	for key := range compatibility.Capabilities {
-		compatibility.Capabilities[key] = false
-	}
-	compatibility.RecipePlans = nil
-	for index := range compatibility.CompileReports {
-		compatibility.CompileReports[index].Status = contracts.RelayLaunchStatusAbsent
-	}
-	compatibility.BackendStatus = []contracts.BackendStatus{
-		{Backend: "codex", Status: contracts.RelayLaunchStatusAbsent},
-		{Backend: "claude", Status: contracts.RelayLaunchStatusAbsent},
-	}
-	compatibilityDigest, _ := contracts.RelayCompatibilityDigest(compatibility)
-	refs.CompatibilityManifest.Digest = compatibilityDigest
-	refs.RelayCompatibility = &compatibility
-	return refs
 }
 
 func removePlanningRenderedPromptRef(t *testing.T, portableDir string, kind string, id string) {

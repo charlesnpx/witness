@@ -498,7 +498,7 @@ source manifest. A normal batch path is
 `$STATE/integration-bundle.body.json` is the directly bindable
 `-integration-bundle` input; `$STATE/integration-bundle.json` remains the
 authenticated retention envelope. `-state-dir` also supplies the retained
-compatibility, capability, and selected-contract evidence for assembly.
+selected-contract evidence for assembly.
 
 Every attempted launch retains a v2 run record at
 `$STATE/verification/runs/<batch-id>.json`. Its launch evidence includes the
@@ -659,11 +659,9 @@ smoke run, for example, reports:
 ```json
 {
   "charter_freeze": "charter.freeze.json",
-  "compatibility_manifest": "compatibility-manifest.json",
   "integration_bundle": "integration-bundle.body.json",
   "pass_state": "pass-state.json",
   "preflight": "preflight.json",
-  "relay_capabilities": "relay-capabilities.json",
   "source_manifest": "source-snapshot/manifest.json",
   "workspace_manifest": "source-snapshot/manifest.json"
 }
@@ -674,8 +672,8 @@ The complete run layout is:
 | Writer | State-directory-relative artifact |
 | --- | --- |
 | Pass freeze | `pass-state.json`, `charter.freeze.json`, `source-snapshot/manifest.json`, `source-snapshot/blobs/sha256/<content-digest>` |
-| Preflight | `preflight.json`, `relay-capabilities.json`, `backend-status.json`, `recipes-list.json`, `integration-bundle.json` (authenticated envelope), `integration-bundle.body.json` (directly bindable authored bundle), `contract-digests.json`, `compatibility-manifest.json` |
-| Preflight compilation | `compile-reports/witness-falsify-v2.json`, `compile-reports/witness-falsify-v2-codex.json`, `compile-reports/witness-falsify-v2-claude.json`, `compile-reports/economy-equivalence-v2.json`, `compile-reports/economy-equivalence-v2-codex.json`, `compile-reports/economy-equivalence-v2-claude.json`; a relay that emits plans also retains `recipe-plans/<recipe-id>.json` |
+| Preflight | `preflight.json`, `integration-bundle.json` (authenticated envelope), `integration-bundle.body.json` (directly bindable authored bundle), `contract-digests.json` |
+| Preflight recipe validation | Known Witness v2 recipes are compiled and validated locally; no Relay capability, catalog, backend, or recipe projection is retained |
 | Finders | `role-outputs/defect-output.json`, `role-outputs/economy-output.json` |
 | Plan and assembly | `verification-plan.json`, `verification/index.skeleton.json`, `verification/index.json`, and, when applicable, `verification/assemble-result.json` |
 | Adjudication | `verdict.json` (the ledger is `$RUN/ledger.jsonl`) |

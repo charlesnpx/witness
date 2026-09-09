@@ -19,22 +19,20 @@ const (
 )
 
 type VerificationManifest struct {
-	SchemaVersion         string                           `json:"schema_version"`
-	PlanDigest            string                           `json:"plan_digest"`
-	CharterHash           string                           `json:"charter_hash"`
-	ArtifactDigest        string                           `json:"artifact_digest"`
-	ScopePolicy           string                           `json:"scope_policy,omitempty"`
-	ChangeSurface         *changesurface.Document          `json:"change_surface,omitempty"`
-	ChangeSurfaceDigest   string                           `json:"change_surface_digest,omitempty"`
-	BaselinePass          *changesurface.BaselinePass      `json:"baseline_pass,omitempty"`
-	CompatibilityManifest ArtifactRef                      `json:"compatibility_manifest"`
-	RelayCapabilities     ArtifactRef                      `json:"relay_capabilities"`
-	IntegrationBundle     ArtifactRef                      `json:"integration_bundle"`
-	SelectedContracts     []ArtifactRef                    `json:"selected_contracts"`
-	Batches               []VerificationManifestBatch      `json:"batches"`
-	ExcludedFindings      []ExcludedFindingRecord          `json:"excluded_findings,omitempty"`
-	ExecutionReceipts     []ExecutionReceiptManifestRecord `json:"execution_receipts,omitempty"`
-	ConsumerIdentity      map[string]any                   `json:"consumer_identity"`
+	SchemaVersion       string                           `json:"schema_version"`
+	PlanDigest          string                           `json:"plan_digest"`
+	CharterHash         string                           `json:"charter_hash"`
+	ArtifactDigest      string                           `json:"artifact_digest"`
+	ScopePolicy         string                           `json:"scope_policy,omitempty"`
+	ChangeSurface       *changesurface.Document          `json:"change_surface,omitempty"`
+	ChangeSurfaceDigest string                           `json:"change_surface_digest,omitempty"`
+	BaselinePass        *changesurface.BaselinePass      `json:"baseline_pass,omitempty"`
+	IntegrationBundle   ArtifactRef                      `json:"integration_bundle"`
+	SelectedContracts   []ArtifactRef                    `json:"selected_contracts"`
+	Batches             []VerificationManifestBatch      `json:"batches"`
+	ExcludedFindings    []ExcludedFindingRecord          `json:"excluded_findings,omitempty"`
+	ExecutionReceipts   []ExecutionReceiptManifestRecord `json:"execution_receipts,omitempty"`
+	ConsumerIdentity    map[string]any                   `json:"consumer_identity"`
 }
 
 type VerificationManifestBatch struct {
@@ -175,8 +173,6 @@ func ValidateVerificationManifest(document VerificationManifest) []diag.Diagnost
 	review.RequireDigest(&diagnostics, "/charter_hash", "charter_hash", document.CharterHash)
 	review.RequireDigest(&diagnostics, "/artifact_digest", "artifact_digest", document.ArtifactDigest)
 	diagnostics = append(diagnostics, validateManifestChangeSurface(document)...)
-	diagnostics = append(diagnostics, review.PrefixDiagnostics("/compatibility_manifest", validateArtifactRef(document.CompatibilityManifest, ""))...)
-	diagnostics = append(diagnostics, review.PrefixDiagnostics("/relay_capabilities", validateArtifactRef(document.RelayCapabilities, ""))...)
 	diagnostics = append(diagnostics, review.PrefixDiagnostics("/integration_bundle", validateArtifactRef(document.IntegrationBundle, ""))...)
 	for index, ref := range document.SelectedContracts {
 		diagnostics = append(diagnostics, review.PrefixDiagnostics("/selected_contracts/"+itoa(index), validateArtifactRef(ref, ""))...)

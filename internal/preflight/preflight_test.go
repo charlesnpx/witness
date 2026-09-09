@@ -20,50 +20,6 @@ import (
 	"github.com/charlesnpx/witness/internal/relayv2"
 )
 
-func TestDecodeCompileReportContractDigestsRejectsEmptyDigest(t *testing.T) {
-	reportID := RequiredRecipes[0].ID
-	contractID := RequiredRecipes[0].ContractID
-	_, err := DecodeCompileReportContractDigests(reportID, map[string]any{contractID: " "})
-	if err == nil {
-		t.Fatal("shared compile-report digest decoder accepted a blank digest")
-	}
-	diagnostic := diag.FromError(err)
-	if diagnostic.Code != CodeContractDigestMalformed {
-		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeContractDigestMalformed)
-	}
-	if diagnostic.Details["report_id"] != reportID || diagnostic.Details["contract_id"] != contractID || diagnostic.Details["value_type"] != "string" {
-		t.Fatalf("diagnostic details = %#v", diagnostic.Details)
-	}
-}
-
-func TestDecodeCompileReportContractDigestsRejectsMalformedDigestSyntax(t *testing.T) {
-	reportID := RequiredRecipes[0].ID
-	contractID := RequiredRecipes[0].ContractID
-	_, err := DecodeCompileReportContractDigests(reportID, map[string]any{contractID: "not-a-digest"})
-	if err == nil {
-		t.Fatal("shared compile-report digest decoder accepted a syntactically invalid digest")
-	}
-	diagnostic := diag.FromError(err)
-	if diagnostic.Code != CodeContractDigestMalformed {
-		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeContractDigestMalformed)
-	}
-	if diagnostic.Details["contract_id"] != contractID || diagnostic.Details["value"] != "not-a-digest" {
-		t.Fatalf("diagnostic details = %#v", diagnostic.Details)
-	}
-}
-
-func TestResolveRelayReportedContractDigestsRejectsMalformedPlanDigest(t *testing.T) {
-	contractID := RequiredRecipes[0].ContractID
-	_, err := ResolveRelayReportedContractDigests(map[string]string{}, contractID, "not-a-digest")
-	if err == nil {
-		t.Fatal("resolver accepted a syntactically invalid plan digest")
-	}
-	diagnostic := diag.FromError(err)
-	if diagnostic.Code != CodeContractDigestMalformed {
-		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeContractDigestMalformed)
-	}
-}
-
 func TestSelectedContractPreflightAuthenticationMatchesAssemblyDiagnostic(t *testing.T) {
 	contractID := "witnessed-review/economy-equivalence-v2"
 	_, contractBody := requiredContractForTest(t)
@@ -113,8 +69,8 @@ func TestSelectedContractPreflightAuthenticationMatchesAssemblyDiagnostic(t *tes
 	if got := preflightDiagnostics[0].Details["witness_digest"]; got != witnessDigest {
 		t.Fatalf("witness_digest = %v, want %s", got, witnessDigest)
 	}
-	if got := preflightDiagnostics[0].Details["relay_reported_digest"]; got != relayDigest {
-		t.Fatalf("relay_reported_digest = %v, want %s", got, relayDigest)
+	if got := preflightDiagnostics[0].Details["ref_digest"]; got != relayDigest {
+		t.Fatalf("ref_digest = %v, want %s", got, relayDigest)
 	}
 }
 
@@ -334,58 +290,6 @@ func TestValidateRequiredContractStructureRejectsFractionalMaxBytes(t *testing.T
 	requireContractMismatchAtPath(t, diagnostics, "/contracts/witnessed-review~1economy-equivalence-v2/inputs/artifact/max_bytes")
 }
 
-func TestRunRecordsAuthUnknownStrata(t *testing.T) {
-	stateDir := t.TempDir()
-	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
-	result, err := Run(context.Background(), Options{
-		RelayPath:             presentRelayPath(t),
-		IntegrationBundlePath: bundlePath,
-		StateDir:              stateDir,
-	})
-	if err != nil {
-		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
-	}
-	if result.BackendStrata["codex"] != "installed_auth_unknown" || result.BackendStrata["claude"] != "installed_auth_unknown" {
-		t.Fatalf("backend strata = %#v", result.BackendStrata)
-	}
-	for _, requirement := range RequiredRecipes {
-		if result.CompileReportDigests[requirement.ID] == "" {
-			t.Fatalf("missing compile report digest for %s", requirement.ID)
-		}
-		if result.RecipePlanDigests[requirement.ID] == "" {
-			t.Fatalf("missing recipe plan digest for %s", requirement.ID)
-		}
-		if result.ContractDigests[requirement.ContractID] == "" {
-			t.Fatalf("missing contract digest for %s", requirement.ContractID)
-		}
-	}
-	for _, path := range []string{
-		"relay-capabilities.json",
-		"backend-status.json",
-		filepath.ToSlash(filepath.Join("compile-reports", "witness-falsify-v2.json")),
-		"compatibility-manifest.json",
-	} {
-		if _, err := os.Stat(filepath.Join(stateDir, filepath.FromSlash(path))); err != nil {
-			t.Fatalf("retained artifact %s: %v", path, err)
-		}
-	}
-	compatibilityBytes, compatibilityPayloadDigest := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "compatibility-manifest.json"))
-	compatibility, err := contracts.ReadRelayCompatibilityBytes(compatibilityBytes)
-	if err != nil {
-		t.Fatalf("compatibility round-trip decode: %v", err)
-	}
-	if diagnostics := contracts.ValidateRelayCompatibility(compatibility); len(diagnostics) != 0 {
-		t.Fatalf("compatibility diagnostics = %#v", diagnostics)
-	}
-	compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if compatibilityPayloadDigest != compatibilityDigest || result.ArtifactDigests["compatibility-manifest.json"] != compatibilityDigest {
-		t.Fatalf("compatibility digest payload=%s result=%s recomputed=%s", compatibilityPayloadDigest, result.ArtifactDigests["compatibility-manifest.json"], compatibilityDigest)
-	}
-}
-
 func TestRunReportsRetainedArtifactPaths(t *testing.T) {
 	root := t.TempDir()
 	sourceDir := filepath.Join(root, "source")
@@ -408,11 +312,9 @@ func TestRunReportsRetainedArtifactPaths(t *testing.T) {
 		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
 	}
 	want := map[string]string{
-		"compatibility_manifest": "compatibility-manifest.json",
-		"relay_capabilities":     "relay-capabilities.json",
-		"integration_bundle":     RetainedIntegrationBundleBodyFile,
-		"source_manifest":        "source-snapshot/manifest.json",
-		"workspace_manifest":     "source-snapshot/manifest.json",
+		"integration_bundle": RetainedIntegrationBundleBodyFile,
+		"source_manifest":    "source-snapshot/manifest.json",
+		"workspace_manifest": "source-snapshot/manifest.json",
 	}
 	for role, relativePath := range want {
 		if got := result.RetainedArtifacts[role]; got != relativePath {
@@ -458,38 +360,6 @@ func TestRetainedIntegrationBundleBodyAuthenticatesPlannedBinding(t *testing.T) 
 	}
 	if result.RetainedArtifacts["integration_bundle"] != RetainedIntegrationBundleBodyFile {
 		t.Fatalf("retained integration bundle = %q, want %q", result.RetainedArtifacts["integration_bundle"], RetainedIntegrationBundleBodyFile)
-	}
-}
-
-func TestRunRelayPresentRetainsLocalCompatibilityProjection(t *testing.T) {
-	stateDir := t.TempDir()
-	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
-	result, err := Run(context.Background(), Options{
-		RelayPath:             presentRelayPath(t),
-		IntegrationBundlePath: bundlePath,
-		StateDir:              stateDir,
-	})
-	if err != nil {
-		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
-	}
-	if RelayAbsent(*result) {
-		t.Fatalf("backend strata = %#v, unexpectedly relay_absent", result.BackendStrata)
-	}
-	retainedCapabilities, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "relay-capabilities.json"))
-	capabilities, err := strictjson.DecodeBytes[map[string]any](retainedCapabilities, strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if capabilities["source"] != nil || capabilities["schema_version"] != "witness-relay-v2-compatibility-projection-v1" {
-		t.Fatalf("retained local Relay projection = %#v", capabilities)
-	}
-	compatibilityBytes, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "compatibility-manifest.json"))
-	compatibility, err := contracts.ReadRelayCompatibilityBytes(compatibilityBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if contracts.RelayCompatibilityRelayAbsent(compatibility) {
-		t.Fatalf("compatibility backend status = %#v, unexpectedly relay_absent", compatibility.BackendStatus)
 	}
 }
 

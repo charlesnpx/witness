@@ -31,7 +31,6 @@ const (
 	CodeInvalidRelay                    = "assemble_invalid_relay_verification"
 	CodeInvalidReceipt                  = "assemble_invalid_execution_receipt"
 	CodeInvalidManifest                 = "assemble_invalid_manifest"
-	CodeInvalidCompatibility            = "assemble_invalid_relay_compatibility"
 	CodeInvalidPlanDigest               = "assemble_invalid_plan_digest"
 	CodeInvalidRelayRunRecord           = "assemble_invalid_relay_run_record"
 	CodeUnsupportedAssembleResultSchema = "assemble_unsupported_result_schema"
@@ -70,9 +69,6 @@ type RelayEvidence struct {
 }
 
 type ManifestEvidenceRefs struct {
-	CompatibilityManifest    contracts.ArtifactRef
-	RelayCompatibility       *contracts.RelayCompatibility
-	RelayCapabilities        contracts.ArtifactRef
 	IntegrationBundle        contracts.ArtifactRef
 	SelectedContracts        []contracts.ArtifactRef
 	SelectedContractEvidence []SelectedContractEvidence
@@ -131,26 +127,24 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	result := &AssembleResult{SchemaVersion: AssembleResultSchemaVersion}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV6,
-		PlanDigest:            options.Plan.PlanDigest,
-		CharterHash:           options.Plan.CharterHash,
-		ArtifactDigest:        options.Plan.ArtifactDigest,
-		ScopePolicy:           options.Plan.ScopePolicy,
-		ChangeSurface:         options.Plan.ChangeSurface,
-		ChangeSurfaceDigest:   options.Plan.ChangeSurfaceDigest,
-		BaselinePass:          options.Plan.BaselinePass,
-		CompatibilityManifest: options.EvidenceRefs.CompatibilityManifest,
-		RelayCapabilities:     options.EvidenceRefs.RelayCapabilities,
-		IntegrationBundle:     options.EvidenceRefs.IntegrationBundle,
-		SelectedContracts:     append(make([]contracts.ArtifactRef, 0, len(options.EvidenceRefs.SelectedContracts)), options.EvidenceRefs.SelectedContracts...),
-		Batches:               make([]contracts.VerificationManifestBatch, 0, len(options.Plan.Batches)),
-		ExcludedFindings:      manifestExcludedFindings(options.Plan.ExcludedFindings),
-		ConsumerIdentity:      sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
+		SchemaVersion:       contracts.VerificationManifestV6,
+		PlanDigest:          options.Plan.PlanDigest,
+		CharterHash:         options.Plan.CharterHash,
+		ArtifactDigest:      options.Plan.ArtifactDigest,
+		ScopePolicy:         options.Plan.ScopePolicy,
+		ChangeSurface:       options.Plan.ChangeSurface,
+		ChangeSurfaceDigest: options.Plan.ChangeSurfaceDigest,
+		BaselinePass:        options.Plan.BaselinePass,
+		IntegrationBundle:   options.EvidenceRefs.IntegrationBundle,
+		SelectedContracts:   append(make([]contracts.ArtifactRef, 0, len(options.EvidenceRefs.SelectedContracts)), options.EvidenceRefs.SelectedContracts...),
+		Batches:             make([]contracts.VerificationManifestBatch, 0, len(options.Plan.Batches)),
+		ExcludedFindings:    manifestExcludedFindings(options.Plan.ExcludedFindings),
+		ConsumerIdentity:    sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
 	}
 	if len(manifest.ConsumerIdentity) == 0 {
 		manifest.ConsumerIdentity = sanitizedManifestConsumerIdentity(options.Plan.ConsumerIdentity)
 	}
-	relayLaunchStatus := relayLaunchStatusForCompatibility(options.EvidenceRefs.RelayCompatibility)
+	relayLaunchStatus := relayLaunchStatusForPreflight(options.Plan.PreflightRelayPresent)
 	attachRelayLaunchStatus(&manifest, relayLaunchStatus)
 	diagnostics = append(diagnostics, validateRelayEvidencePlanMembership(options.Plan, options.RelayResults)...)
 	if refDiagnostics := validateManifestEvidenceRefs(options.Plan, options.EvidenceRefs); len(refDiagnostics) > 0 {
@@ -517,6 +511,19 @@ func assembleRelayV2Evidence(relay RelayEvidence, planned BatchPlan, verificatio
 	if value.RecipeID != planned.RecipeFamily {
 		return relayV2Assembly{}, fmt.Errorf("plan.recipe_id %q does not match planned recipe_family %q", value.RecipeID, planned.RecipeFamily)
 	}
+	actualPlanDigest, err := relayplan.Digest(value)
+	if err != nil {
+		return relayV2Assembly{}, fmt.Errorf("compute verified Relay v2 plan digest: %w", err)
+	}
+	if consuming := consumingRelayRunRecord(relay.RunRecords); consuming != nil {
+		recordedPlanDigest, _ := consuming["plan_digest"].(string)
+		if !digest.WellFormed(strings.TrimSpace(recordedPlanDigest)) {
+			return relayV2Assembly{}, fmt.Errorf("consuming relay run record is missing a well-formed plan_digest")
+		}
+		if strings.TrimSpace(recordedPlanDigest) != actualPlanDigest {
+			return relayV2Assembly{}, fmt.Errorf("relay run record plan_digest %q does not match verified Relay v2 plan digest %q", recordedPlanDigest, actualPlanDigest)
+		}
+	}
 	if err := validateRelayV2PlanInputs(verified, relay.PortableExportDir, value, verificationPlan, planned); err != nil {
 		return relayV2Assembly{}, err
 	}
@@ -712,7 +719,9 @@ func relayUnavailableFailureReason(relay RelayEvidence) string {
 	for _, record := range relay.RunRecords {
 		status, _ := record["status"].(string)
 		providerInvoked, _ := record["provider_invoked"].(string)
-		if status == "launch_failed" && providerInvoked == "false" {
+		launch, _ := record["relay_launch"].(map[string]any)
+		startFailed, _ := launch["start_failed"].(bool)
+		if status == "launch_failed" && providerInvoked == "false" && startFailed {
 			return "relay_launch_failed"
 		}
 	}
@@ -788,6 +797,14 @@ func validateRelayRunRecordEvidence(planned BatchPlan, relay RelayEvidence) []di
 		}
 		if consumesBatch {
 			consumingRecordIndexes = append(consumingRecordIndexes, index)
+			planDigest, _ := record["plan_digest"].(string)
+			if !digest.WellFormed(strings.TrimSpace(planDigest)) {
+				diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+					planned.BatchID,
+					index,
+					"consuming relay run record plan_digest must be a well-formed digest.",
+				))
+			}
 			continue
 		}
 		if !relayRunRecordIsStartFailure(record) {
@@ -850,6 +867,7 @@ func SanitizeRelayRunRecordMetadata(record map[string]any) map[string]any {
 		"schema_version",
 		"batch_id",
 		"recipe_id",
+		"plan_digest",
 		"status",
 		"provider_invoked",
 	} {
@@ -1029,14 +1047,11 @@ func relayLaunchInteger(value any, nonNegative bool) (int, bool) {
 	return converted, true
 }
 
-func relayLaunchStatusForCompatibility(compatibility *contracts.RelayCompatibility) string {
-	if compatibility == nil {
-		return ""
+func relayLaunchStatusForPreflight(relayPresent bool) string {
+	if relayPresent {
+		return contracts.RelayLaunchStatusPresent
 	}
-	if contracts.RelayCompatibilityRelayAbsent(*compatibility) {
-		return contracts.RelayLaunchStatusAbsent
-	}
-	return contracts.RelayLaunchStatusPresent
+	return contracts.RelayLaunchStatusAbsent
 }
 
 func sanitizedManifestConsumerIdentity(input map[string]any) map[string]any {
@@ -1338,8 +1353,6 @@ func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) 
 		value string
 	}{
 		{label: "preflight_snapshot", value: plan.PreflightSnapshotDigest},
-		{label: "preflight_compatibility", value: plan.PreflightCompatibilityDigest},
-		{label: "preflight_relay_capabilities", value: plan.PreflightRelayCapabilitiesDigest},
 		{label: "integration_bundle", value: plan.IntegrationBundleDigest},
 	} {
 		if strings.TrimSpace(item.value) == "" {
@@ -1354,8 +1367,6 @@ func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) 
 		label string
 		ref   contracts.ArtifactRef
 	}{
-		{label: "compatibility_manifest", ref: refs.CompatibilityManifest},
-		{label: "relay_capabilities", ref: refs.RelayCapabilities},
 		{label: "integration_bundle", ref: refs.IntegrationBundle},
 	} {
 		if item.ref.Digest == "" {
@@ -1384,44 +1395,7 @@ func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) 
 	} else {
 		diagnostics = append(diagnostics, selectedContractManifestDiagnostics(refs.SelectedContracts, refs.SelectedContractEvidence)...)
 	}
-	if refs.RelayCompatibility == nil {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidCompatibility,
-			"assemble requires a strictly decoded relay compatibility manifest.",
-			diag.WithDetail("ref", "compatibility_manifest"),
-		)))
-		return diagnostics
-	}
-	compatibility := *refs.RelayCompatibility
-	if compatibilityDiagnostics := contracts.ValidateRelayCompatibility(compatibility); len(compatibilityDiagnostics) > 0 {
-		diagnostics = append(diagnostics, prefixAssembleDiagnostics(CodeInvalidCompatibility, "", compatibilityDiagnostics)...)
-	}
-	compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
-	if err != nil {
-		diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidCompatibility, "relay compatibility manifest digest could not be recomputed.")))
-	} else {
-		appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "compatibility manifest ref does not match retained compatibility content.", "compatibility_manifest", refs.CompatibilityManifest.Digest, compatibilityDigest)
-		appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "verification plan compatibility digest does not match retained compatibility content.", "preflight_compatibility", plan.PreflightCompatibilityDigest, compatibilityDigest)
-	}
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "relay capabilities ref does not match retained compatibility state.", "relay_capabilities", refs.RelayCapabilities.Digest, compatibility.CapabilitiesDigest)
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "verification plan relay capabilities digest does not match retained compatibility state.", "preflight_relay_capabilities", plan.PreflightRelayCapabilitiesDigest, compatibility.CapabilitiesDigest)
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "integration bundle ref does not match retained compatibility state.", "integration_bundle", refs.IntegrationBundle.Digest, compatibility.IntegrationBundleDigest)
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "verification plan integration bundle digest does not match retained compatibility state.", "integration_bundle", plan.IntegrationBundleDigest, compatibility.IntegrationBundleDigest)
-	if consumesRelayContracts {
-		for _, contract := range compatibility.SelectedContracts {
-			if strings.TrimSpace(contract.Digest) == "" {
-				continue
-			}
-			if !selectedContractDigestClaimed(refs.SelectedContracts, contract.Digest) {
-				diagnostics = append(diagnostics, diag.FromError(diag.New(
-					CodeInvalidCompatibility,
-					"selected-contract ref does not match retained compatibility state.",
-					diag.WithDetail("contract_id", contract.ContractID),
-					diag.WithDetail("contract_digest", contract.Digest),
-				)))
-			}
-		}
-	}
+	appendDigestMismatch(&diagnostics, CodeInvalidManifest, "integration bundle ref does not match the verification plan.", "integration_bundle", refs.IntegrationBundle.Digest, plan.IntegrationBundleDigest)
 	return diagnostics
 }
 

@@ -256,8 +256,6 @@ func runFakeProviderPass(t *testing.T, bins binaries, backend string, failRelay 
 		"-integration-bundle", bundlePath,
 		"-charter-freeze", frozenPath,
 		"-artifact", filepath.Join(snapshotDir, "manifest.json"),
-		"-compatibility-manifest", filepath.Join(passDir, "compatibility-manifest.json"),
-		"-relay-capabilities", filepath.Join(passDir, "relay-capabilities.json"),
 		"-selected-contract", bundlePath,
 		"-receipt", harnessResult.ReceiptPath,
 		"-receipt-output-dir", receiptDir,

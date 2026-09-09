@@ -17,7 +17,6 @@ const (
 	VerificationManifestV5         = "review-verification-manifest-v5"
 	VerificationManifestV6         = "review-verification-manifest-v6"
 	ExecutionReceiptV2             = "review-execution-receipt-v2"
-	RelayCompatibilityV3           = "review-relay-compatibility-v3"
 	DecisionRulesVersion           = "witness-decision-rules-v1"
 	BatchTaskDefect                = "defect"
 	BatchTaskEconomy               = "economy"
@@ -54,7 +53,6 @@ const (
 	CodeInvalidRelayVerdicts     = "invalid_relay_witness_verdicts"
 	CodeInvalidManifest          = "invalid_verification_manifest"
 	CodeInvalidReceipt           = "invalid_execution_receipt"
-	CodeInvalidCompatibility     = "invalid_relay_compatibility"
 	CodeCoverageMismatch         = "coverage_mismatch"
 	CodeForbiddenExecutionField  = "forbidden_execution_field"
 )

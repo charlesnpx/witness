@@ -603,243 +603,7 @@ func TestResumeRejectsFabricatedCompleteState(t *testing.T) {
 	t.Fatalf("diagnostics = %#v, want %s", validation.Diagnostics, CodeStateInvalid)
 }
 
-func TestResumeRejectsPreflightWaitStateBackendStrataTampering(t *testing.T) {
-	options := newBeginOptions(t)
-	if _, err := Begin(context.Background(), options); err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	state := readPassStateForTest(t, options.StateDir)
-	result := writeReadyPreflightForTest(t, state.Config)
-	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
-		{role: "integration-bundle", path: state.Config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
-		{role: "source-snapshot-manifest", path: state.Config.SnapshotManifestPath, digestClass: digestClassFreezeManifest},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	outputs, err := artifactRecordsForExistingFiles(preflightOutputSpecs(state.Config, &result))
-	if err != nil {
-		t.Fatal(err)
-	}
-	markStageComplete(state, StageRecord{
-		Name:    stagePreflight,
-		Status:  statusComplete,
-		Inputs:  inputs,
-		Outputs: outputs,
-		Details: map[string]any{
-			"relay_absent":   false,
-			"backend_strata": cloneStringMap(result.BackendStrata),
-		},
-	})
-	if err := setNextAction(state); err != nil {
-		t.Fatal(err)
-	}
-	if state.NextAction.Type != actionCallerRoleOutputs {
-		t.Fatalf("next action = %s, want role-output wait state", state.NextAction.Type)
-	}
-
-	result.BackendStrata = map[string]string{
-		"claude": contracts.RelayLaunchStatusAbsent,
-		"codex":  contracts.RelayLaunchStatusAbsent,
-	}
-	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, result)
-	refreshArtifactDigestForTest(t, state, "preflight", state.Config.Outputs.PreflightPath)
-	setStageDetailForTest(state, stagePreflight, "relay_absent", true)
-	setStageDetailForTest(state, stagePreflight, "backend_strata", cloneStringMap(result.BackendStrata))
-	state.NextAction.Degraded = true
-	state.NextAction.BackendStrata = cloneStringMap(result.BackendStrata)
-	if err := writeState(state); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = Resume(context.Background(), ResumeOptions{StateDir: options.StateDir})
-	if err == nil {
-		t.Fatal("resume accepted tampered preflight backend strata in the role-output wait state")
-	}
-	assertValidationCode(t, err, CodeStateInvalid)
-}
-
-func TestValidatePreflightContractDigestDocumentReadsV1AsRelayLineage(t *testing.T) {
-	contractID := contracts.RequiredWitnessRecipeContractsV2[0].ContractID
-	witnessDigest := digest.RawBytes([]byte("witness-body:" + contractID))
-	relayDigest := digest.RawBytes([]byte("relay-lineage:" + contractID))
-	integrationBundleDigest := digest.RawBytes([]byte("integration-bundle"))
-	retained := map[string]any{
-		"schema_version": preflight.ContractDigestDocumentV1,
-		"digest_profile": digest.Profile,
-		"contract_digests": map[string]any{
-			contractID:           relayDigest,
-			"integration_bundle": integrationBundleDigest,
-		},
-	}
-	result := preflight.Result{
-		ContractDigests: map[string]string{
-			contractID:           witnessDigest,
-			"integration_bundle": integrationBundleDigest,
-		},
-		RelayReportedDigests: map[string]string{contractID: relayDigest},
-	}
-
-	if err := validatePreflightContractDigestDocument(retained, result); err != nil {
-		t.Fatalf("v1 document was compared to witness body digests: %v", err)
-	}
-}
-
-func TestValidatePreflightContractDigestDocumentAllowsV1LegacyNonRequiredExtra(t *testing.T) {
-	contractID := contracts.RequiredWitnessRecipeContractsV2[0].ContractID
-	relayDigest := digest.RawBytes([]byte("relay-lineage:" + contractID))
-	integrationBundleDigest := digest.RawBytes([]byte("integration-bundle"))
-	extraContractID := "example/non-required-contract"
-	extraDigest := digest.RawBytes([]byte("relay-lineage:" + extraContractID))
-	retained := map[string]any{
-		"schema_version": preflight.ContractDigestDocumentV1,
-		"digest_profile": digest.Profile,
-		"contract_digests": map[string]any{
-			contractID:           relayDigest,
-			"integration_bundle": integrationBundleDigest,
-			extraContractID:      extraDigest,
-		},
-	}
-	result := preflight.Result{
-		ContractDigests: map[string]string{
-			"integration_bundle": integrationBundleDigest,
-		},
-		RelayReportedDigests: map[string]string{contractID: relayDigest},
-	}
-
-	if err := validatePreflightContractDigestDocument(retained, result); err != nil {
-		t.Fatalf("v1 persisted contract-digests rejected a non-required legacy extra: %v", err)
-	}
-}
-
-func TestValidatePreflightCompileReportRejectsDisagreeingRelayLineage(t *testing.T) {
-	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
-	reportedDigest := digest.RawBytes([]byte("relay-reported:" + requirement.ContractID))
-	planDigest := digest.RawBytes([]byte("recipe-plan:" + requirement.ContractID))
-	payload := map[string]any{
-		"recipe_id":            requirement.RecipeID,
-		"status":               "usable",
-		"integration_contract": requirement.ContractID,
-		"contract_digests": map[string]any{
-			requirement.ContractID: reportedDigest,
-		},
-		"compiled_plan": map[string]any{
-			"recipe_id":                    requirement.RecipeID,
-			"integration_contract_id":      requirement.ContractID,
-			"integration_contract_digest":  planDigest,
-			"deterministic_test_fixture":   true,
-			"required_input_binding_count": 4,
-		},
-	}
-
-	_, _, err := validatePreflightCompileReport(payload, requirement, false)
-	if err == nil {
-		t.Fatal("validation accepted disagreeing relay lineage")
-	}
-	_, expectedErr := preflight.ResolveRelayReportedContractDigests(
-		map[string]string{requirement.ContractID: reportedDigest},
-		requirement.ContractID,
-		planDigest,
-	)
-	if expectedErr == nil {
-		t.Fatal("shared relay-lineage resolver accepted mismatched digests")
-	}
-	if actual, expected := diag.FromError(err), diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("validation diagnostic = %#v, want %#v", actual, expected)
-	}
-}
-
-func TestValidatePreflightCompileReportRejectsMalformedDigestLikeGeneration(t *testing.T) {
-	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
-	rawDigests := map[string]any{requirement.ContractID: true}
-	payload := map[string]any{
-		"recipe_id":            requirement.RecipeID,
-		"status":               "usable",
-		"integration_contract": requirement.ContractID,
-		"contract_digests":     rawDigests,
-		"compiled_plan": map[string]any{
-			"recipe_id":                    requirement.RecipeID,
-			"integration_contract_id":      requirement.ContractID,
-			"integration_contract_digest":  digest.RawBytes([]byte("relay-projection:" + requirement.ContractID)),
-			"deterministic_test_fixture":   true,
-			"required_input_binding_count": 4,
-		},
-	}
-
-	_, _, err := validatePreflightCompileReport(payload, requirement, false)
-	if err == nil {
-		t.Fatal("validation accepted a boolean compile-report digest")
-	}
-	_, expectedErr := preflight.DecodeCompileReportContractDigests(requirement.RecipeID, rawDigests)
-	if expectedErr == nil {
-		t.Fatal("shared compile-report digest decoder accepted a boolean digest")
-	}
-	if actual, expected := diag.FromError(err), diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("validation diagnostic = %#v, want generation diagnostic %#v", actual, expected)
-	}
-}
-
-func TestValidatePreflightOutputProjectsExtraCompileReportDigest(t *testing.T) {
-	options := newBeginOptions(t)
-	if _, err := Begin(context.Background(), options); err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	state := readPassStateForTest(t, options.StateDir)
-	generated := writeReadyPreflightForTest(t, state.Config)
-	generated.SnapshotDigest = generated.ArtifactDigests["source-snapshot-manifest"]
-	requirement := contracts.RequiredWitnessRecipeContractsV2[0]
-	selectedDigest := generated.RelayReportedDigests[requirement.ContractID]
-	if selectedDigest == "" {
-		t.Fatalf("generated relay digest for %s is empty", requirement.ContractID)
-	}
-
-	extraContractID := "example/non-required-contract"
-	reportRelativePath := filepath.ToSlash(filepath.Join("compile-reports", requirement.RecipeID+".json"))
-	report := map[string]any{
-		"recipe_id":            requirement.RecipeID,
-		"status":               "usable",
-		"integration_contract": requirement.ContractID,
-		"contract_digests": map[string]any{
-			requirement.ContractID: selectedDigest,
-			extraContractID:        digest.RawBytes([]byte("relay-projection:" + extraContractID)),
-		},
-		"compiled_plan": map[string]any{
-			"schema_version":               "test-root-recipe-plan-v1",
-			"recipe_id":                    requirement.RecipeID,
-			"integration_contract_id":      requirement.ContractID,
-			"integration_contract_digest":  selectedDigest,
-			"deterministic_test_fixture":   true,
-			"required_input_binding_count": 4,
-		},
-	}
-	reportDigest := retainPreflightPayloadForTest(t, state.Config.StateDir, reportRelativePath, report)
-	generated.ArtifactDigests[reportRelativePath] = reportDigest
-	generated.CompileReportDigests[requirement.RecipeID] = reportDigest
-	if _, found := generated.RelayReportedDigests[extraContractID]; found {
-		t.Fatalf("generated relay lineage retained non-required contract %s", extraContractID)
-	}
-
-	generatedDocument := preflight.ContractDigestDocument(generated)
-	generated.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, state.Config.StateDir, "contract-digests.json", generatedDocument)
-	generated.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, state.Config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(generated))
-	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, generated)
-
-	if err := validatePreflightOutput(state.Config, generated); err != nil {
-		t.Fatalf("revalidation rejected projected compile-report lineage: %v", err)
-	}
-	reconstructed, err := expectedPreflightResult(state.Config)
-	if err != nil {
-		t.Fatalf("reconstruct preflight result: %v", err)
-	}
-	if actual := preflight.ContractDigestDocument(reconstructed); !reflect.DeepEqual(actual, generatedDocument) {
-		t.Fatalf("reconstructed contract-digests document = %#v, want %#v", actual, generatedDocument)
-	}
-	if _, found := reconstructed.RelayReportedDigests[extraContractID]; found {
-		t.Fatalf("reconstructed relay lineage retained non-required contract %s: %#v", extraContractID, reconstructed.RelayReportedDigests)
-	}
-}
-
-func TestResumeAcceptsLegacyPreflightResultWithoutRetainedArtifacts(t *testing.T) {
+func TestResumeAcceptsPreflightResultWithoutRetainedArtifacts(t *testing.T) {
 	options := newBeginOptions(t)
 	if _, err := Begin(context.Background(), options); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -856,12 +620,12 @@ func TestResumeAcceptsLegacyPreflightResultWithoutRetainedArtifacts(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyResult, ok := document.(map[string]any)
+	resultWithoutInventory, ok := document.(map[string]any)
 	if !ok {
 		t.Fatalf("preflight document type = %T, want object", document)
 	}
-	delete(legacyResult, "retained_artifacts")
-	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, legacyResult)
+	delete(resultWithoutInventory, "retained_artifacts")
+	writeCanonicalForTest(t, state.Config.Outputs.PreflightPath, resultWithoutInventory)
 
 	inputs, err := artifactRecordsForExistingFiles([]artifactInput{
 		{role: "integration-bundle", path: state.Config.IntegrationBundlePath, digestClass: digest.ClassRawBytes},
@@ -880,8 +644,7 @@ func TestResumeAcceptsLegacyPreflightResultWithoutRetainedArtifacts(t *testing.T
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"relay_absent":   false,
-			"backend_strata": cloneStringMap(result.BackendStrata),
+			"relay_absent": !result.RelayPresent,
 		},
 	})
 	if err := setNextAction(state); err != nil {
@@ -1744,16 +1507,13 @@ func TestRelayBatchActionCarriesBoundDigestsAndRetainedBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	preflightResult := preflight.Result{
-		SchemaVersion: preflight.SchemaVersion,
-		OK:            true,
-		ArtifactDigests: map[string]string{
-			"compatibility-manifest.json": digest.RawBytes([]byte("compatibility")),
-			"relay-capabilities.json":     digest.RawBytes([]byte("capabilities")),
-		},
+		SchemaVersion:   preflight.SchemaVersion,
+		OK:              true,
+		RelayPresent:    true,
+		ArtifactDigests: map[string]string{},
 		ContractDigests: map[string]string{
 			"integration_bundle": integrationDigest,
 		},
-		BackendStrata: map[string]string{"codex": "ready", "claude": "ready"},
 	}
 	writeCanonicalForTest(t, config.Outputs.PreflightPath, preflightResult)
 	charterDigest := digest.RawBytes([]byte("charter"))
@@ -2549,8 +2309,8 @@ func TestRelayAbsentPassSkipsRelayBatchCallerStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume preflight: %v", err)
 	}
-	if !invocation.Degraded || invocation.BackendStrata["claude"] != contracts.RelayLaunchStatusAbsent || invocation.BackendStrata["codex"] != contracts.RelayLaunchStatusAbsent {
-		t.Fatalf("degraded strata = %#v, degraded=%v", invocation.BackendStrata, invocation.Degraded)
+	if !invocation.Degraded {
+		t.Fatalf("degraded = %v, want relay-absent degraded invocation", invocation.Degraded)
 	}
 	writeRoleOutputsForState(t, options.StateDir, true)
 
@@ -2651,8 +2411,7 @@ func readyPassAtRelayBatchActionForTest(t *testing.T, withFinding bool) (BeginOp
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"relay_absent":        false,
-			"backend_strata":      cloneStringMap(preflightResult.BackendStrata),
+			"relay_absent":        !preflightResult.RelayPresent,
 			"source_dirty":        preflightResult.SourceDirty,
 			"source_dirty_status": preflightResult.SourceDirtyStatus,
 		},
@@ -2712,8 +2471,7 @@ func readyPassAtTwoRelayBatchesForTest(t *testing.T) (BeginOptions, *State, Rela
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"relay_absent":        false,
-			"backend_strata":      cloneStringMap(preflightResult.BackendStrata),
+			"relay_absent":        !preflightResult.RelayPresent,
 			"source_dirty":        preflightResult.SourceDirty,
 			"source_dirty_status": preflightResult.SourceDirtyStatus,
 		},
@@ -2774,6 +2532,10 @@ func readyPassAtTwoRelayBatchesForTest(t *testing.T) (BeginOptions, *State, Rela
 
 func writeRecordedRelayRunForTest(t *testing.T, config Config, batch RelayBatchRecord, record relayrun.RunRecord) {
 	t.Helper()
+	if record.ConsumesBatch && strings.TrimSpace(record.PlanDigest) == "" {
+		plan := readJSONForTest[planning.PlanDocument](t, config.Outputs.PlanPath)
+		record.PlanDigest = plan.PlanDigest
+	}
 	path := relayRunRecordPath(config, batch.BatchID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -2986,8 +2748,8 @@ func writePassPortableExportForTest(t *testing.T, state *State, batch RelayBatch
 
 func passContractIDForRecipeForTest(t *testing.T, recipeID string) string {
 	t.Helper()
-	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
-		if requirement.RecipeID == recipeID {
+	for _, requirement := range preflight.RequiredRecipes {
+		if requirement.ID == recipeID {
 			return requirement.ContractID
 		}
 	}
@@ -3447,32 +3209,18 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		t.Fatal(err)
 	}
 	result := preflight.Result{
-		SchemaVersion:        preflight.SchemaVersion,
-		OK:                   true,
-		StateDir:             config.StateDir,
-		RelayVersion:         "v1.4.0",
-		ArtifactDigests:      map[string]string{"source-snapshot-manifest": snapshotDigest},
-		CompileReportDigests: map[string]string{},
-		RecipePlanDigests:    map[string]string{},
-		ContractDigests:      map[string]string{"integration_bundle": bundleDigest},
-		RelayReportedDigests: map[string]string{},
-		BackendStrata:        map[string]string{"claude": "ready", "codex": "ready"},
-		SnapshotDigest:       snapshotDigest,
-		ConsumerIdentity:     map[string]any{"kind": "witness", "id": "pass-driver"},
+		SchemaVersion:    preflight.SchemaVersion,
+		OK:               true,
+		StateDir:         config.StateDir,
+		RelayPresent:     true,
+		ArtifactDigests:  map[string]string{"source-snapshot-manifest": snapshotDigest},
+		ContractDigests:  map[string]string{"integration_bundle": bundleDigest},
+		SnapshotDigest:   snapshotDigest,
+		ConsumerIdentity: map[string]any{"kind": "witness", "id": "pass-driver"},
 	}
 	for _, key := range sortedStringMapKeys(selectedDigests) {
 		result.ContractDigests[key] = selectedDigests[key]
 	}
-	result.ArtifactDigests["relay-capabilities.json"] = retainPreflightPayloadForTest(t, config.StateDir, "relay-capabilities.json", readyCapabilitiesPayloadForTest())
-	result.ArtifactDigests["backend-status.json"] = retainPreflightPayloadForTest(t, config.StateDir, "backend-status.json", map[string]any{
-		"scope":      "backends",
-		"probe_auth": false,
-		"backends": []any{
-			map[string]any{"backend": "claude", "status": "ready"},
-			map[string]any{"backend": "codex", "status": "ready"},
-		},
-	})
-	result.ArtifactDigests["recipes-list.json"] = retainPreflightPayloadForTest(t, config.StateDir, "recipes-list.json", readyRecipesPayloadForTest())
 	result.ArtifactDigests[preflight.RetainedIntegrationBundleEnvelopeFile] = retainPreflightPayloadForTest(t, config.StateDir, preflight.RetainedIntegrationBundleEnvelopeFile, bundlePayload)
 	bundleBody, err := os.ReadFile(config.IntegrationBundlePath)
 	if err != nil {
@@ -3482,80 +3230,11 @@ func writeReadyPreflightForTest(t *testing.T, config Config) preflight.Result {
 		t.Fatal(err)
 	}
 	result.ArtifactDigests[preflight.RetainedIntegrationBundleBodyFile] = bundleDigest
-	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
-		plan := map[string]any{
-			"schema_version":               "test-root-recipe-plan-v1",
-			"recipe_id":                    requirement.RecipeID,
-			"integration_contract_id":      requirement.ContractID,
-			"integration_contract_digest":  selectedDigests[requirement.ContractID],
-			"deterministic_test_fixture":   true,
-			"required_input_binding_count": 4,
-		}
-		report := map[string]any{
-			"recipe_id":            requirement.RecipeID,
-			"status":               "usable",
-			"integration_contract": requirement.ContractID,
-			"compiled_plan":        plan,
-			"contract_digests": map[string]any{
-				requirement.ContractID: selectedDigests[requirement.ContractID],
-			},
-		}
-		reportRelative := filepath.ToSlash(filepath.Join("compile-reports", requirement.RecipeID+".json"))
-		planRelative := filepath.ToSlash(filepath.Join("recipe-plans", requirement.RecipeID+".json"))
-		result.ArtifactDigests[reportRelative] = retainPreflightPayloadForTest(t, config.StateDir, reportRelative, report)
-		result.CompileReportDigests[requirement.RecipeID] = result.ArtifactDigests[reportRelative]
-		result.RelayReportedDigests[requirement.ContractID] = selectedDigests[requirement.ContractID]
-		result.ArtifactDigests[planRelative] = retainPreflightPayloadForTest(t, config.StateDir, planRelative, plan)
-		result.RecipePlanDigests[requirement.RecipeID] = result.ArtifactDigests[planRelative]
-	}
 	contractDigestDoc := preflight.ContractDigestDocument(result)
 	result.ArtifactDigests["contract-digests.json"] = retainPreflightPayloadForTest(t, config.StateDir, "contract-digests.json", contractDigestDoc)
-	result.ArtifactDigests["compatibility-manifest.json"] = retainPreflightPayloadForTest(t, config.StateDir, "compatibility-manifest.json", expectedPreflightCompatibility(result))
 	result.RetainedArtifacts = preflight.RetainedArtifacts(config.StateDir, config.SnapshotManifestPath, result.ArtifactDigests)
 	writeCanonicalForTest(t, config.Outputs.PreflightPath, result)
 	return result
-}
-
-func readyCapabilitiesPayloadForTest() map[string]any {
-	payload := map[string]any{
-		"schema_version":      "relay-capabilities-v1",
-		"convo_relay_version": "v1.4.0",
-		"build_platform":      map[string]any{"goarch": "test", "goos": "test"},
-		"contracts":           map[string]any{},
-	}
-	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
-		if strings.HasPrefix(requirement.Family, "contracts.") {
-			contractsPayload := payload["contracts"].(map[string]any)
-			key := strings.TrimPrefix(requirement.Family, "contracts.")
-			contractsPayload[key] = append(capabilityListForTest(contractsPayload[key]), requirement.Capability)
-			continue
-		}
-		payload[requirement.Family] = append(capabilityListForTest(payload[requirement.Family]), requirement.Capability)
-	}
-	return payload
-}
-
-func capabilityListForTest(value any) []any {
-	if values, ok := value.([]any); ok {
-		return values
-	}
-	return nil
-}
-
-func readyRecipesPayloadForTest() map[string]any {
-	recipes := make([]any, 0, len(preflight.RequiredRecipes))
-	for _, requirement := range preflight.RequiredRecipes {
-		recipes = append(recipes, map[string]any{
-			"id":       requirement.ID,
-			"status":   "usable",
-			"declared": map[string]any{"integration_contract": requirement.ContractID},
-		})
-	}
-	return map[string]any{
-		"scope":   "recipes",
-		"status":  "ok",
-		"recipes": recipes,
-	}
 }
 
 func retainPreflightPayloadForTest(t *testing.T, stateDir string, relativePath string, payload any) string {

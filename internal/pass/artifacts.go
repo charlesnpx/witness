@@ -277,8 +277,6 @@ func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInp
 	}
 	if result == nil {
 		return append(specs,
-			artifactInput{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
-			artifactInput{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
 			artifactInput{role: "integration-bundle-retained", path: retainedIntegrationBundleEnvelopePath(config), digestClass: digest.ClassRawBytes},
 		)
 	}
@@ -300,29 +298,13 @@ func preflightOutputSpecs(config Config, result *preflight.Result) []artifactInp
 
 func preflightRetainedArtifactRole(relativePath string) string {
 	switch relativePath {
-	case "compatibility-manifest.json":
-		return "compatibility-manifest"
-	case "relay-capabilities.json":
-		return "relay-capabilities"
 	case "integration-bundle.json":
 		return "integration-bundle-retained"
 	case preflight.RetainedIntegrationBundleBodyFile:
 		return "integration-bundle-body"
-	case "backend-status.json":
-		return "backend-status"
-	case "recipes-list.json":
-		return "recipes-list"
 	case "contract-digests.json":
 		return "contract-digests"
 	default:
-		if strings.HasPrefix(relativePath, "compile-reports/") && strings.HasSuffix(relativePath, ".json") {
-			name := strings.TrimSuffix(strings.TrimPrefix(relativePath, "compile-reports/"), ".json")
-			return "compile-report:" + name
-		}
-		if strings.HasPrefix(relativePath, "recipe-plans/") && strings.HasSuffix(relativePath, ".json") {
-			name := strings.TrimSuffix(strings.TrimPrefix(relativePath, "recipe-plans/"), ".json")
-			return "recipe-plan:" + name
-		}
 		return "preflight-retained:" + artifactIDFromText(relativePath)
 	}
 }
