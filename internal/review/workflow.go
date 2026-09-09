@@ -68,6 +68,10 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err != nil {
 		return PreparedReview{}, fmt.Errorf("resolve review source directory: %w", err)
 	}
+	sourceDirectory, err = filepath.EvalSymlinks(sourceDirectory)
+	if err != nil {
+		return PreparedReview{}, fmt.Errorf("resolve review source directory %q: %w", options.SourceDir, err)
+	}
 	if info, statErr := os.Stat(sourceDirectory); statErr != nil || !info.IsDir() {
 		if statErr != nil {
 			return PreparedReview{}, fmt.Errorf("review source directory %q: %w", sourceDirectory, statErr)
@@ -125,11 +129,29 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	}
 	packetDirectory := options.PacketDirectory
 	if strings.TrimSpace(packetDirectory) == "" {
-		packetDirectory = filepath.Join(sourceDirectory, ".witness-review")
+		tempDirectory, tempErr := resolveReviewPath(os.TempDir())
+		if tempErr != nil {
+			return PreparedReview{}, fmt.Errorf("resolve temporary review packet directory: %w", tempErr)
+		}
+		if pathWithin(sourceDirectory, tempDirectory) {
+			return PreparedReview{}, fmt.Errorf("review packet directory %q resolves inside source directory %q; packets written into the reviewed tree would change the thing being reviewed", tempDirectory, sourceDirectory)
+		}
+		packetDirectory, err = os.MkdirTemp(tempDirectory, "witness-review-packets-")
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("create temporary review packet directory: %w", err)
+		}
+	} else {
+		packetDirectory, err = filepath.Abs(packetDirectory)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("resolve review packet directory: %w", err)
+		}
 	}
-	packetDirectory, err = filepath.Abs(packetDirectory)
+	packetDirectory, err = resolveReviewPath(packetDirectory)
 	if err != nil {
-		return PreparedReview{}, fmt.Errorf("resolve review packet directory: %w", err)
+		return PreparedReview{}, fmt.Errorf("resolve review packet directory %q: %w", packetDirectory, err)
+	}
+	if pathWithin(sourceDirectory, packetDirectory) {
+		return PreparedReview{}, fmt.Errorf("review packet directory %q resolves inside source directory %q; packets written into the reviewed tree would change the thing being reviewed", packetDirectory, sourceDirectory)
 	}
 	if err := os.MkdirAll(packetDirectory, 0o700); err != nil {
 		return PreparedReview{}, fmt.Errorf("create review packet directory %q: %w", packetDirectory, err)
@@ -255,6 +277,43 @@ func SourceDigest(root string) (string, error) {
 	}
 	sort.Slice(entries, func(left, right int) bool { return entries[left].Path < entries[right].Path })
 	return digest.SemanticJSON(map[string]any{"files": entries})
+}
+
+func resolveReviewPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	current := absolute
+	missing := make([]string, 0)
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for _, part := range missing {
+				resolved = filepath.Join(resolved, part)
+			}
+			return filepath.Clean(resolved), nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("path %q has no existing ancestor", absolute)
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
+	}
+}
+
+func pathWithin(root string, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
 func resolveFrozenCharter(options PrepareOptions) (charter.FrozenCharter, error) {

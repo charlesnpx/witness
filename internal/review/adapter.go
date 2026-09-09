@@ -75,15 +75,10 @@ type SimpleRunOptions struct {
 	SourceDigest string
 }
 
-// TranscriptItem is a parsed, forward-paged Agentbus transcript item. Items
-// are used to advance the cursor but are not retained after paging.
+// TranscriptItem is a parsed, forward-paged Agentbus transcript item.
+// Items are used to advance the cursor but are not retained after paging.
 type TranscriptItem struct {
-	Ordinal   int       `json:"ordinal"`
-	At        time.Time `json:"at,omitempty"`
-	Kind      string    `json:"kind"`
-	Name      string    `json:"name,omitempty"`
-	Text      string    `json:"text,omitempty"`
-	Truncated bool      `json:"truncated"`
+	Ordinal int `json:"ordinal"`
 }
 
 // TranscriptObservation keeps transcript completeness separate from report
@@ -109,18 +104,17 @@ type JobObservation struct {
 	ResultError             string                                 `json:"result_error,omitempty"`
 }
 
-// SimpleRunResult contains the reports, host observations, and in-process
-// completion made by a SimpleAdapter run. Completion is not read back from
-// disk to establish proof.
+// SimpleRunResult contains host observations and in-process completion made
+// by a SimpleAdapter run. Completion is not read back from disk to establish
+// proof.
 type SimpleRunResult struct {
-	Jobs               []JobObservation                                 `json:"jobs"`
-	Reports            map[string]contractreview.ReviewReportV2Document `json:"-"`
-	ReportDigests      map[string]string                                `json:"report_digests"`
-	ObservedExecution  contractreview.ObservedReviewExecution           `json:"observed_execution"`
-	Evidence           contractreview.HostExecutionEvidence             `json:"-"`
-	TranscriptComplete bool                                             `json:"transcript_complete"`
-	Diagnostics        []string                                         `json:"diagnostics,omitempty"`
-	Completion         contractreview.ReviewCompletionDocument          `json:"-"`
+	Jobs               []JobObservation                        `json:"jobs"`
+	ReportDigests      map[string]string                       `json:"report_digests"`
+	ObservedExecution  contractreview.ObservedReviewExecution  `json:"observed_execution"`
+	Evidence           contractreview.HostExecutionEvidence    `json:"-"`
+	TranscriptComplete bool                                    `json:"transcript_complete"`
+	Diagnostics        []string                                `json:"diagnostics,omitempty"`
+	Completion         contractreview.ReviewCompletionDocument `json:"-"`
 }
 
 // SimpleAdapter submits independent jobs through Delegate and observes each
@@ -205,7 +199,6 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 
 	result := SimpleRunResult{
 		Jobs:          make([]JobObservation, 0, len(submitted)),
-		Reports:       make(map[string]contractreview.ReviewReportV2Document),
 		ReportDigests: make(map[string]string),
 	}
 	observed := contractreview.ObservedReviewExecution{
@@ -230,7 +223,6 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 			observed.ResultArtifactAvailable = false
 		}
 		if observation.Report != nil {
-			result.Reports[job.reviewer] = *observation.Report
 			result.ReportDigests[job.reviewer] = observation.ReportDigest
 		}
 	}
@@ -721,44 +713,10 @@ func parseTranscript(object map[string]any) (struct {
 		if !ok {
 			return result, fmt.Errorf("items[%d].ordinal is required", index)
 		}
-		kind, kindPresent, err := stringField(itemObject, "kind")
-		if err != nil {
-			return result, err
-		}
-		if !kindPresent || strings.TrimSpace(kind) == "" {
-			return result, fmt.Errorf("items[%d].kind is required", index)
-		}
 		if ordinal < 0 {
 			return result, fmt.Errorf("items[%d].ordinal must not be negative", index)
 		}
-		item := TranscriptItem{Ordinal: ordinal, Kind: kind}
-		if rawAt, exists := itemObject["at"]; exists && rawAt != nil {
-			at, ok := rawAt.(string)
-			if !ok {
-				return result, fmt.Errorf("items[%d].at must be an RFC3339 timestamp", index)
-			}
-			parsedAt, err := time.Parse(time.RFC3339Nano, at)
-			if err != nil {
-				return result, fmt.Errorf("items[%d].at must be an RFC3339 timestamp: %w", index, err)
-			}
-			item.At = parsedAt
-		}
-		item.Name, _, err = stringField(itemObject, "name")
-		if err != nil {
-			return result, err
-		}
-		item.Text, _, err = stringField(itemObject, "text")
-		if err != nil {
-			return result, err
-		}
-		if raw, exists := itemObject["truncated"]; exists {
-			truncated, ok := raw.(bool)
-			if !ok {
-				return result, fmt.Errorf("items[%d].truncated must be boolean", index)
-			}
-			item.Truncated = truncated
-		}
-		result.Items = append(result.Items, item)
+		result.Items = append(result.Items, TranscriptItem{Ordinal: ordinal})
 	}
 	return result, nil
 }

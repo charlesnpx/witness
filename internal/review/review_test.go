@@ -263,16 +263,123 @@ exit 0
 	}
 }
 
-func testRunInputs(t *testing.T) (contractreview.ReviewRequestV2Document, charter.FrozenCharter, []ReviewerPacket) {
-	t.Helper()
-	input, ok := charter.InitTemplate(charter.TemplateMinimal, "owner", "initial", "initial")
-	if !ok {
-		t.Fatal("minimal Charter template unavailable")
+func TestPrepareResolvesSymlinkedSourceAndDetectsDrift(t *testing.T) {
+	targetDirectory := t.TempDir()
+	sourcePath := filepath.Join(targetDirectory, "source.txt")
+	if err := os.WriteFile(sourcePath, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	frozen, err := charter.Freeze(input, nil)
+	linkDirectory := filepath.Join(t.TempDir(), "source-link")
+	if err := os.Symlink(targetDirectory, linkDirectory); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := Prepare(PrepareOptions{
+		Config:          DefaultConfig(),
+		FrozenCharter:   testFrozenCharter(t),
+		SourceDir:       linkDirectory,
+		PacketDirectory: filepath.Join(t.TempDir(), "packets"),
+	})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(targetDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if prepared.SourceDirectory != want {
+		t.Fatalf("prepared source directory = %q, want resolved target %q", prepared.SourceDirectory, want)
+	}
+	before := prepared.SourceDigest
+	if err := os.WriteFile(sourcePath, []byte("after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultPaths := testReports(t, prepared.Request, prepared.FrozenCharter)
+	delegate, agentbus := fakeReviewCommands(t, resultPaths, JobExitCompleted)
+	result, err := NewSimpleAdapter(SimpleAdapterOptions{
+		DelegateExecutable: delegate,
+		AgentbusExecutable: agentbus,
+		PollInterval:       -1,
+		TranscriptPageSize: 2,
+	}).Run(context.Background(), SimpleRunOptions{
+		Request:          prepared.Request,
+		FrozenCharter:    prepared.FrozenCharter,
+		Packets:          prepared.Packets,
+		WorkingDirectory: prepared.SourceDirectory,
+		SourceDigest:     prepared.SourceDigest,
+	})
+	if err != nil {
+		t.Fatalf("adapter Run: %v", err)
+	}
+	if result.Completion.Verdict != contractreview.CompletionVerdictFailedToRun {
+		t.Fatalf("verdict = %q, want failed_to_run after symlinked source change", result.Completion.Verdict)
+	}
+	after, err := SourceDigest(targetDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := strings.Join(result.Diagnostics, "\n")
+	if !strings.Contains(diagnostics, before) || !strings.Contains(diagnostics, after) {
+		t.Fatalf("source-change diagnostics = %q, want digests %q and %q", diagnostics, before, after)
+	}
+}
+
+func TestPrepareDefaultPacketsStayOutsideSourceAndRejectsInTreePackets(t *testing.T) {
+	sourceDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceDirectory, "source.txt"), []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := PrepareOptions{
+		Config:        DefaultConfig(),
+		FrozenCharter: testFrozenCharter(t),
+		SourceDir:     sourceDirectory,
+	}
+	prepared, err := Prepare(options)
+	if err != nil {
+		t.Fatalf("Prepare with default packet directory: %v", err)
+	}
+	for _, packet := range prepared.Packets {
+		if pathWithin(prepared.SourceDirectory, packet.PromptPath) || pathWithin(prepared.SourceDirectory, packet.SchemaPath) {
+			t.Fatalf("packet %q is inside source directory %q", packet.PromptPath, prepared.SourceDirectory)
+		}
+	}
+	resultPaths := testReports(t, prepared.Request, prepared.FrozenCharter)
+	delegate, agentbus := fakeReviewCommands(t, resultPaths, JobExitCompleted)
+	result, err := NewSimpleAdapter(SimpleAdapterOptions{
+		DelegateExecutable: delegate,
+		AgentbusExecutable: agentbus,
+		PollInterval:       -1,
+		TranscriptPageSize: 2,
+	}).Run(context.Background(), SimpleRunOptions{
+		Request:          prepared.Request,
+		FrozenCharter:    prepared.FrozenCharter,
+		Packets:          prepared.Packets,
+		WorkingDirectory: prepared.SourceDirectory,
+		SourceDigest:     prepared.SourceDigest,
+	})
+	if err != nil {
+		t.Fatalf("adapter Run: %v", err)
+	}
+	if result.Completion.Verdict != contractreview.CompletionVerdictSatisfied {
+		t.Fatalf("verdict = %q, want satisfied with unchanged source", result.Completion.Verdict)
+	}
+	after, err := SourceDigest(prepared.SourceDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != prepared.SourceDigest {
+		t.Fatalf("source digest after unchanged review = %q, want %q", after, prepared.SourceDigest)
+	}
+
+	options.PacketDirectory = filepath.Join(sourceDirectory, "packets")
+	_, err = Prepare(options)
+	if err == nil || !strings.Contains(err.Error(), "packets written into the reviewed tree would change the thing being reviewed") {
+		t.Fatalf("Prepare with in-tree packet directory error = %v, want containment explanation", err)
+	}
+}
+
+func testRunInputs(t *testing.T) (contractreview.ReviewRequestV2Document, charter.FrozenCharter, []ReviewerPacket) {
+	t.Helper()
+	frozen := *testFrozenCharter(t)
 	recipe, ok := BundledRecipe(DefaultRecipeID)
 	if !ok {
 		t.Fatal("bundled recipe unavailable")
@@ -309,6 +416,19 @@ func testRunInputs(t *testing.T) (contractreview.ReviewRequestV2Document, charte
 		packets = append(packets, ReviewerPacket{Reviewer: reviewer, PromptPath: promptPath})
 	}
 	return request, frozen, packets
+}
+
+func testFrozenCharter(t *testing.T) *charter.FrozenCharter {
+	t.Helper()
+	input, ok := charter.InitTemplate(charter.TemplateMinimal, "owner", "initial", "initial")
+	if !ok {
+		t.Fatal("minimal Charter template unavailable")
+	}
+	frozen, err := charter.Freeze(input, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &frozen
 }
 
 func testReports(t *testing.T, request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter) map[string]string {
