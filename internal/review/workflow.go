@@ -416,6 +416,10 @@ func sourceHead(sourceDirectory string, inputDigest string) string {
 	return "source-" + strings.TrimPrefix(inputDigest, digest.Prefix)[:12]
 }
 
+func sourceIdentityForRequest(request contractreview.ReviewRequestV2Document) contractreview.Identity {
+	return contractreview.Identity{Kind: "git", ID: request.Subject.Head}
+}
+
 func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, recipe contractreview.ReviewRecipe, reviewer string, sourceDirectory string) (string, error) {
 	requestBytes, err := canonjson.Marshal(request)
 	if err != nil {
@@ -429,10 +433,18 @@ func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen chart
 	if err != nil {
 		return "", err
 	}
+	sourceIdentityBytes, err := json.Marshal(sourceIdentityForRequest(request))
+	if err != nil {
+		return "", err
+	}
+	consumerIdentityBytes, err := json.Marshal(request.ConsumerIdentity)
+	if err != nil {
+		return "", err
+	}
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "You are the independent %s reviewer in a Witness review.\n", reviewer)
 	fmt.Fprintf(&builder, "Read the frozen source at %s. Do not modify it.\n", sourceDirectory)
-	fmt.Fprintf(&builder, "Follow the recipe instructions and emit exactly one review-report-v2 JSON object, with no prose outside JSON. The reviewer field must be %q. A valid empty findings array is allowed, but evaluation must truthfully cover the paths and goals you inspected.\n\n", reviewer)
+	fmt.Fprintf(&builder, "Follow the recipe instructions and emit exactly one review-report-v2 JSON object, with no prose outside JSON. The reviewer field must be %q, source_identity must be %s, and consumer_identity must be %s. A valid empty findings array is allowed, but evaluation must truthfully cover the paths and goals you inspected.\n\n", reviewer, sourceIdentityBytes, consumerIdentityBytes)
 	builder.WriteString("REQUEST:\n")
 	builder.Write(requestBytes)
 	builder.WriteString("\n\nFROZEN CHARTER:\n")
@@ -444,6 +456,7 @@ func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen chart
 }
 
 func reviewerSchema(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, reviewer string) ([]byte, error) {
+	sourceIdentity := sourceIdentityForRequest(request)
 	goalIDs := make([]string, len(frozen.Charter.Goals))
 	for index, goal := range frozen.Charter.Goals {
 		goalIDs[index] = goal.ID
@@ -455,6 +468,8 @@ func reviewerSchema(request contractreview.ReviewRequestV2Document, frozen chart
 		"reviewer":            map[string]any{"const": reviewer},
 		"charter_hash":        map[string]any{"const": frozen.CharterHash},
 		"review_input_digest": map[string]any{"const": request.ReviewInputDigest},
+		"source_identity":     map[string]any{"const": sourceIdentity},
+		"consumer_identity":   map[string]any{"const": request.ConsumerIdentity},
 		"findings":            map[string]any{"type": "array"},
 		"evaluation":          map[string]any{"type": "object"},
 	}
