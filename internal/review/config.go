@@ -127,19 +127,23 @@ func LoadConfigAt(path string) (Config, error) {
 	if strings.TrimSpace(path) == "" {
 		return Config{}, errors.New("review configuration path is empty")
 	}
-	data, err := os.ReadFile(path)
+	resolvedPath, err := resolveReviewPath(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve review configuration path %q: %w", path, err)
+	}
+	data, err := os.ReadFile(resolvedPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return DefaultConfig(), nil
 	}
 	if err != nil {
-		return Config{}, fmt.Errorf("read review configuration %q: %w", path, err)
+		return Config{}, fmt.Errorf("read review configuration %q: %w", resolvedPath, err)
 	}
 	config, err := strictjson.DecodeBytes[Config](data, strictjson.DefaultMaxBytes)
 	if err != nil {
-		return Config{}, fmt.Errorf("decode review configuration %q: %w", path, err)
+		return Config{}, fmt.Errorf("decode review configuration %q: %w", resolvedPath, err)
 	}
 	if err := ValidateConfig(config); err != nil {
-		return Config{}, fmt.Errorf("validate review configuration %q: %w", path, err)
+		return Config{}, fmt.Errorf("validate review configuration %q: %w", resolvedPath, err)
 	}
 	return config, nil
 }
@@ -183,9 +187,19 @@ func ValidateImplementation(ctx context.Context, descriptor AdapterDescriptor) e
 	if descriptor.Skill != "" {
 		return nil
 	}
-	resolved, err := exec.LookPath(descriptor.Executable)
-	if err != nil {
-		return fmt.Errorf(`configuration field "adapter.executable" could not be resolved: %w`, err)
+	resolved := descriptor.Executable
+	if strings.ContainsAny(descriptor.Executable, `/\`) {
+		var err error
+		resolved, err = resolveReviewPath(descriptor.Executable)
+		if err != nil {
+			return fmt.Errorf(`configuration field "adapter.executable" could not be resolved: %w`, err)
+		}
+	} else {
+		var err error
+		resolved, err = exec.LookPath(descriptor.Executable)
+		if err != nil {
+			return fmt.Errorf(`configuration field "adapter.executable" could not be resolved: %w`, err)
+		}
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -216,7 +230,11 @@ func WriteConfig(path string, config Config) error {
 	if err != nil {
 		return fmt.Errorf("encode review configuration: %w", err)
 	}
-	return writeConfigBytes(path, data)
+	resolvedPath, err := resolveReviewOutputPath(path)
+	if err != nil {
+		return fmt.Errorf("resolve review configuration path %q: %w", path, err)
+	}
+	return writeConfigBytes(resolvedPath, data)
 }
 
 func writeConfigBytes(path string, data []byte) error {
@@ -224,32 +242,9 @@ func writeConfigBytes(path string, data []byte) error {
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("create review configuration directory %q: %w", parent, err)
 	}
-	temporary, err := os.CreateTemp(parent, ".config.json.*")
-	if err != nil {
-		return fmt.Errorf("create temporary review configuration: %w", err)
+	if err := writePrivateFile(path, append(bytes.TrimSpace(data), '\n')); err != nil {
+		return fmt.Errorf("write review configuration %q: %w", path, err)
 	}
-	temporaryPath := temporary.Name()
-	removeTemporary := true
-	defer func() {
-		if removeTemporary {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("set review configuration permissions: %w", err)
-	}
-	if _, err := temporary.Write(append(bytes.TrimSpace(data), '\n')); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("write temporary review configuration: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary review configuration: %w", err)
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("install review configuration %q: %w", path, err)
-	}
-	removeTemporary = false
 	return nil
 }
 

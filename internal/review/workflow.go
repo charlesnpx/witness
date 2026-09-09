@@ -64,11 +64,7 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if strings.TrimSpace(options.SourceDir) == "" {
 		return PreparedReview{}, errors.New("review preparation requires source directory")
 	}
-	sourceDirectory, err := filepath.Abs(options.SourceDir)
-	if err != nil {
-		return PreparedReview{}, fmt.Errorf("resolve review source directory: %w", err)
-	}
-	sourceDirectory, err = filepath.EvalSymlinks(sourceDirectory)
+	sourceDirectory, err := resolveReviewPath(options.SourceDir)
 	if err != nil {
 		return PreparedReview{}, fmt.Errorf("resolve review source directory %q: %w", options.SourceDir, err)
 	}
@@ -91,7 +87,7 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err != nil {
 		return PreparedReview{}, fmt.Errorf("digest frozen review recipe: %w", err)
 	}
-	sourceDigest, err := SourceDigest(sourceDirectory)
+	sourceDigest, err := sourceDigestResolved(sourceDirectory)
 	if err != nil {
 		return PreparedReview{}, fmt.Errorf("derive review source digest: %w", err)
 	}
@@ -140,15 +136,16 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 		if err != nil {
 			return PreparedReview{}, fmt.Errorf("create temporary review packet directory: %w", err)
 		}
-	} else {
-		packetDirectory, err = filepath.Abs(packetDirectory)
+		packetDirectory, err = resolveReviewPath(packetDirectory)
 		if err != nil {
-			return PreparedReview{}, fmt.Errorf("resolve review packet directory: %w", err)
+			return PreparedReview{}, fmt.Errorf("resolve temporary review packet directory %q: %w", packetDirectory, err)
 		}
-	}
-	packetDirectory, err = resolveReviewPath(packetDirectory)
-	if err != nil {
-		return PreparedReview{}, fmt.Errorf("resolve review packet directory %q: %w", packetDirectory, err)
+	} else {
+		requestedPacketDirectory := packetDirectory
+		packetDirectory, err = resolveReviewPath(requestedPacketDirectory)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("resolve review packet directory %q: %w", requestedPacketDirectory, err)
+		}
 	}
 	if pathWithin(sourceDirectory, packetDirectory) {
 		return PreparedReview{}, fmt.Errorf("review packet directory %q resolves inside source directory %q; packets written into the reviewed tree would change the thing being reviewed", packetDirectory, sourceDirectory)
@@ -217,11 +214,15 @@ func WriteCompletion(path string, completion contractreview.ReviewCompletionDocu
 	if strings.TrimSpace(path) == "" {
 		return errors.New("completion output path is empty")
 	}
+	resolvedPath, err := resolveReviewOutputPath(path)
+	if err != nil {
+		return fmt.Errorf("resolve review completion path %q: %w", path, err)
+	}
 	data, err := canonjson.Marshal(completion)
 	if err != nil {
 		return fmt.Errorf("encode review completion: %w", err)
 	}
-	if err := writePrivateFile(path, append(data, '\n')); err != nil {
+	if err := writePrivateFile(resolvedPath, append(data, '\n')); err != nil {
 		return fmt.Errorf("write review completion %q: %w", path, err)
 	}
 	return nil
@@ -231,9 +232,16 @@ func WriteCompletion(path string, completion contractreview.ReviewCompletionDocu
 // below root, excluding the root's .git directory. File contents are read at
 // the time of the call.
 func SourceDigest(root string) (string, error) {
-	root, err := filepath.Abs(root)
+	resolvedRoot, err := resolveReviewPath(root)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve source digest root %q: %w", root, err)
+	}
+	return sourceDigestResolved(resolvedRoot)
+}
+
+func sourceDigestResolved(root string) (string, error) {
+	if root == "" {
+		return "", errors.New("source digest root is empty")
 	}
 	type fileEntry struct {
 		Path   string `json:"path"`
@@ -241,7 +249,7 @@ func SourceDigest(root string) (string, error) {
 		Bytes  int64  `json:"bytes"`
 	}
 	entries := make([]fileEntry, 0)
-	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -282,7 +290,7 @@ func SourceDigest(root string) (string, error) {
 func resolveReviewPath(path string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve path %q: %w", path, err)
 	}
 	current := absolute
 	missing := make([]string, 0)
@@ -290,22 +298,33 @@ func resolveReviewPath(path string) (string, error) {
 		if _, err := os.Lstat(current); err == nil {
 			resolved, err := filepath.EvalSymlinks(current)
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("resolve path %q: %w", path, err)
 			}
 			for _, part := range missing {
 				resolved = filepath.Join(resolved, part)
 			}
 			return filepath.Clean(resolved), nil
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", err
+			return "", fmt.Errorf("resolve path %q: %w", path, err)
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", fmt.Errorf("path %q has no existing ancestor", absolute)
+			return "", fmt.Errorf("resolve path %q: no existing ancestor", path)
 		}
 		missing = append([]string{filepath.Base(current)}, missing...)
 		current = parent
 	}
+}
+
+// resolveReviewOutputPath resolves the destination directory while retaining
+// the final directory entry for Lstat. A final symlink must be rejected by the
+// atomic writer rather than resolved into its target.
+func resolveReviewOutputPath(path string) (string, error) {
+	parent, err := resolveReviewPath(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
 }
 
 func pathWithin(root string, candidate string) bool {
@@ -323,16 +342,20 @@ func resolveFrozenCharter(options PrepareOptions) (charter.FrozenCharter, error)
 	if strings.TrimSpace(options.CharterPath) == "" {
 		return charter.FrozenCharter{}, errors.New("review preparation requires a Charter or frozen Charter path")
 	}
-	data, err := os.ReadFile(options.CharterPath)
+	charterPath, err := resolveReviewPath(options.CharterPath)
 	if err != nil {
-		return charter.FrozenCharter{}, fmt.Errorf("read review Charter %q: %w", options.CharterPath, err)
+		return charter.FrozenCharter{}, fmt.Errorf("resolve review Charter %q: %w", options.CharterPath, err)
+	}
+	data, err := os.ReadFile(charterPath)
+	if err != nil {
+		return charter.FrozenCharter{}, fmt.Errorf("read review Charter %q: %w", charterPath, err)
 	}
 	var envelope map[string]json.RawMessage
 	if _, err := strictjson.DecodeBytes[map[string]json.RawMessage](data, strictjson.DefaultMaxBytes); err != nil {
-		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter %q: %w", options.CharterPath, err)
+		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter %q: %w", charterPath, err)
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter envelope %q: %w", options.CharterPath, err)
+		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter envelope %q: %w", charterPath, err)
 	}
 	var schemaVersion string
 	if raw, ok := envelope["schema_version"]; ok {
@@ -343,19 +366,23 @@ func resolveFrozenCharter(options PrepareOptions) (charter.FrozenCharter, error)
 	if schemaVersion == charter.FrozenSchemaVersion {
 		frozen, err := strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
 		if err != nil {
-			return charter.FrozenCharter{}, fmt.Errorf("decode frozen review Charter %q: %w", options.CharterPath, err)
+			return charter.FrozenCharter{}, fmt.Errorf("decode frozen review Charter %q: %w", charterPath, err)
 		}
 		return frozen, nil
 	}
 	input, err := charter.ReadBytes(data)
 	if err != nil {
-		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter %q: %w", options.CharterPath, err)
+		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter %q: %w", charterPath, err)
 	}
 	var amendments []charter.OwnerEvent
 	if strings.TrimSpace(options.AmendmentsPath) != "" {
-		amendments, err = charter.ReadAmendmentsFile(options.AmendmentsPath)
+		amendmentsPath, resolveErr := resolveReviewPath(options.AmendmentsPath)
+		if resolveErr != nil {
+			return charter.FrozenCharter{}, fmt.Errorf("resolve review Charter amendments %q: %w", options.AmendmentsPath, resolveErr)
+		}
+		amendments, err = charter.ReadAmendmentsFile(amendmentsPath)
 		if err != nil {
-			return charter.FrozenCharter{}, fmt.Errorf("read review Charter amendments %q: %w", options.AmendmentsPath, err)
+			return charter.FrozenCharter{}, fmt.Errorf("read review Charter amendments %q: %w", amendmentsPath, err)
 		}
 	}
 	frozen, err := charter.Freeze(input, amendments)
@@ -478,8 +505,40 @@ func mustRequestDigest(request contractreview.ReviewRequestV2Document) string {
 }
 
 func writePrivateFile(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	parent := filepath.Dir(path)
+	temporary, err := os.CreateTemp(parent, ".witness-review-file-*")
+	if err != nil {
 		return err
 	}
+	temporaryPath := temporary.Name()
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	target, err := os.Lstat(path)
+	if err == nil {
+		if target.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refuse to write symlink target %q", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect write target %q: %w", path, err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	removeTemporary = false
 	return nil
 }

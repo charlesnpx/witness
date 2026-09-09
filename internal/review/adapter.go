@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -162,9 +161,9 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 	if strings.TrimSpace(options.WorkingDirectory) == "" {
 		return SimpleRunResult{}, errors.New("simple adapter requires a working directory")
 	}
-	workingDirectory, err := filepath.Abs(options.WorkingDirectory)
+	workingDirectory, err := resolveReviewPath(options.WorkingDirectory)
 	if err != nil {
-		return SimpleRunResult{}, fmt.Errorf("resolve simple adapter working directory: %w", err)
+		return SimpleRunResult{}, fmt.Errorf("resolve simple adapter working directory %q: %w", options.WorkingDirectory, err)
 	}
 	if info, statErr := os.Stat(workingDirectory); statErr != nil || !info.IsDir() {
 		if statErr != nil {
@@ -172,13 +171,27 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 		}
 		return SimpleRunResult{}, fmt.Errorf("simple adapter working directory %q is not a directory", workingDirectory)
 	}
+	if strings.ContainsAny(adapter.options.DelegateExecutable, `/\`) {
+		resolvedExecutable, resolveErr := resolveReviewPath(adapter.options.DelegateExecutable)
+		if resolveErr != nil {
+			return SimpleRunResult{}, fmt.Errorf("resolve simple adapter Delegate executable %q: %w", adapter.options.DelegateExecutable, resolveErr)
+		}
+		adapter.options.DelegateExecutable = resolvedExecutable
+	}
+	if strings.ContainsAny(adapter.options.AgentbusExecutable, `/\`) {
+		resolvedExecutable, resolveErr := resolveReviewPath(adapter.options.AgentbusExecutable)
+		if resolveErr != nil {
+			return SimpleRunResult{}, fmt.Errorf("resolve simple adapter Agentbus executable %q: %w", adapter.options.AgentbusExecutable, resolveErr)
+		}
+		adapter.options.AgentbusExecutable = resolvedExecutable
+	}
 	packets, err := packetsForRequest(options.Request, options.Packets)
 	if err != nil {
 		return SimpleRunResult{}, err
 	}
 	sourceDigest := options.SourceDigest
 	if sourceDigest == "" {
-		sourceDigest, err = SourceDigest(workingDirectory)
+		sourceDigest, err = sourceDigestResolved(workingDirectory)
 		if err != nil {
 			return SimpleRunResult{}, fmt.Errorf("capture review source digest before adapter run: %w", err)
 		}
@@ -226,7 +239,7 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 			result.ReportDigests[job.reviewer] = observation.ReportDigest
 		}
 	}
-	currentSourceDigest, sourceDigestErr := SourceDigest(workingDirectory)
+	currentSourceDigest, sourceDigestErr := sourceDigestResolved(workingDirectory)
 	sourceStable := sourceDigestErr == nil && currentSourceDigest == sourceDigest
 	if sourceDigestErr != nil {
 		result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("review source could not be re-hashed after reviewer collection; digest before %q; after: %v", sourceDigest, sourceDigestErr))
@@ -312,6 +325,18 @@ func packetsForRequest(request contractreview.ReviewRequestV2Document, packets [
 		}
 		if packet.PromptPath == "" {
 			return nil, fmt.Errorf("reviewer packet %q has no prompt path", packet.Reviewer)
+		}
+		promptPath, err := resolveReviewPath(packet.PromptPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve reviewer packet %q prompt path %q: %w", packet.Reviewer, packet.PromptPath, err)
+		}
+		packet.PromptPath = promptPath
+		if packet.SchemaPath != "" {
+			schemaPath, err := resolveReviewPath(packet.SchemaPath)
+			if err != nil {
+				return nil, fmt.Errorf("resolve reviewer packet %q schema path %q: %w", packet.Reviewer, packet.SchemaPath, err)
+			}
+			packet.SchemaPath = schemaPath
 		}
 		byReviewer[packet.Reviewer] = packet
 	}
@@ -548,35 +573,39 @@ func validateObservedReport(record jobRecord, request contractreview.ReviewReque
 		return contractreview.ExecutionReportMissing, nil, "", false, "", errors.New("result artifact is missing")
 	}
 	result := record.Result
-	data, err := os.ReadFile(result.ResultPath)
+	resultPath, err := resolveReviewPath(result.ResultPath)
 	if err != nil {
-		return contractreview.ExecutionReportUnavailable, nil, "", false, result.ResultPath, fmt.Errorf("read result artifact %q: %w", result.ResultPath, err)
+		return contractreview.ExecutionReportUnavailable, nil, "", false, result.ResultPath, fmt.Errorf("resolve result artifact %q: %w", result.ResultPath, err)
+	}
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		return contractreview.ExecutionReportUnavailable, nil, "", false, resultPath, fmt.Errorf("read result artifact %q: %w", resultPath, err)
 	}
 	if result.Bytes < 0 || int64(len(data)) != result.Bytes {
-		return contractreview.ExecutionReportUnavailable, nil, "", false, result.ResultPath, fmt.Errorf("result artifact %q byte count is %d, recorded %d", result.ResultPath, len(data), result.Bytes)
+		return contractreview.ExecutionReportUnavailable, nil, "", false, resultPath, fmt.Errorf("result artifact %q byte count is %d, recorded %d", resultPath, len(data), result.Bytes)
 	}
 	if !bareSHA256(result.SHA256) {
-		return contractreview.ExecutionReportUnavailable, nil, "", false, result.ResultPath, fmt.Errorf("result artifact %q has invalid recorded sha256", result.ResultPath)
+		return contractreview.ExecutionReportUnavailable, nil, "", false, resultPath, fmt.Errorf("result artifact %q has invalid recorded sha256", resultPath)
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != strings.ToLower(result.SHA256) {
-		return contractreview.ExecutionReportUnavailable, nil, "", false, result.ResultPath, fmt.Errorf("result artifact %q does not match recorded sha256", result.ResultPath)
+		return contractreview.ExecutionReportUnavailable, nil, "", false, resultPath, fmt.Errorf("result artifact %q does not match recorded sha256", resultPath)
 	}
 	if record.Contract == nil || !record.Contract.compliant() {
-		return contractreview.ExecutionReportInvalid, nil, "", true, result.ResultPath, errors.New("Agentbus output contract is not compliant")
+		return contractreview.ExecutionReportInvalid, nil, "", true, resultPath, errors.New("Agentbus output contract is not compliant")
 	}
 	report, err := contractreview.DecodeAndValidateReviewReportV2(data, request, frozen)
 	if err != nil {
-		return contractreview.ExecutionReportInvalid, nil, "", true, result.ResultPath, fmt.Errorf("validate review report: %w", err)
+		return contractreview.ExecutionReportInvalid, nil, "", true, resultPath, fmt.Errorf("validate review report: %w", err)
 	}
 	if report.Reviewer != expectedReviewer {
-		return contractreview.ExecutionReportMissing, nil, "", true, result.ResultPath, fmt.Errorf("reviewer %q job produced report for reviewer %q; required output for reviewer %q is missing", expectedReviewer, report.Reviewer, expectedReviewer)
+		return contractreview.ExecutionReportMissing, nil, "", true, resultPath, fmt.Errorf("reviewer %q job produced report for reviewer %q; required output for reviewer %q is missing", expectedReviewer, report.Reviewer, expectedReviewer)
 	}
 	reportDigest, err := contractreview.ReviewReportV2Digest(report)
 	if err != nil {
-		return contractreview.ExecutionReportInvalid, nil, "", true, result.ResultPath, fmt.Errorf("digest review report: %w", err)
+		return contractreview.ExecutionReportInvalid, nil, "", true, resultPath, fmt.Errorf("digest review report: %w", err)
 	}
-	return contractreview.ExecutionReportValid, &report, reportDigest, true, result.ResultPath, nil
+	return contractreview.ExecutionReportValid, &report, reportDigest, true, resultPath, nil
 }
 
 type jobRecord struct {

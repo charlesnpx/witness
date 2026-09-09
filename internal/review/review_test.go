@@ -377,6 +377,162 @@ func TestPrepareDefaultPacketsStayOutsideSourceAndRejectsInTreePackets(t *testin
 	}
 }
 
+func TestPrepareRejectsSymlinkedPacketFileWithoutChangingSource(t *testing.T) {
+	sourceDirectory := t.TempDir()
+	operatorPath := filepath.Join(sourceDirectory, "operator.txt")
+	operatorBefore := []byte("operator work\n")
+	if err := os.WriteFile(operatorPath, operatorBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packetDirectory := t.TempDir()
+	resolvedPacketDirectory, err := filepath.EvalSymlinks(packetDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packetPath := filepath.Join(resolvedPacketDirectory, contractreview.RoleDefect+".prompt.txt")
+	if err := os.Symlink(operatorPath, packetPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Prepare(PrepareOptions{
+		Config:          DefaultConfig(),
+		FrozenCharter:   testFrozenCharter(t),
+		SourceDir:       sourceDirectory,
+		PacketDirectory: packetDirectory,
+	})
+	if err == nil || !strings.Contains(err.Error(), packetPath) {
+		t.Fatalf("Prepare error = %v, want refusal naming symlinked packet %q", err, packetPath)
+	}
+	operatorAfter, err := os.ReadFile(operatorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(operatorAfter) != string(operatorBefore) {
+		t.Fatalf("operator file = %q, want unchanged %q", operatorAfter, operatorBefore)
+	}
+	packetInfo, err := os.Lstat(packetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packetInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("packet path %q was not left as a symlink", packetPath)
+	}
+}
+
+func TestSimpleAdapterResolvesSymlinkedWorkingDirectoryAndDetectsDrift(t *testing.T) {
+	targetDirectory := t.TempDir()
+	sourcePath := filepath.Join(targetDirectory, "source.txt")
+	if err := os.WriteFile(sourcePath, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkDirectory := filepath.Join(t.TempDir(), "working-link")
+	if err := os.Symlink(targetDirectory, linkDirectory); err != nil {
+		t.Fatal(err)
+	}
+	resolvedWorkingDirectory, err := filepath.EvalSymlinks(linkDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := SourceDigest(resolvedWorkingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request, frozen, packets := testRunInputs(t)
+	resultPaths := testReports(t, request, frozen)
+	delegate, agentbus := fakeReviewCommands(t, resultPaths, JobExitCompleted)
+	defectSHA, defectBytes := artifactMetadata(t, resultPaths[contractreview.RoleDefect])
+	economySHA, economyBytes := artifactMetadata(t, resultPaths[contractreview.RoleEconomy])
+	setExecutable(t, agentbus, fmt.Sprintf(`#!/bin/sh
+job=""
+for arg in "$@"; do
+  case "$arg" in
+    job-defect|job-economy) job="$arg" ;;
+  esac
+done
+if [ "$1" = "transcript" ]; then
+  printf '{"state":"completed","items":[],"gap":false}\n'
+  exit 0
+fi
+if [ "$job" = "job-defect" ]; then
+  path=%q
+  sha=%q
+  bytes=%d
+else
+  path=%q
+  sha=%q
+  bytes=%d
+fi
+if [ "$1" = "status" ]; then
+  printf '{"jobs":[{"jobId":"%%s","state":"completed"}]}\n' "$job"
+else
+  if [ "$job" = "job-economy" ]; then
+    printf 'after' > %q
+  fi
+  printf '{"jobId":"%%s","state":"completed","result":{"resultPath":"%%s","sha256":"%%s","bytes":%%d},"contract":{"status":"compliant"}}\n' "$job" "$path" "$sha" "$bytes"
+fi
+exit 0
+`, resultPaths[contractreview.RoleDefect], defectSHA, defectBytes, resultPaths[contractreview.RoleEconomy], economySHA, economyBytes, sourcePath))
+
+	result, err := NewSimpleAdapter(SimpleAdapterOptions{
+		DelegateExecutable: delegate,
+		AgentbusExecutable: agentbus,
+		PollInterval:       -1,
+		TranscriptPageSize: 2,
+	}).Run(context.Background(), SimpleRunOptions{
+		Request:          request,
+		FrozenCharter:    frozen,
+		Packets:          packets,
+		WorkingDirectory: linkDirectory,
+	})
+	if err != nil {
+		t.Fatalf("adapter Run: %v", err)
+	}
+	if result.Completion.Verdict != contractreview.CompletionVerdictFailedToRun {
+		t.Fatalf("verdict = %q, want failed_to_run after source change", result.Completion.Verdict)
+	}
+	after, err := SourceDigest(resolvedWorkingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := strings.Join(result.Diagnostics, "\n")
+	if !strings.Contains(diagnostics, before) || !strings.Contains(diagnostics, after) {
+		t.Fatalf("source-change diagnostics = %q, want digests %q and %q", diagnostics, before, after)
+	}
+}
+
+func TestPrepareRejectsRelativePacketDirectoryInsideSource(t *testing.T) {
+	sourceDirectory := t.TempDir()
+	resolvedSourceDirectory, err := filepath.EvalSymlinks(sourceDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(sourceDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousWorkingDirectory); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	relativePacketDirectory := "packets"
+	resolvedPacketDirectory := filepath.Join(resolvedSourceDirectory, relativePacketDirectory)
+
+	_, err = Prepare(PrepareOptions{
+		Config:          DefaultConfig(),
+		FrozenCharter:   testFrozenCharter(t),
+		SourceDir:       sourceDirectory,
+		PacketDirectory: relativePacketDirectory,
+	})
+	if err == nil || !strings.Contains(err.Error(), resolvedPacketDirectory) || !strings.Contains(err.Error(), resolvedSourceDirectory) {
+		t.Fatalf("Prepare error = %v, want resolved packet %q and source %q in containment error", err, resolvedPacketDirectory, resolvedSourceDirectory)
+	}
+}
+
 func testRunInputs(t *testing.T) (contractreview.ReviewRequestV2Document, charter.FrozenCharter, []ReviewerPacket) {
 	t.Helper()
 	frozen := *testFrozenCharter(t)
