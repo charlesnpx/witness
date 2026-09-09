@@ -27,6 +27,7 @@ import (
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/relayrun"
+	internalreview "github.com/charlesnpx/witness/internal/review"
 )
 
 func TestRouteHelp(t *testing.T) {
@@ -301,7 +302,7 @@ func TestRoleOutputValidate(t *testing.T) {
 	valid.CharterHash = frozen.CharterHash
 	valid.ArtifactDigest = digest.RawBytes([]byte("role-output-artifact"))
 	validPath := filepath.Join(dir, "valid.json")
-	if err := writeCanonical(validPath, valid); err != nil {
+	if err := internalreview.WriteCanonical(validPath, valid); err != nil {
 		t.Fatal(err)
 	}
 	validDigest, err := contracts.RoleOutputDigest(valid)
@@ -318,7 +319,7 @@ func TestRoleOutputValidate(t *testing.T) {
 	}
 	delete(invalidPayload, "source_identity")
 	invalidPath := filepath.Join(dir, "invalid.json")
-	if err := writeCanonical(invalidPath, invalidPayload); err != nil {
+	if err := internalreview.WriteCanonical(invalidPath, invalidPayload); err != nil {
 		t.Fatal(err)
 	}
 	invalid, err := readRoleOutputFile(invalidPath)
@@ -763,10 +764,10 @@ func TestVerificationPlanRejectsFailedPreflightResult(t *testing.T) {
 	bundle := writeCLIArtifact(t, dir, "bundle-failed-preflight.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight-failed.json", stateDir, compatibility, capabilities, bundle)
 
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	failed := preflight.Result{
@@ -790,7 +791,7 @@ func TestVerificationPlanRejectsFailedPreflightResult(t *testing.T) {
 			Message: "preflight failed",
 		}},
 	}
-	if err := writeCanonical(preflightPath, failed); err != nil {
+	if err := internalreview.WriteCanonical(preflightPath, failed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -866,11 +867,11 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 	bundle := writeCLIArtifact(t, dir, "bundle.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
 
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
 	roleOutput := validCLIRoleOutput(frozen)
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, roleOutput); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -933,7 +934,7 @@ func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
 	bundle := writeCLIArtifact(t, dir, "bundle.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
 
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
 	roleOutput := validCLIRoleOutput(frozen)
@@ -943,7 +944,7 @@ func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
 		EvaluatedPaths:          []string{"whole-tree"},
 		EvaluatedCharterGoalIDs: []string{"goal-cli"},
 	}
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, roleOutput); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -990,10 +991,10 @@ func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -1047,7 +1048,7 @@ func TestVerificationAssembleStateDirDefaultsUseRetainedPreflightInventory(t *te
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	staleCompatibility, _, _, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
-	if err := writeCanonical(staleCompatibility, map[string]any{"not": "the retained compatibility manifest"}); err != nil {
+	if err := internalreview.WriteCanonical(staleCompatibility, map[string]any{"not": "the retained compatibility manifest"}); err != nil {
 		t.Fatal(err)
 	}
 	retainedDir := filepath.Join(stateDir, "retained")
@@ -1055,11 +1056,11 @@ func TestVerificationAssembleStateDirDefaultsUseRetainedPreflightInventory(t *te
 		t.Fatal(err)
 	}
 	capabilities := filepath.Join(retainedDir, "relay-capabilities-retained.json")
-	if err := writeCanonical(capabilities, map[string]any{"name": filepath.Base(capabilities)}); err != nil {
+	if err := internalreview.WriteCanonical(capabilities, map[string]any{"name": filepath.Base(capabilities)}); err != nil {
 		t.Fatal(err)
 	}
 	bundle := filepath.Join(retainedDir, "integration-bundle-retained.json")
-	if err := writeCanonical(bundle, map[string]any{"name": filepath.Base(bundle)}); err != nil {
+	if err := internalreview.WriteCanonical(bundle, map[string]any{"name": filepath.Base(bundle)}); err != nil {
 		t.Fatal(err)
 	}
 	compatibility := writeCLICompatibilityArtifact(t, retainedDir, "compatibility-manifest-retained.json", filepath.Base(capabilities), filepath.Base(bundle))
@@ -1077,17 +1078,17 @@ func TestVerificationAssembleStateDirDefaultsUseRetainedPreflightInventory(t *te
 		"relay_capabilities":     filepath.ToSlash(filepath.Join("retained", filepath.Base(capabilities))),
 		"integration_bundle":     filepath.ToSlash(filepath.Join("retained", filepath.Base(bundle))),
 	}
-	if err := writeCanonical(preflightPath, preflightResult); err != nil {
+	if err := internalreview.WriteCanonical(preflightPath, preflightResult); err != nil {
 		t.Fatal(err)
 	}
 
 	frozen := validCLIFrozenCharter(t)
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutputPath := filepath.Join(dir, "role-output.json")
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -1128,17 +1129,17 @@ func TestVerificationAssembleExplicitInputOverridesStateDirDefault(t *testing.T)
 	stateDir := filepath.Join(dir, "state")
 	defaultCompatibility, capabilities, bundle, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
 	overrideCompatibility := writeCLICompatibilityArtifact(t, dir, "compatibility-override.json", filepath.Base(capabilities), filepath.Base(bundle))
-	if err := writeCanonical(defaultCompatibility, map[string]any{"not": "a compatibility manifest"}); err != nil {
+	if err := internalreview.WriteCanonical(defaultCompatibility, map[string]any{"not": "a compatibility manifest"}); err != nil {
 		t.Fatal(err)
 	}
 	frozen := validCLIFrozenCharter(t)
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, overrideCompatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -1183,13 +1184,13 @@ func TestAdjudicateCLIWritesRunResult(t *testing.T) {
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	manifestPath := filepath.Join(dir, "manifest.json")
 	outPath := filepath.Join(dir, "adjudication.json")
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, roleOutput); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
+	if err := internalreview.WriteCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -1311,13 +1312,13 @@ func TestAdjudicateCLILedgerQuestionAllowsEmptyFindingID(t *testing.T) {
 	manifestPath := filepath.Join(dir, "manifest.json")
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	outPath := filepath.Join(dir, "adjudication.json")
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, roleOutput); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
+	if err := internalreview.WriteCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1384,13 +1385,13 @@ func TestAdjudicateCLIAcceptsPriorLineage(t *testing.T) {
 	manifestPath := filepath.Join(dir, "manifest.json")
 	lineagePath := filepath.Join(dir, "prior-lineage.jsonl")
 	outPath := filepath.Join(dir, "adjudication.json")
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, roleOutput); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
+	if err := internalreview.WriteCanonical(manifestPath, validCLIAdjudicationManifest(t, frozen, roleOutput)); err != nil {
 		t.Fatal(err)
 	}
 	lineage := adjudicate.PriorLineageRecord{
@@ -1444,10 +1445,10 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 	bundle := writeCLIArtifact(t, dir, "bundle-run.json")
 	artifactPath := writeCLIReviewedArtifact(t, dir)
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight-run.json", stateDir, compatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -1525,7 +1526,7 @@ func TestVerificationAssembleRunRelayRetainsConsumingRecordAcrossBudgetRejection
 	if err := os.WriteFile(filepath.Join(sourceDir, "app.txt"), []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(charterPath, validCLICharter(t)); err != nil {
+	if err := internalreview.WriteCanonical(charterPath, validCLICharter(t)); err != nil {
 		t.Fatal(err)
 	}
 	buildCLIFakeRelay(t, relayPath)
@@ -1590,7 +1591,7 @@ func TestVerificationAssembleRunRelayRetainsConsumingRecordAcrossBudgetRejection
 		if err := os.MkdirAll(filepath.Dir(request.Path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := writeCanonical(request.Path, roleOutput); err != nil {
+		if err := internalreview.WriteCanonical(request.Path, roleOutput); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1682,10 +1683,10 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	capabilities := writeCLIArtifact(t, dir, "capabilities-run-record.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-run-record.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight-run-record.json", stateDir, compatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, roleOutput); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, roleOutput); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -1702,7 +1703,7 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	rawStdout := append(bytes.Repeat([]byte{0xff}, 64*1024/2+1), bytes.Repeat([]byte{0xc3}, 64*1024/2+1)...)
 	retainedStdout := append(append([]byte(nil), rawStdout[:64*1024/2]...), rawStdout[len(rawStdout)-64*1024/2:]...)
 	argv := []string{"fake-relay", "run", "--recipe", "witness-falsify-v2-codex", "--json"}
-	if err := writeCanonical(runRecordPath, relayrun.RunRecord{
+	if err := internalreview.WriteCanonical(runRecordPath, relayrun.RunRecord{
 		SchemaVersion:   relayrun.RunRecordSchema,
 		BatchID:         "defect-batch-1",
 		Status:          relayrun.RunStatusLaunchFailed,
@@ -1976,7 +1977,7 @@ func TestReadRunRecordEvidenceMergesEmbeddedRelayVerdictsWithSuppliedVerdicts(t 
 		}},
 	}
 	runRecordPath := filepath.Join(dir, "relay-run-record.json")
-	if err := writeCanonical(runRecordPath, relayrun.RunRecord{
+	if err := internalreview.WriteCanonical(runRecordPath, relayrun.RunRecord{
 		SchemaVersion:   relayrun.RunRecordSchema,
 		BatchID:         batchID,
 		Status:          contracts.RecordStatusUnavailable,
@@ -2009,7 +2010,7 @@ func TestReadRunRecordEvidenceMergesEmbeddedRelayVerdictsWithSuppliedVerdicts(t 
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			verdictPath := filepath.Join(dir, test.name+".json")
-			if err := writeCanonical(verdictPath, test.verdicts); err != nil {
+			if err := internalreview.WriteCanonical(verdictPath, test.verdicts); err != nil {
 				t.Fatal(err)
 			}
 			suppliedEvidence, err := readRelayEvidence([]string{batchID + "=" + verdictPath}, nil)
@@ -2059,10 +2060,10 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 	capabilities := writeCLIArtifact(t, dir, "capabilities-verdict-merge.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-verdict-merge.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight-verdict-merge.json", stateDir, compatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -2086,7 +2087,7 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 		}},
 	}
 	runRecordPath := filepath.Join(dir, "relay-run-record-verdict-merge.json")
-	if err := writeCanonical(runRecordPath, relayrun.RunRecord{
+	if err := internalreview.WriteCanonical(runRecordPath, relayrun.RunRecord{
 		SchemaVersion:   relayrun.RunRecordSchema,
 		BatchID:         batchID,
 		Status:          contracts.RecordStatusUnavailable,
@@ -2098,7 +2099,7 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 		t.Fatal(err)
 	}
 	verdictPath := filepath.Join(dir, "relay-verdict-identical.json")
-	if err := writeCanonical(verdictPath, verdicts); err != nil {
+	if err := internalreview.WriteCanonical(verdictPath, verdicts); err != nil {
 		t.Fatal(err)
 	}
 	selectedContract := writeCLISelectedContractArtifact(t, dir, "contract-verdict-merge.json")
@@ -2134,7 +2135,7 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 	conflictingVerdicts.Verdicts = append([]contracts.WitnessVerdict(nil), verdicts.Verdicts...)
 	conflictingVerdicts.Verdicts[0].Rationale = "conflicting verdict identity"
 	conflictingVerdictPath := filepath.Join(dir, "relay-verdict-conflicting.json")
-	if err := writeCanonical(conflictingVerdictPath, conflictingVerdicts); err != nil {
+	if err := internalreview.WriteCanonical(conflictingVerdictPath, conflictingVerdicts); err != nil {
 		t.Fatal(err)
 	}
 	err = route([]string{
@@ -2170,10 +2171,10 @@ func TestVerificationAssembleRunRelayRoundTripPasses(t *testing.T) {
 	bundle := writeCLIArtifact(t, dir, "bundle-success.json")
 	artifactPath := writeCLIReviewedArtifact(t, dir)
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight-success.json", stateDir, compatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -2241,10 +2242,10 @@ func TestVerificationAssembleOutputContainsUnverifiedRelationships(t *testing.T)
 	bundle := writeCLIArtifact(t, dir, "bundle-unverified.json")
 	artifactPath := writeCLIReviewedArtifact(t, dir)
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight-unverified.json", stateDir, compatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -2316,10 +2317,10 @@ func TestVerificationAssembleWritesManifestBeforeBatchError(t *testing.T) {
 	capabilities := writeCLIArtifact(t, dir, "capabilities-error.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-error.json")
 	preflightPath := writeCLIPreflightResult(t, dir, "preflight-error.json", stateDir, compatibility, capabilities, bundle)
-	if err := writeCanonical(frozenPath, frozen); err != nil {
+	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
+	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
 		t.Fatal(err)
 	}
 	if err := route([]string{
@@ -2343,7 +2344,7 @@ func TestVerificationAssembleWritesManifestBeforeBatchError(t *testing.T) {
 	}
 	batch.TaskShape = contracts.BatchTaskEconomy
 	tamperedBatchPath := filepath.Join(dir, "tampered-batch.json")
-	if err := writeCanonical(tamperedBatchPath, batch); err != nil {
+	if err := internalreview.WriteCanonical(tamperedBatchPath, batch); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2382,7 +2383,7 @@ func TestArtifactRefForSelectedContractPrefersContractDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "selected-contract.json")
-	if err := writeCanonical(path, map[string]any{
+	if err := internalreview.WriteCanonical(path, map[string]any{
 		"contract_id":     "witnessed-review/witness-falsification-v2",
 		"contract_digest": contractDigest,
 		"contract":        contract,
@@ -2412,7 +2413,7 @@ func TestSelectedContractRefsRejectsTamperedSelectedContractEnvelope(t *testing.
 		"contract":        contract,
 	}
 	path := filepath.Join(dir, "selected-contract-envelope.json")
-	if err := writeCanonical(path, map[string]any{
+	if err := internalreview.WriteCanonical(path, map[string]any{
 		"schema_version": "witness-retained-artifact-v1",
 		"digest_profile": digest.Profile,
 		"payload_digest": digest.RawBytes([]byte("tampered payload digest")),
@@ -3227,7 +3228,7 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 	if strings.HasPrefix(name, "bundle") {
 		value = validCLIIntegrationBundle()
 	}
-	if err := writeCanonical(path, value); err != nil {
+	if err := internalreview.WriteCanonical(path, value); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -3239,11 +3240,11 @@ func writeCLIStateDirAssembleArtifacts(t *testing.T, stateDir string) (string, s
 		t.Fatal(err)
 	}
 	capabilitiesPath := filepath.Join(stateDir, assembleStateDirRelayCapabilities)
-	if err := writeCanonical(capabilitiesPath, map[string]any{"name": assembleStateDirRelayCapabilities}); err != nil {
+	if err := internalreview.WriteCanonical(capabilitiesPath, map[string]any{"name": assembleStateDirRelayCapabilities}); err != nil {
 		t.Fatal(err)
 	}
 	bundlePath := filepath.Join(stateDir, assembleStateDirIntegrationBundle)
-	if err := writeCanonical(bundlePath, map[string]any{"name": assembleStateDirIntegrationBundle}); err != nil {
+	if err := internalreview.WriteCanonical(bundlePath, map[string]any{"name": assembleStateDirIntegrationBundle}); err != nil {
 		t.Fatal(err)
 	}
 	compatibilityPath := writeCLICompatibilityArtifact(t, stateDir, assembleStateDirCompatibilityManifest, filepath.Base(capabilitiesPath), filepath.Base(bundlePath))
@@ -3261,7 +3262,7 @@ func writeCLICompatibilityArtifact(t *testing.T, dir string, name string, capabi
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, name)
-	if err := writeCanonical(path, map[string]any{
+	if err := internalreview.WriteCanonical(path, map[string]any{
 		"schema_version": "witness-retained-artifact-v1",
 		"digest_profile": digest.Profile,
 		"payload_digest": compatibilityDigest,
@@ -3313,7 +3314,7 @@ func writeCLIPreflightResult(t *testing.T, dir string, name string, stateDir str
 		SnapshotDigest:   digest.RawBytes([]byte("artifact")),
 		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
 	}
-	if err := writeCanonical(path, result); err != nil {
+	if err := internalreview.WriteCanonical(path, result); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -3464,7 +3465,7 @@ func writeCLISelectedContractArtifact(t *testing.T, dir string, name string) str
 		contractDigests[contractID] = contractDigest
 	}
 	path := filepath.Join(dir, name)
-	if err := writeCanonical(path, map[string]any{
+	if err := internalreview.WriteCanonical(path, map[string]any{
 		"contracts":        contractEntries,
 		"contract_digests": contractDigests,
 	}); err != nil {
