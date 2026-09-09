@@ -122,7 +122,7 @@ install_target_files() {
 		install -m 0644 "$repo_root/skill/SKILL.md" "$codex_skill_path"
 		install -m 0644 "$repo_root/skill/bundle/relay-integration-bundle-v2.json" "$codex_bundle_path"
 		install -m 0644 "$repo_root/skill/review/SKILL.md" "$codex_review_skill_path"
-		install -m 0644 "$repo_root/skill/review:configure/SKILL.md" "$codex_review_configure_skill_path"
+		install -m 0644 "$repo_root/skill/review-configure/SKILL.md" "$codex_review_configure_skill_path"
 	fi
 	if [[ "$include_claude" == "true" ]]; then
 		mkdir -p "$(dirname "$claude_bundle_path")"
@@ -130,7 +130,7 @@ install_target_files() {
 		install -m 0644 "$repo_root/skill/SKILL.md" "$claude_skill_path"
 		install -m 0644 "$repo_root/skill/bundle/relay-integration-bundle-v2.json" "$claude_bundle_path"
 		install -m 0644 "$repo_root/skill/review/SKILL.md" "$claude_review_skill_path"
-		install -m 0644 "$repo_root/skill/review:configure/SKILL.md" "$claude_review_configure_skill_path"
+		install -m 0644 "$repo_root/skill/review-configure/SKILL.md" "$claude_review_configure_skill_path"
 	fi
 }
 
