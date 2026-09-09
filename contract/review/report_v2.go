@@ -105,10 +105,6 @@ type EconomyEquivalenceEvidence struct {
 	CharterGoalIDs []string `json:"charter_goal_ids"`
 }
 
-// EquivalenceEvidence is a concise alias for EconomyEquivalenceEvidence for
-// callers that use the evidence concept without the finding-specific name.
-type EquivalenceEvidence = EconomyEquivalenceEvidence
-
 func (document *ReviewReportV2Document) UnmarshalJSON(data []byte) error {
 	type alias ReviewReportV2Document
 	var decoded alias

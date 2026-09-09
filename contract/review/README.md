@@ -32,11 +32,15 @@ and required reviewer identifier. It retains the v1 report surfaces and adds
 finding kind/attribution plus economy equivalence evidence: the behavior
 preserved by a removal and the declared Charter goals it serves.
 
-`review-completion-v1` is host-facing. Its `HostExecutionEvidence` has private
-state and can only be initialized from `ObservedReviewExecution` through
-`NewHostExecutionEvidence`; JSON decoding deliberately leaves that state
-untrusted. Therefore a model-written report or completion JSON cannot supply
-evidence that permits the `satisfied` verdict.
+`review-completion-v1` is a host-facing completion record, not re-validatable
+proof. Its `HostExecutionEvidence` has private state and can only be initialized
+from `ObservedReviewExecution` through `NewHostExecutionEvidence`; JSON decoding
+deliberately leaves that state untrusted. Bytes read from disk cannot establish
+that execution happened because anyone could have written them. The host process
+that observed execution is the source of trust, so a consumer checking a gate
+acts on the completion it produced in-process. Persisted completion JSON is for
+audit and human inspection; `DecodeReviewCompletion` decodes it without
+validating it or establishing that the review ran.
 
 The `review-role-output-v3` through `review-role-output-v5` family consists of
 Witness-internal compatibility structures retained for the Witness engine. It is

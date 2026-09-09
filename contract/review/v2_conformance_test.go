@@ -84,6 +84,41 @@ func TestReviewV2ConformanceCorpus(t *testing.T) {
 	}
 }
 
+func TestDecodeReviewCompletionForInspection(t *testing.T) {
+	evidence, err := NewHostExecutionEvidence(ObservedReviewExecution{
+		Complete:                true,
+		ResultArtifactAvailable: true,
+		ReportOutcomes: map[string]ObservedReportOutcome{
+			"reviewer-a": {Status: ExecutionReportValid},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := ReviewCompletionDocument{
+		SchemaVersion:         ReviewCompletionV1,
+		RequestDigest:         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Adapter:               "adapter-a",
+		RequiredReportDigests: map[string]string{"reviewer-a": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+		ExecutionEvidence:     evidence,
+		Verdict:               CompletionVerdictSatisfied,
+	}
+	data, err := json.Marshal(declared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := DecodeReviewCompletion(data)
+	if err != nil {
+		t.Fatalf("DecodeReviewCompletion: %v", err)
+	}
+	if inspected.SchemaVersion != declared.SchemaVersion || inspected.RequestDigest != declared.RequestDigest || inspected.Adapter != declared.Adapter || inspected.Verdict != declared.Verdict || inspected.RequiredReportDigests["reviewer-a"] != declared.RequiredReportDigests["reviewer-a"] {
+		t.Fatalf("inspection decode = %#v, want declared fields", inspected)
+	}
+	if inspected.ExecutionEvidence.HostProduced() {
+		t.Fatal("inspection decode treated persisted execution evidence as trusted")
+	}
+}
+
 func v2ConformanceFrozenCharter(t *testing.T) charter.FrozenCharter {
 	t.Helper()
 	data, err := ConformanceFS.ReadFile("testdata/conformance/charter.json")

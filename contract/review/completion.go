@@ -177,8 +177,11 @@ func (evidence *HostExecutionEvidence) UnmarshalJSON(data []byte) error {
 
 // ReviewCompletionDocument records the host's completion of a v2 request. It
 // binds the request digest, adapter, available required report digests, opaque
-// host execution evidence, and a terminal verdict. It is invalid when report
-// set, bindings, evidence provenance, or satisfied-verdict prerequisites fail.
+// host execution evidence, and a terminal verdict. A persisted completion is a
+// record for audit and inspection, not re-validatable proof: only the host
+// process that observed execution can trust its execution evidence. A consumer
+// checking a gate acts on the completion produced in-process by that host, not
+// on this record decoded from storage.
 type ReviewCompletionDocument struct {
 	// SchemaVersion identifies the shared completion boundary; any other value
 	// is invalid.
@@ -250,19 +253,12 @@ func NewReviewCompletionDocument(request ReviewRequestV2Document, evidence HostE
 	return document, nil
 }
 
-// DecodeAndValidateReviewCompletion strictly decodes a completion document
-// and validates it against request. JSON evidence remains untrusted after
-// decode, so a persisted model-authored completion cannot become satisfied;
-// host code must attach a HostExecutionEvidence value first.
-func DecodeAndValidateReviewCompletion(data []byte, request ReviewRequestV2Document) (ReviewCompletionDocument, error) {
-	document, err := strictjson.DecodeBytes[ReviewCompletionDocument](data, strictjson.DefaultMaxBytes)
-	if err != nil {
-		return ReviewCompletionDocument{}, err
-	}
-	if err := RequireValidReviewCompletion(document, request); err != nil {
-		return ReviewCompletionDocument{}, err
-	}
-	return document, nil
+// DecodeReviewCompletion strictly decodes a persisted completion record for
+// inspection. It does not validate the document and cannot establish that the
+// review ran; decoded HostExecutionEvidence is intentionally untrusted. A
+// consumer checking a gate must use the completion produced in-process.
+func DecodeReviewCompletion(data []byte) (ReviewCompletionDocument, error) {
+	return strictjson.DecodeBytes[ReviewCompletionDocument](data, strictjson.DefaultMaxBytes)
 }
 
 // RequireValidReviewCompletion returns an aggregated validation error when a
@@ -359,15 +355,3 @@ func ValidateReviewCompletion(document ReviewCompletionDocument, request ReviewR
 func ReviewCompletionDigest(document ReviewCompletionDocument) (string, error) {
 	return digest.SemanticJSON(document)
 }
-
-// ReviewVerdictSatisfied is an alias for CompletionVerdictSatisfied for callers
-// that name terminal values by their review meaning.
-const ReviewVerdictSatisfied = CompletionVerdictSatisfied
-
-// ReviewVerdictNotSatisfied is an alias for CompletionVerdictNotSatisfied for
-// callers that name terminal values by their review meaning.
-const ReviewVerdictNotSatisfied = CompletionVerdictNotSatisfied
-
-// ReviewVerdictFailedToRun is an alias for CompletionVerdictFailedToRun for
-// callers that name terminal values by their review meaning.
-const ReviewVerdictFailedToRun = CompletionVerdictFailedToRun
