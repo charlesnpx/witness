@@ -68,10 +68,15 @@ var witnessCommands = map[string]map[string]bool{
 		"begin":  true,
 		"resume": true,
 	},
+	"review": {
+		"configure": true,
+		"run":       true,
+	},
 }
 
 var singleCommands = map[string]bool{
-	"adjudicate": true,
+	"adjudicate":       true,
+	"review:configure": true,
 }
 
 var verificationAssembleRelayRunner relayclient.Runner
@@ -106,6 +111,9 @@ func route(args []string) error {
 		if args[0] == "adjudicate" {
 			return runAdjudicate(args[1:])
 		}
+		if args[0] == "review:configure" {
+			return runReviewConfigure(args[1:])
+		}
 		return notImplemented(args[0])
 	}
 	if subcommands, ok := witnessCommands[args[0]]; ok {
@@ -135,6 +143,9 @@ func route(args []string) error {
 			}
 			if args[0] == "pass" {
 				return runPass(args[1], args[2:])
+			}
+			if args[0] == "review" {
+				return runReview(args[1], args[2:])
 			}
 			return notImplemented(strings.Join(args[:2], " "))
 		}

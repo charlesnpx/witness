@@ -1,0 +1,412 @@
+package review
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/charlesnpx/witness/contract/canonjson"
+	"github.com/charlesnpx/witness/contract/charter"
+	"github.com/charlesnpx/witness/contract/digest"
+	contractreview "github.com/charlesnpx/witness/contract/review"
+	"github.com/charlesnpx/witness/contract/strictjson"
+)
+
+// PrepareOptions describes the caller-owned source and Charter inputs for an
+// ordinary review. The caller supplies a frozen Charter or CharterPath; it
+// does not assemble a request document by hand.
+type PrepareOptions struct {
+	Config            Config
+	FrozenCharter     *charter.FrozenCharter
+	CharterPath       string
+	AmendmentsPath    string
+	SourceDir         string
+	PacketDirectory   string
+	Subject           contractreview.RequestSubject
+	ReviewInputDigest string
+	ConsumerIdentity  contractreview.Identity
+}
+
+// PreparedReview contains the request and packet files produced before the
+// adapter is invoked.
+type PreparedReview struct {
+	Request       contractreview.ReviewRequestV2Document
+	FrozenCharter charter.FrozenCharter
+	Recipe        contractreview.ReviewRecipe
+	Packets       []ReviewerPacket
+}
+
+// Prepare freezes/loads the Charter, derives a source input digest when the
+// caller did not provide one, and writes one prompt/schema packet per required
+// reviewer.
+func Prepare(options PrepareOptions) (PreparedReview, error) {
+	if err := ValidateConfig(options.Config); err != nil {
+		return PreparedReview{}, fmt.Errorf("validate review configuration: %w", err)
+	}
+	frozen, err := resolveFrozenCharter(options)
+	if err != nil {
+		return PreparedReview{}, err
+	}
+	if err := validateFrozenCharter(frozen); err != nil {
+		return PreparedReview{}, fmt.Errorf("validate frozen review Charter: %w", err)
+	}
+	if strings.TrimSpace(options.SourceDir) == "" {
+		return PreparedReview{}, errors.New("review preparation requires source directory")
+	}
+	sourceDirectory, err := filepath.Abs(options.SourceDir)
+	if err != nil {
+		return PreparedReview{}, fmt.Errorf("resolve review source directory: %w", err)
+	}
+	if info, statErr := os.Stat(sourceDirectory); statErr != nil || !info.IsDir() {
+		if statErr != nil {
+			return PreparedReview{}, fmt.Errorf("review source directory %q: %w", sourceDirectory, statErr)
+		}
+		return PreparedReview{}, fmt.Errorf("review source directory %q is not a directory", sourceDirectory)
+	}
+	recipe, ok := BundledRecipe(options.Config.Recipe)
+	if !ok {
+		return PreparedReview{}, fmt.Errorf("configuration field \"recipe\" names unsupported recipe %q", options.Config.Recipe)
+	}
+	recipe.Policy["require_transcript"] = options.Config.Policy.RequireTranscript
+	recipeBytes, err := contractreview.ReviewRecipeCanonicalBytes(recipe)
+	if err != nil {
+		return PreparedReview{}, fmt.Errorf("encode frozen review recipe: %w", err)
+	}
+	recipeDigest, err := contractreview.ReviewRecipeDigest(recipeBytes)
+	if err != nil {
+		return PreparedReview{}, fmt.Errorf("digest frozen review recipe: %w", err)
+	}
+	inputDigest := options.ReviewInputDigest
+	if strings.TrimSpace(inputDigest) == "" {
+		inputDigest, err = SourceDigest(sourceDirectory)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("derive review input digest: %w", err)
+		}
+	}
+	if !digest.WellFormed(inputDigest) {
+		return PreparedReview{}, fmt.Errorf("review input digest %q is not a relay-root-digests-v1 sha256 digest", inputDigest)
+	}
+	subject := options.Subject
+	if strings.TrimSpace(subject.Head) == "" {
+		subject.Head = sourceHead(sourceDirectory, inputDigest)
+	}
+	consumer := options.ConsumerIdentity
+	if strings.TrimSpace(consumer.Kind) == "" {
+		consumer.Kind = DefaultConsumerKind
+	}
+	if strings.TrimSpace(consumer.ID) == "" {
+		consumer.ID = DefaultConsumerID
+	}
+	request := contractreview.ReviewRequestV2Document{
+		SchemaVersion:     contractreview.ReviewRequestV2,
+		ConsumerIdentity:  consumer,
+		Subject:           subject,
+		CharterHash:       frozen.CharterHash,
+		ReviewInputDigest: inputDigest,
+		FrozenRecipe:      append(json.RawMessage(nil), recipeBytes...),
+		RecipeDigest:      recipeDigest,
+		Adapter:           options.Config.Adapter.ID,
+		RequiredOutputs:   append([]string(nil), recipe.RequiredOutputs...),
+	}
+	if err := contractreview.RequireValidReviewRequestV2(request); err != nil {
+		return PreparedReview{}, fmt.Errorf("construct review request: %w", err)
+	}
+	packetDirectory := options.PacketDirectory
+	if strings.TrimSpace(packetDirectory) == "" {
+		packetDirectory = filepath.Join(sourceDirectory, ".witness-review")
+	}
+	packetDirectory, err = filepath.Abs(packetDirectory)
+	if err != nil {
+		return PreparedReview{}, fmt.Errorf("resolve review packet directory: %w", err)
+	}
+	if err := os.MkdirAll(packetDirectory, 0o700); err != nil {
+		return PreparedReview{}, fmt.Errorf("create review packet directory %q: %w", packetDirectory, err)
+	}
+	packets := make([]ReviewerPacket, 0, len(recipe.RequiredOutputs))
+	for _, reviewer := range recipe.RequiredOutputs {
+		promptPath := filepath.Join(packetDirectory, reviewer+".prompt.txt")
+		schemaPath := filepath.Join(packetDirectory, reviewer+".schema.json")
+		prompt, err := reviewerPrompt(request, frozen, recipe, reviewer, sourceDirectory)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("prepare reviewer %q prompt: %w", reviewer, err)
+		}
+		if err := writePrivateFile(promptPath, []byte(prompt)); err != nil {
+			return PreparedReview{}, fmt.Errorf("write reviewer %q prompt: %w", reviewer, err)
+		}
+		schema, err := reviewerSchema(request, frozen, reviewer)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("prepare reviewer %q schema: %w", reviewer, err)
+		}
+		if err := writePrivateFile(schemaPath, schema); err != nil {
+			return PreparedReview{}, fmt.Errorf("write reviewer %q schema: %w", reviewer, err)
+		}
+		packets = append(packets, ReviewerPacket{Reviewer: reviewer, PromptPath: promptPath, SchemaPath: schemaPath})
+	}
+	return PreparedReview{Request: request, FrozenCharter: frozen, Recipe: recipe, Packets: packets}, nil
+}
+
+// Run executes the bundled workflow after preparing its request and packets.
+// The returned completion was constructed in this process from observed job
+// outcomes; callers may persist it but must not reload it as proof.
+func Run(ctx context.Context, prepareOptions PrepareOptions, adapterOptions SimpleAdapterOptions) (PreparedReview, SimpleRunResult, error) {
+	prepared, err := Prepare(prepareOptions)
+	if err != nil {
+		return PreparedReview{}, SimpleRunResult{}, err
+	}
+	if prepareOptions.Config.Adapter.ID != DefaultAdapterID {
+		return prepared, SimpleRunResult{}, fmt.Errorf("adapter %q is custom; invoke its configured skill or executable", prepareOptions.Config.Adapter.ID)
+	}
+	adapter := NewSimpleAdapter(adapterOptions)
+	runResult, err := adapter.Run(ctx, SimpleRunOptions{
+		Request:          prepared.Request,
+		FrozenCharter:    prepared.FrozenCharter,
+		Packets:          prepared.Packets,
+		WorkingDirectory: prepareOptions.SourceDir,
+	})
+	if err != nil {
+		return prepared, SimpleRunResult{}, err
+	}
+	return prepared, runResult, nil
+}
+
+// WriteCompletion persists an in-process completion record as an audit
+// record. It never reads the record back to make a gate decision.
+func WriteCompletion(path string, completion contractreview.ReviewCompletionDocument) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("completion output path is empty")
+	}
+	data, err := canonjson.Marshal(completion)
+	if err != nil {
+		return fmt.Errorf("encode review completion: %w", err)
+	}
+	if err := writePrivateFile(path, append(data, '\n')); err != nil {
+		return fmt.Errorf("write review completion %q: %w", path, err)
+	}
+	return nil
+}
+
+// SourceDigest returns a deterministic semantic digest of all regular files
+// below root, excluding the root's .git directory. File contents are read at
+// preparation time, so the request is bound to what the adapter was given.
+func SourceDigest(root string) (string, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	type fileEntry struct {
+		Path   string `json:"path"`
+		Digest string `json:"digest"`
+		Bytes  int64  `json:"bytes"`
+	}
+	entries := make([]fileEntry, 0)
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != root && entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, fileEntry{Path: filepath.ToSlash(relative), Digest: digest.RawBytes(data), Bytes: int64(len(data))})
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("walk source directory %q: %w", root, err)
+	}
+	sort.Slice(entries, func(left, right int) bool { return entries[left].Path < entries[right].Path })
+	return digest.SemanticJSON(map[string]any{"files": entries})
+}
+
+func resolveFrozenCharter(options PrepareOptions) (charter.FrozenCharter, error) {
+	if options.FrozenCharter != nil {
+		return *options.FrozenCharter, nil
+	}
+	if strings.TrimSpace(options.CharterPath) == "" {
+		return charter.FrozenCharter{}, errors.New("review preparation requires a Charter or frozen Charter path")
+	}
+	data, err := os.ReadFile(options.CharterPath)
+	if err != nil {
+		return charter.FrozenCharter{}, fmt.Errorf("read review Charter %q: %w", options.CharterPath, err)
+	}
+	var envelope map[string]json.RawMessage
+	if _, err := strictjson.DecodeBytes[map[string]json.RawMessage](data, strictjson.DefaultMaxBytes); err != nil {
+		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter %q: %w", options.CharterPath, err)
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter envelope %q: %w", options.CharterPath, err)
+	}
+	var schemaVersion string
+	if raw, ok := envelope["schema_version"]; ok {
+		if err := json.Unmarshal(raw, &schemaVersion); err != nil {
+			return charter.FrozenCharter{}, fmt.Errorf("decode review Charter schema_version: %w", err)
+		}
+	}
+	if schemaVersion == charter.FrozenSchemaVersion {
+		frozen, err := strictjson.DecodeBytes[charter.FrozenCharter](data, strictjson.DefaultMaxBytes)
+		if err != nil {
+			return charter.FrozenCharter{}, fmt.Errorf("decode frozen review Charter %q: %w", options.CharterPath, err)
+		}
+		return frozen, nil
+	}
+	input, err := charter.ReadBytes(data)
+	if err != nil {
+		return charter.FrozenCharter{}, fmt.Errorf("decode review Charter %q: %w", options.CharterPath, err)
+	}
+	var amendments []charter.OwnerEvent
+	if strings.TrimSpace(options.AmendmentsPath) != "" {
+		amendments, err = charter.ReadAmendmentsFile(options.AmendmentsPath)
+		if err != nil {
+			return charter.FrozenCharter{}, fmt.Errorf("read review Charter amendments %q: %w", options.AmendmentsPath, err)
+		}
+	}
+	frozen, err := charter.Freeze(input, amendments)
+	if err != nil {
+		return charter.FrozenCharter{}, fmt.Errorf("freeze review Charter: %w", err)
+	}
+	return frozen, nil
+}
+
+func validateFrozenCharter(frozen charter.FrozenCharter) error {
+	if frozen.SchemaVersion != charter.FrozenSchemaVersion {
+		return fmt.Errorf("schema_version must be %q", charter.FrozenSchemaVersion)
+	}
+	if frozen.DigestProfile != digest.Profile {
+		return fmt.Errorf("digest_profile must be %q", digest.Profile)
+	}
+	if !digest.WellFormed(frozen.CharterHash) {
+		return errors.New("charter_hash is not a valid sha256 digest")
+	}
+	expectedHash, err := charter.Hash(frozen.Charter)
+	if err != nil {
+		return fmt.Errorf("recompute charter_hash: %w", err)
+	}
+	if frozen.CharterHash != expectedHash {
+		return fmt.Errorf("charter_hash %q does not match normalized Charter hash %q", frozen.CharterHash, expectedHash)
+	}
+	properties := charter.Properties(frozen.Charter.OperationalEnvelope)
+	if frozen.ReachabilityRulesActive != properties.ReachabilityRulesActive {
+		return errors.New("reachability_rules_active does not match the frozen Charter")
+	}
+	if frozen.AdditiveRemediesAutomatic != properties.AdditiveRemediesAutomatic {
+		return errors.New("additive_remedies_automatic does not match the frozen Charter")
+	}
+	return nil
+}
+
+func sourceHead(sourceDirectory string, inputDigest string) string {
+	command := exec.Command("git", "-C", sourceDirectory, "rev-parse", "HEAD")
+	output, err := command.Output()
+	if err == nil && strings.TrimSpace(string(output)) != "" {
+		return strings.TrimSpace(string(output))
+	}
+	return "source-" + strings.TrimPrefix(inputDigest, digest.Prefix)[:12]
+}
+
+func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, recipe contractreview.ReviewRecipe, reviewer string, sourceDirectory string) (string, error) {
+	requestBytes, err := canonjson.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	charterBytes, err := canonjson.Marshal(frozen)
+	if err != nil {
+		return "", err
+	}
+	recipeBytes, err := canonjson.Marshal(recipe)
+	if err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "You are the independent %s reviewer in a Witness review.\n", reviewer)
+	fmt.Fprintf(&builder, "Read the frozen source at %s. Do not modify it.\n", sourceDirectory)
+	fmt.Fprintf(&builder, "Follow the recipe instructions and emit exactly one review-report-v2 JSON object, with no prose outside JSON. The reviewer field must be %q. A valid empty findings array is allowed, but evaluation must truthfully cover the paths and goals you inspected.\n\n", reviewer)
+	builder.WriteString("REQUEST:\n")
+	builder.Write(requestBytes)
+	builder.WriteString("\n\nFROZEN CHARTER:\n")
+	builder.Write(charterBytes)
+	builder.WriteString("\n\nFROZEN RECIPE:\n")
+	builder.Write(recipeBytes)
+	builder.WriteString("\n")
+	return builder.String(), nil
+}
+
+func reviewerSchema(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, reviewer string) ([]byte, error) {
+	goalIDs := make([]string, len(frozen.Charter.Goals))
+	for index, goal := range frozen.Charter.Goals {
+		goalIDs[index] = goal.ID
+	}
+	properties := map[string]any{
+		"schema_version":      map[string]any{"const": contractreview.ReviewReportV2},
+		"request_digest":      map[string]any{"const": mustRequestDigest(request)},
+		"recipe_digest":       map[string]any{"const": request.RecipeDigest},
+		"reviewer":            map[string]any{"const": reviewer},
+		"charter_hash":        map[string]any{"const": frozen.CharterHash},
+		"review_input_digest": map[string]any{"const": request.ReviewInputDigest},
+		"findings":            map[string]any{"type": "array"},
+		"evaluation":          map[string]any{"type": "object"},
+	}
+	if len(goalIDs) > 0 {
+		properties["evaluation"] = map[string]any{
+			"type":     "object",
+			"required": []string{"evaluated_paths", "evaluated_goal_ids"},
+			"properties": map[string]any{
+				"evaluated_paths":    map[string]any{"type": "array", "minItems": 1},
+				"evaluated_goal_ids": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"enum": goalIDs}},
+			},
+		}
+	} else {
+		properties["evaluation"] = map[string]any{
+			"type":     "object",
+			"required": []string{"evaluated_paths", "evaluated_goal_ids"},
+			"properties": map[string]any{
+				"evaluated_paths":    map[string]any{"type": "array", "minItems": 1},
+				"evaluated_goal_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			},
+		}
+	}
+	return canonjson.Marshal(map[string]any{
+		"type":       "object",
+		"required":   []string{"schema_version", "request_digest", "recipe_digest", "reviewer", "charter_hash", "review_input_digest", "source_identity", "consumer_identity", "findings", "evaluation"},
+		"properties": properties,
+	})
+}
+
+func mustRequestDigest(request contractreview.ReviewRequestV2Document) string {
+	digestValue, err := contractreview.ReviewRequestV2Digest(request)
+	if err != nil {
+		return ""
+	}
+	return digestValue
+}
+
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return nil
+}

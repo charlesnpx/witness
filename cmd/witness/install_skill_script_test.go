@@ -123,8 +123,12 @@ func TestInstallSkillScriptInstallRootAndUninstall(t *testing.T) {
 		filepath.Join(installRoot, ".local", "bin", "witness-harness"):                                           false,
 		filepath.Join(installRoot, ".codex", "skills", "witness", "SKILL.md"):                                    false,
 		filepath.Join(installRoot, ".codex", "skills", "witness", "bundle", "relay-integration-bundle-v2.json"):  false,
+		filepath.Join(installRoot, ".codex", "skills", "review", "SKILL.md"):                                     false,
+		filepath.Join(installRoot, ".codex", "skills", "review:configure", "SKILL.md"):                           false,
 		filepath.Join(installRoot, ".claude", "skills", "witness", "SKILL.md"):                                   false,
 		filepath.Join(installRoot, ".claude", "skills", "witness", "bundle", "relay-integration-bundle-v2.json"): false,
+		filepath.Join(installRoot, ".claude", "skills", "review", "SKILL.md"):                                    false,
+		filepath.Join(installRoot, ".claude", "skills", "review:configure", "SKILL.md"):                          false,
 	}
 	reported := reportedInstallSkillFiles(report)
 	if len(reported) != len(expected) {
