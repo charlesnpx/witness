@@ -90,10 +90,6 @@ type Options struct {
 	LaunchCWD               string
 	SettingsPath            string
 	AllowDirtySource        bool
-	// Runner is retained as an ignored source-compatibility field for callers
-	// that used the old test seam. Relay v2 owns process execution now; a
-	// non-nil value is never consulted.
-	Runner any
 }
 
 type BatchInput struct {

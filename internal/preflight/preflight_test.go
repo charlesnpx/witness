@@ -17,315 +17,8 @@ import (
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/planning"
-	"github.com/charlesnpx/witness/internal/relayclient"
+	"github.com/charlesnpx/witness/internal/relayv2"
 )
-
-type fakeRunner struct {
-	t        *testing.T
-	fixtures string
-}
-
-func (runner fakeRunner) Run(ctx context.Context, executable string, args ...string) relayclient.CommandResult {
-	runner.t.Helper()
-	switch {
-	case len(args) == 2 && args[0] == "capabilities" && args[1] == "--json":
-		return relayclient.CommandResult{Stdout: runner.fixture("relay-capabilities-v1.json")}
-	case len(args) == 3 && args[0] == "recipes" && args[1] == "list" && args[2] == "--json":
-		return relayclient.CommandResult{Stdout: runner.fixture("recipes-list-v1.json")}
-	case len(args) == 3 && args[0] == "backends" && args[1] == "status" && args[2] == "--json":
-		return relayclient.CommandResult{Stdout: runner.fixture("backend-status-v1.json")}
-	case len(args) >= 2 && args[0] == "compile-recipe":
-		recipeID := argValue(args, "--recipe")
-		contractID := contractForRecipe(recipeID)
-		if contractID == "" {
-			return relayclient.CommandResult{Stdout: []byte(`{"message":"unknown recipe"}`), ExitCode: 1, Err: errors.New("exit status 1")}
-		}
-		return relayclient.CommandResult{Stdout: runner.fixture("compile-" + recipeID + ".json")}
-	default:
-		runner.t.Fatalf("unexpected relay args: %v", args)
-		return relayclient.CommandResult{}
-	}
-}
-
-func (runner fakeRunner) fixture(name string) []byte {
-	data, err := os.ReadFile(filepath.Join(runner.fixtures, name))
-	if err != nil {
-		runner.t.Fatal(err)
-	}
-	return data
-}
-
-func TestValidateCapabilitiesReportsMissingExactCapability(t *testing.T) {
-	capabilities := loadFixture[relayclient.Capabilities](t, "relay-capabilities-v1.json")
-	capabilities.ProviderInvocation = nil
-	diagnostics := ValidateCapabilities(capabilities)
-	if !hasDiagnostic(diagnostics, CodeMissingCapability) {
-		t.Fatalf("diagnostics = %#v", diagnostics)
-	}
-	if got := diagnostics[0].Details["family"]; got != "provider_invocation" {
-		t.Fatalf("family = %v, want provider_invocation", got)
-	}
-}
-
-func TestValidateCapabilitiesReportsRelayVersionMismatch(t *testing.T) {
-	capabilities := loadFixture[relayclient.Capabilities](t, "relay-capabilities-v1.json")
-	capabilities.ConvoRelayVersion = "v1.4.1"
-	diagnostics := ValidateCapabilities(capabilities)
-	if !hasDiagnostic(diagnostics, CodeRelayVersionMismatch) {
-		t.Fatalf("diagnostics = %#v", diagnostics)
-	}
-}
-
-func TestEvaluateCompileReportStatuses(t *testing.T) {
-	requirement := RecipeRequirement{ID: "witness-falsify-v2", ContractID: "witnessed-review/witness-falsification-v2"}
-	contractDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	tests := []struct {
-		name string
-		raw  map[string]any
-		want string
-	}{
-		{
-			name: "usable",
-			raw: map[string]any{
-				"recipe_id":            requirement.ID,
-				"status":               "usable",
-				"integration_contract": requirement.ContractID,
-				"root_recipe_plan": map[string]any{
-					"recipe_id":                   requirement.ID,
-					"integration_contract_digest": contractDigest,
-				},
-			},
-		},
-		{
-			name: "requires integration",
-			raw: map[string]any{
-				"recipe_id":            requirement.ID,
-				"status":               "requires_integration",
-				"integration_contract": requirement.ContractID,
-				"root_recipe_plan": map[string]any{
-					"recipe_id":                   requirement.ID,
-					"integration_contract_digest": contractDigest,
-				},
-			},
-			want: CodeCompileRequiresIntegration,
-		},
-		{
-			name: "error",
-			raw: map[string]any{
-				"recipe_id":            requirement.ID,
-				"status":               "error",
-				"integration_contract": requirement.ContractID,
-				"root_recipe_plan": map[string]any{
-					"recipe_id":                   requirement.ID,
-					"integration_contract_digest": contractDigest,
-				},
-			},
-			want: CodeCompileReportError,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			report, err := relayclient.NewCompileReport(test.raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			diagnostics := EvaluateCompileReport(requirement, report)
-			if test.want == "" {
-				if len(diagnostics) != 0 {
-					t.Fatalf("diagnostics = %#v", diagnostics)
-				}
-				return
-			}
-			if !hasDiagnostic(diagnostics, test.want) {
-				t.Fatalf("diagnostics = %#v, want %s", diagnostics, test.want)
-			}
-		})
-	}
-}
-
-func TestCompileReportMissingDigestRejectedPerRecipe(t *testing.T) {
-	missingRequirement := RequiredRecipes[1]
-	siblingRequirement := RequiredRecipes[0]
-	otherRequirement := RequiredRecipes[3]
-	siblingDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	otherDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-
-	raw := map[string]any{
-		"recipe_id":            missingRequirement.ID,
-		"status":               "usable",
-		"integration_contract": missingRequirement.ContractID,
-		"compiled_plan": map[string]any{
-			"recipe_id":               missingRequirement.ID,
-			"integration_contract_id": missingRequirement.ContractID,
-		},
-	}
-	if _, err := relayclient.NewCompileReport(raw); err == nil {
-		t.Fatal("NewCompileReport succeeded without integration_contract_digest")
-	} else if diagnostic := diag.FromError(err); diagnostic.Code != relayclient.ErrorContractDigestMissing {
-		t.Fatalf("diagnostic = %#v, want %s", diagnostic, relayclient.ErrorContractDigestMissing)
-	}
-
-	missingReport := relayclient.CompileReport{
-		RecipeID:            missingRequirement.ID,
-		IntegrationContract: missingRequirement.ContractID,
-		RootRecipePlan:      map[string]any{"recipe_id": missingRequirement.ID},
-		ContractDigests:     map[string]string{},
-	}
-	if diagnostics := EvaluateCompileReport(missingRequirement, missingReport); !hasDiagnostic(diagnostics, CodeContractDigestMissing) {
-		t.Fatalf("diagnostics = %#v, want %s", diagnostics, CodeContractDigestMissing)
-	}
-
-	_, _, diagnostics := selectedContractDigests(nil, map[string]relayclient.CompileReport{
-		missingRequirement.ID: missingReport,
-		siblingRequirement.ID: {
-			RecipeID:                  siblingRequirement.ID,
-			IntegrationContract:       siblingRequirement.ContractID,
-			IntegrationContractDigest: siblingDigest,
-			RootRecipePlan:            map[string]any{"recipe_id": siblingRequirement.ID},
-			ContractDigests:           map[string]string{siblingRequirement.ContractID: siblingDigest},
-		},
-		otherRequirement.ID: {
-			RecipeID:                  otherRequirement.ID,
-			IntegrationContract:       otherRequirement.ContractID,
-			IntegrationContractDigest: otherDigest,
-			RootRecipePlan:            map[string]any{"recipe_id": otherRequirement.ID},
-			ContractDigests:           map[string]string{otherRequirement.ContractID: otherDigest},
-		},
-	})
-	if len(diagnostics) != 1 {
-		t.Fatalf("diagnostics = %#v, want only %s", diagnostics, CodeContractDigestMissing)
-	}
-	diagnostic, ok := findDiagnostic(diagnostics, CodeContractDigestMissing)
-	if !ok {
-		t.Fatalf("diagnostics = %#v, want %s", diagnostics, CodeContractDigestMissing)
-	}
-	if got := diagnostic.Details["recipe_id"]; got != missingRequirement.ID {
-		t.Fatalf("recipe_id = %v, want %s", got, missingRequirement.ID)
-	}
-}
-
-func TestSelectedContractDigestsAcceptRelayReportedProjectionMismatch(t *testing.T) {
-	bundle := loadFixture[map[string]any](t, "integration-bundle-v2.fixture.json")
-	reports := map[string]relayclient.CompileReport{}
-	relayByContract := map[string]string{}
-	extraContractID := "example/non-required-contract"
-	extraDigest := digest.RawBytes([]byte("relay-projection:" + extraContractID))
-	for _, requirement := range RequiredRecipes {
-		relayDigest := digest.RawBytes([]byte("relay-projection:" + requirement.ContractID))
-		relayByContract[requirement.ContractID] = relayDigest
-		contractDigests := map[string]string{
-			requirement.ContractID: relayDigest,
-		}
-		if requirement.ID == RequiredRecipes[0].ID {
-			contractDigests[extraContractID] = extraDigest
-		}
-		reports[requirement.ID] = relayclient.CompileReport{
-			RecipeID:                  requirement.ID,
-			IntegrationContract:       requirement.ContractID,
-			IntegrationContractDigest: relayDigest,
-			RootRecipePlan: map[string]any{
-				"recipe_id":                    requirement.ID,
-				"integration_contract_digest":  relayDigest,
-				"integration_contract_id":      requirement.ContractID,
-				"deterministic_test_fixture":   true,
-				"required_input_binding_count": 4,
-			},
-			ContractDigests: contractDigests,
-		}
-	}
-	witnessDigests, relayReportedDigests, diagnostics := selectedContractDigests(bundle, reports)
-	if len(diagnostics) > 0 {
-		t.Fatalf("diagnostics = %#v", diagnostics)
-	}
-	for _, contractID := range requiredWitnessContractIDs() {
-		if witnessDigests[contractID] == "" {
-			t.Fatalf("missing witness digest for %s", contractID)
-		}
-		if relayReportedDigests[contractID] != relayByContract[contractID] {
-			t.Fatalf("relay digest for %s = %s, want %s", contractID, relayReportedDigests[contractID], relayByContract[contractID])
-		}
-		if witnessDigests[contractID] == relayReportedDigests[contractID] {
-			t.Fatalf("witness digest unexpectedly matched relay-reported digest for %s", contractID)
-		}
-	}
-	if _, found := relayReportedDigests[extraContractID]; found {
-		t.Fatalf("relay-reported digests retained non-required contract %s: %#v", extraContractID, relayReportedDigests)
-	}
-
-	result := Result{
-		ContractDigests:      witnessDigests,
-		RelayReportedDigests: relayReportedDigests,
-		ArtifactDigests: map[string]string{
-			"relay-capabilities.json": digest.RawBytes([]byte("capabilities")),
-		},
-	}
-	document := ContractDigestDocument(result)
-	if got := document["schema_version"]; got != ContractDigestDocumentV2 {
-		t.Fatalf("schema_version = %v, want %s", got, ContractDigestDocumentV2)
-	}
-	decoded, err := ReadContractDigestDocument(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(decoded.WitnessDigests, witnessDigests) {
-		t.Fatalf("decoded witness digests = %#v, want %#v", decoded.WitnessDigests, witnessDigests)
-	}
-	if !reflect.DeepEqual(decoded.RelayReportedDigests, relayReportedDigests) {
-		t.Fatalf("decoded relay-reported digests = %#v, want %#v", decoded.RelayReportedDigests, relayReportedDigests)
-	}
-	lineage, ok := document["relay_reported_contract_digests"].(map[string]string)
-	if !ok {
-		t.Fatalf("relay_reported_contract_digests = %#v, want map", document["relay_reported_contract_digests"])
-	}
-	for contractID, relayDigest := range relayByContract {
-		if lineage[contractID] != relayDigest {
-			t.Fatalf("lineage[%s] = %s, want %s", contractID, lineage[contractID], relayDigest)
-		}
-	}
-	if _, found := lineage[extraContractID]; found {
-		t.Fatalf("contract-digests document retained non-required contract %s: %#v", extraContractID, lineage)
-	}
-	compatibility := compatibilityManifest(&result, nil)
-	for _, selected := range compatibility.SelectedContracts {
-		if selected.Digest != witnessDigests[selected.ContractID] {
-			t.Fatalf("compatibility selected digest for %s = %s, want witness %s", selected.ContractID, selected.Digest, witnessDigests[selected.ContractID])
-		}
-		if selected.Digest == relayReportedDigests[selected.ContractID] {
-			t.Fatalf("compatibility selected digest for %s used relay-reported lineage", selected.ContractID)
-		}
-	}
-}
-
-func TestSelectedContractDigestsRejectsMalformedCompileReportDigest(t *testing.T) {
-	requirement := RequiredRecipes[0]
-	rawDigests := map[string]any{requirement.ContractID: true}
-	reports := map[string]relayclient.CompileReport{
-		requirement.ID: {
-			RecipeID:                  requirement.ID,
-			IntegrationContract:       requirement.ContractID,
-			IntegrationContractDigest: digest.RawBytes([]byte("relay-projection:" + requirement.ContractID)),
-			Payload: map[string]any{
-				"contract_digests": rawDigests,
-			},
-		},
-	}
-
-	_, _, diagnostics := selectedContractDigests(nil, reports)
-	actual, ok := findDiagnostic(diagnostics, CodeContractDigestMalformed)
-	if !ok {
-		t.Fatalf("diagnostics = %#v, want %s", diagnostics, CodeContractDigestMalformed)
-	}
-	_, expectedErr := DecodeCompileReportContractDigests(requirement.ID, rawDigests)
-	if expectedErr == nil {
-		t.Fatal("shared compile-report digest decoder accepted a boolean digest")
-	}
-	if expected := diag.FromError(expectedErr); !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("generation diagnostic = %#v, want %#v", actual, expected)
-	}
-	if actual.Details["report_id"] != requirement.ID || actual.Details["contract_id"] != requirement.ContractID || actual.Details["value_type"] != "boolean" {
-		t.Fatalf("diagnostic details = %#v", actual.Details)
-	}
-}
 
 func TestDecodeCompileReportContractDigestsRejectsEmptyDigest(t *testing.T) {
 	reportID := RequiredRecipes[0].ID
@@ -368,56 +61,6 @@ func TestResolveRelayReportedContractDigestsRejectsMalformedPlanDigest(t *testin
 	diagnostic := diag.FromError(err)
 	if diagnostic.Code != CodeContractDigestMalformed {
 		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeContractDigestMalformed)
-	}
-}
-
-func TestSelectedContractDigestsRejectsDisagreeingCompileReportAndPlanDigest(t *testing.T) {
-	target := RequiredRecipes[0]
-	reportedDigest := digest.RawBytes([]byte("relay-reported:" + target.ContractID))
-	planDigest := digest.RawBytes([]byte("recipe-plan:" + target.ContractID))
-	reports := map[string]relayclient.CompileReport{}
-	for _, requirement := range RequiredRecipes {
-		digestForRequirement := digest.RawBytes([]byte("relay-reported:" + requirement.ContractID))
-		planDigestForRequirement := digestForRequirement
-		if requirement.ID == target.ID {
-			digestForRequirement = reportedDigest
-			planDigestForRequirement = planDigest
-		}
-		raw := map[string]any{
-			"recipe_id":            requirement.ID,
-			"status":               "usable",
-			"integration_contract": requirement.ContractID,
-			"contract_digests": map[string]any{
-				requirement.ContractID: digestForRequirement,
-			},
-			"compiled_plan": map[string]any{
-				"recipe_id":                   requirement.ID,
-				"integration_contract_id":     requirement.ContractID,
-				"integration_contract_digest": planDigestForRequirement,
-			},
-		}
-		report, err := relayclient.NewCompileReport(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		reports[requirement.ID] = report
-	}
-
-	_, _, diagnostics := selectedContractDigests(nil, reports)
-	actual, ok := findDiagnostic(diagnostics, CodeContractDigestMismatch)
-	if !ok {
-		t.Fatalf("diagnostics = %#v, want %s", diagnostics, CodeContractDigestMismatch)
-	}
-	_, err := ResolveRelayReportedContractDigests(
-		map[string]string{target.ContractID: reportedDigest},
-		target.ContractID,
-		planDigest,
-	)
-	if err == nil {
-		t.Fatal("shared relay-lineage resolver accepted mismatched digests")
-	}
-	if expected := diag.FromError(err); !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("generation diagnostic = %#v, want %#v", actual, expected)
 	}
 }
 
@@ -691,59 +334,13 @@ func TestValidateRequiredContractStructureRejectsFractionalMaxBytes(t *testing.T
 	requireContractMismatchAtPath(t, diagnostics, "/contracts/witnessed-review~1economy-equivalence-v2/inputs/artifact/max_bytes")
 }
 
-func TestEvaluateCompileReportAcceptsRealCompiledPlanShape(t *testing.T) {
-	requirement := RecipeRequirement{ID: "witness-falsify-v2", ContractID: "witnessed-review/witness-falsification-v2"}
-	raw := loadFixture[map[string]any](t, "compile-witness-falsify-v2.json")
-	report, err := relayclient.NewCompileReport(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.RootRecipePlan == nil {
-		t.Fatal("RootRecipePlan is nil")
-	}
-	if report.IntegrationContract != requirement.ContractID {
-		t.Fatalf("IntegrationContract = %s, want %s", report.IntegrationContract, requirement.ContractID)
-	}
-	if report.IntegrationContractDigest == "" {
-		t.Fatal("IntegrationContractDigest is empty")
-	}
-	if got := report.ContractDigests[requirement.ContractID]; got != report.IntegrationContractDigest {
-		t.Fatalf("contract digest = %s, want %s", got, report.IntegrationContractDigest)
-	}
-	diagnostics := EvaluateCompileReport(requirement, report)
-	if len(diagnostics) != 0 {
-		t.Fatalf("diagnostics = %#v", diagnostics)
-	}
-}
-
-func TestCompileCommandDiagnosticUsesTypedRelayCodes(t *testing.T) {
-	commandError := &relayclient.CommandError{
-		Kind: relayclient.ErrorNonzeroExit,
-		Diagnostic: diag.Diagnostic{
-			Code:    "integration_contract_not_found",
-			Message: "Integration bundle does not implement the requested contract.",
-			Path:    "/contracts/witnessed-review~1witness-falsification-v2",
-			Details: map[string]any{
-				"contract_id": "witnessed-review/witness-falsification-v2",
-			},
-		},
-		ExitCode: 1,
-	}
-	diagnostic := compileCommandDiagnostic("witness-falsify-v2", commandError)
-	if diagnostic.Code != CodeCompileIncompatible {
-		t.Fatalf("diagnostic = %#v, want %s", diagnostic, CodeCompileIncompatible)
-	}
-}
-
 func TestRunRecordsAuthUnknownStrata(t *testing.T) {
-	fixtures := filepath.Join("..", "..", "testdata", "preflight")
 	stateDir := t.TempDir()
 	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
 	result, err := Run(context.Background(), Options{
-		RelayPath:             "fake-relay",
+		RelayPath:             presentRelayPath(t),
 		IntegrationBundlePath: bundlePath,
 		StateDir:              stateDir,
-		Runner:                fakeRunner{t: t, fixtures: fixtures},
 	})
 	if err != nil {
 		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
@@ -864,15 +461,13 @@ func TestRetainedIntegrationBundleBodyAuthenticatesPlannedBinding(t *testing.T) 
 	}
 }
 
-func TestRunRelayPresentRetainsFixtureCapabilitiesByteIdentical(t *testing.T) {
-	fixtures := filepath.Join("..", "..", "testdata", "preflight")
+func TestRunRelayPresentRetainsLocalCompatibilityProjection(t *testing.T) {
 	stateDir := t.TempDir()
 	bundlePath := filepath.Join("..", "..", "testdata", "preflight", "integration-bundle-v2.fixture.json")
 	result, err := Run(context.Background(), Options{
-		RelayPath:             "fake-relay",
+		RelayPath:             presentRelayPath(t),
 		IntegrationBundlePath: bundlePath,
 		StateDir:              stateDir,
-		Runner:                fakeRunner{t: t, fixtures: fixtures},
 	})
 	if err != nil {
 		t.Fatalf("Run returned error: %v\nDiagnostics: %#v", err, result.Diagnostics)
@@ -881,12 +476,12 @@ func TestRunRelayPresentRetainsFixtureCapabilitiesByteIdentical(t *testing.T) {
 		t.Fatalf("backend strata = %#v, unexpectedly relay_absent", result.BackendStrata)
 	}
 	retainedCapabilities, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "relay-capabilities.json"))
-	expectedCapabilities, err := canonjson.Marshal(loadFixture[any](t, "relay-capabilities-v1.json"))
+	capabilities, err := strictjson.DecodeBytes[map[string]any](retainedCapabilities, strictjson.DefaultMaxBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(retainedCapabilities, expectedCapabilities) {
-		t.Fatalf("retained capabilities payload changed\nactual: %s\nwant:   %s", retainedCapabilities, expectedCapabilities)
+	if capabilities["source"] != nil || capabilities["schema_version"] != "witness-relay-v2-compatibility-projection-v1" {
+		t.Fatalf("retained local Relay projection = %#v", capabilities)
 	}
 	compatibilityBytes, _ := retainedPreflightPayloadBytes(t, filepath.Join(stateDir, "compatibility-manifest.json"))
 	compatibility, err := contracts.ReadRelayCompatibilityBytes(compatibilityBytes)
@@ -1002,31 +597,6 @@ func TestRunRejectsStateDirInsideSourceBeforeMkdirAll(t *testing.T) {
 	}
 }
 
-func TestLiveRelayCompileReports(t *testing.T) {
-	if os.Getenv("WITNESS_LIVE_RELAY") != "1" {
-		t.Skip("set WITNESS_LIVE_RELAY=1 to compile recipes against the installed relay")
-	}
-	client := relayclient.New("convo-relay")
-	bundlePath := shippedRelayIntegrationBundlePath()
-	for _, requirement := range RequiredRecipes {
-		report, err := client.CompileRecipe(context.Background(), requirement.ID, bundlePath)
-		if err != nil {
-			t.Fatalf("%s compile: %v", requirement.ID, err)
-		}
-		if diagnostics := EvaluateCompileReport(requirement, report); len(diagnostics) != 0 {
-			t.Fatalf("%s diagnostics = %#v", requirement.ID, diagnostics)
-		}
-		if report.RootRecipePlan == nil {
-			t.Fatalf("%s missing compiled plan", requirement.ID)
-		}
-		contractDigest := report.ContractDigests[requirement.ContractID]
-		if contractDigest == "" {
-			t.Fatalf("%s missing contract digest for %s", requirement.ID, requirement.ContractID)
-		}
-		t.Logf("%s retained compiled_plan and %s digest %s", requirement.ID, requirement.ContractID, contractDigest)
-	}
-}
-
 func loadFixture[T any](t *testing.T, name string) T {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "preflight", name))
@@ -1132,20 +702,11 @@ func findDiagnostic(diagnostics []diag.Diagnostic, code string) (diag.Diagnostic
 	return diag.Diagnostic{}, false
 }
 
-func argValue(args []string, key string) string {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == key {
-			return args[i+1]
-		}
+func presentRelayPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), relayv2.DefaultExecutable)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	return ""
-}
-
-func contractForRecipe(recipeID string) string {
-	for _, requirement := range RequiredRecipes {
-		if requirement.ID == recipeID {
-			return requirement.ContractID
-		}
-	}
-	return ""
+	return path
 }

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
 	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/diag"
@@ -25,7 +26,6 @@ import (
 	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
-	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/relayrun"
 )
 
@@ -73,8 +73,6 @@ var witnessCommands = map[string]map[string]bool{
 var singleCommands = map[string]bool{
 	"adjudicate": true,
 }
-
-var verificationAssembleRelayRunner relayclient.Runner
 
 func main() {
 	if err := route(os.Args[1:]); err != nil {
@@ -600,7 +598,6 @@ func runVerificationAssemble(args []string) error {
 			LaunchCWD:               *launchCWD,
 			SettingsPath:            *settingsPath,
 			AllowDirtySource:        *allowDirtySource,
-			Runner:                  verificationAssembleRelayRunner,
 		})
 		if err != nil {
 			return err
@@ -1342,6 +1339,8 @@ func relayEvidenceFromRunResult(result *relayrun.Result) ([]planning.RelayEviden
 			RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
 			Backend:           relayBackendFromRecipeID(run.RecipeID),
 			PortableExportDir: run.PortableExportDir,
+			Verdicts:          run.RelayVerdicts,
+			VerifiedBundle:    run.VerifiedBundle,
 			RunRecords:        []map[string]any{runRecord},
 		}
 		if run.PortableExportDigest != "" {
@@ -1386,6 +1385,11 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 		record := byBatch[batchID]
 		record.BatchID = batchID
 		record.PortableExportDir = path
+		verified, err := readV2RelayBundle(path)
+		if err != nil {
+			return nil, err
+		}
+		record.VerifiedBundle = verified
 		byBatch[batchID] = record
 	}
 	for _, spec := range verdictSpecs {
@@ -1416,6 +1420,30 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 	return result, nil
 }
 
+func readV2RelayBundle(directory string) (*bundle.Verification, error) {
+	manifestPath := filepath.Join(directory, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fileReadError(err, manifestPath, "open relay portable bundle manifest")
+	}
+	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
+	if err != nil {
+		return nil, fileReadError(err, manifestPath, "decode relay portable bundle manifest")
+	}
+	manifest, ok := value.(map[string]any)
+	if !ok {
+		return nil, diag.New(diag.CodeInvalidCommand, "relay portable bundle manifest must be a JSON object.", diag.WithDetail("path", manifestPath))
+	}
+	if manifest["kind"] != bundle.Kind {
+		return nil, nil
+	}
+	verified, err := bundle.VerifyPortableDirectory(directory)
+	if err != nil {
+		return nil, diag.Wrap(err, planning.CodeInvalidRelay, "relay v2 portable bundle could not be verified.", diag.WithDetail("path", directory))
+	}
+	return &verified, nil
+}
+
 func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
 	evidence := make([]planning.RelayEvidence, 0, len(paths))
 	for _, path := range paths {
@@ -1438,6 +1466,7 @@ func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
 				Backend:           relayBackendFromRecipeID(run.RecipeID),
 				PortableExportDir: run.PortableExportDir,
 				Verdicts:          run.RelayVerdicts,
+				VerifiedBundle:    run.VerifiedBundle,
 				RunRecords:        []map[string]any{runRecord},
 			}
 			if run.PortableExportDigest != "" {
@@ -1494,6 +1523,9 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEv
 			if incoming.Verdicts != nil {
 				current.Verdicts = incoming.Verdicts
 			}
+			if incoming.VerifiedBundle != nil {
+				current.VerifiedBundle = incoming.VerifiedBundle
+			}
 			runRecords, err := mergeRelayRunRecords(incoming.BatchID, current.RunRecords, incoming.RunRecords)
 			if err != nil {
 				return nil, err
@@ -1523,6 +1555,10 @@ func requireMatchingRelayEvidenceProvenance(batchID string, current, incoming pl
 		if conflictingRelayProvenanceValue(field.current, field.incoming) {
 			return conflictingRelayProvenance(batchID, field.name)
 		}
+	}
+	if current.VerifiedBundle != nil && incoming.VerifiedBundle != nil &&
+		current.VerifiedBundle.Manifest.ManifestDigest != incoming.VerifiedBundle.Manifest.ManifestDigest {
+		return conflictingRelayProvenance(batchID, "portable_export_bundle_identity")
 	}
 	if current.Verdicts == nil || incoming.Verdicts == nil {
 		return nil

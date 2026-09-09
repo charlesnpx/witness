@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,7 +19,9 @@ import (
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/planning"
-	"github.com/charlesnpx/witness/internal/relayclient"
+	"github.com/charlesnpx/witness/internal/relayv2"
+
+	"github.com/charlesnpx/convo-relay/v2/plan"
 )
 
 const (
@@ -35,24 +38,17 @@ const (
 	RetainedIntegrationBundleBodyFile     = "integration-bundle.body.json"
 
 	relayIntegrationBundleV2 = "relay-integration-bundle-v2"
+	// legacyCompatibilityRelayVersion is retained only because the W4d pass
+	// validator still consumes the pre-v2 compatibility projection. It is not
+	// queried from Relay and is not used for capability negotiation.
+	legacyCompatibilityRelayVersion = "v1.4.0"
 
 	CodeMissingStateDir             = "preflight_missing_state_dir"
 	CodeStateDirInsideSource        = "preflight_state_dir_inside_source"
 	CodeMissingIntegrationBundle    = "preflight_missing_integration_bundle"
 	CodeIntegrationBundleReadFailed = "preflight_integration_bundle_read_failed"
-	CodeRelayVersionMismatch        = "preflight_relay_version_mismatch"
-	CodeMissingCapability           = "preflight_missing_relay_capability"
-	CodeMissingRecipe               = "preflight_missing_recipe"
 	CodeRecipeContractMismatch      = "preflight_recipe_contract_mismatch"
-	CodeRecipeUnavailable           = "preflight_recipe_unavailable"
-	CodeBackendMissing              = "preflight_backend_missing"
-	CodeBackendUnavailable          = "preflight_backend_unavailable"
-	CodeCompileCommandFailed        = "preflight_compile_command_failed"
-	CodeCompileRequiresIntegration  = "preflight_compile_requires_integration"
-	CodeCompileIncompatible         = "preflight_compile_incompatible"
-	CodeCompileReportError          = "preflight_compile_report_error"
-	CodeCompileReportMismatch       = "preflight_compile_report_mismatch"
-	CodeCompilePlanMissing          = "preflight_compile_plan_missing"
+	CodeRecipePlanInvalid           = "preflight_recipe_plan_invalid"
 	CodeContractDigestMissing       = "preflight_contract_digest_missing"
 	CodeContractDigestMalformed     = "preflight_contract_digest_malformed"
 	CodeContractDigestMismatch      = "preflight_contract_digest_mismatch"
@@ -77,7 +73,6 @@ type Options struct {
 	FrozenCharter          *charter.FrozenCharter
 	AllowEmptyCharter      bool
 	ConsumerIdentity       map[string]any
-	Runner                 relayclient.Runner
 }
 
 type Result struct {
@@ -121,12 +116,6 @@ func (err *Error) Error() string {
 	return fmt.Sprintf("%s: %s (%d diagnostics)", err.Diagnostics[0].Code, err.Diagnostics[0].Message, len(err.Diagnostics))
 }
 
-type CapabilityRequirement struct {
-	Family     string `json:"family"`
-	Capability any    `json:"capability"`
-	Location   string `json:"location"`
-}
-
 type RecipeRequirement struct {
 	ID         string `json:"id"`
 	ContractID string `json:"contract_id"`
@@ -138,24 +127,6 @@ type requiredContractInput struct {
 	cardinality  string
 	mediaType    string
 	schemaObject bool
-}
-
-var RequiredCapabilities = []CapabilityRequirement{
-	{Family: "portable_export", Capability: "relay-root-portable-export-v2", Location: "/portable_export"},
-	{Family: "provider_invocation", Capability: "relay-provider-invocation-v2", Location: "/provider_invocation"},
-	{Family: "digest_profile", Capability: digest.Profile, Location: "/digest_profile"},
-	{Family: "prompt_policy", Capability: "prompt-policy/v2", Location: "/prompt_policy"},
-	{Family: "isolation_report", Capability: "relay-workspace-isolation-v1", Location: "/isolation_report"},
-	{Family: "prompt_context_projection", Capability: "relay-prompt-context-v1", Location: "/prompt_context_projection"},
-	{Family: "provider_retry_policy", Capability: "relay-provider-retry-policy-v1", Location: "/provider_retry_policy"},
-	{Family: "rendered_prompt", Capability: "relay-rendered-prompt-v1", Location: "/rendered_prompt"},
-	{Family: "contracts.integration_bundle", Capability: "relay-integration-bundle-v2", Location: "/contracts/integration_bundle"},
-	{Family: "contracts.selected_integration_contract", Capability: json.Number("2"), Location: "/contracts/selected_integration_contract"},
-	{Family: "contracts.recipe", Capability: json.Number("2"), Location: "/contracts/recipe"},
-	{Family: "contracts.root_artifact", Capability: json.Number("2"), Location: "/contracts/root_artifact"},
-	{Family: "contracts.root_recipe_plan", Capability: json.Number("2"), Location: "/contracts/root_recipe_plan"},
-	{Family: "contracts.root_session_result", Capability: json.Number("2"), Location: "/contracts/root_session_result"},
-	{Family: "contracts.execution_workspace", Capability: json.Number("2"), Location: "/contracts/execution_workspace"},
 }
 
 var RequiredRecipes = []RecipeRequirement{
@@ -239,52 +210,35 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		}
 	}
 
-	client := relayclient.Client{
-		Executable: options.RelayPath,
-		Runner:     options.Runner,
-	}
-
-	capabilities, err := client.Capabilities(ctx)
-	if err != nil {
-		if relayMissing(err) {
+	if err := requireRelayExecutable(options.RelayPath); err != nil {
+		if relayv2.IsRelayNotInstalled(err) {
 			return runRelayAbsentPreflight(result, options, err, diagnostics)
 		}
-		diagnostics = append(diagnostics, commandDiagnostic("capabilities", err))
+		diagnostics = append(diagnostics, diag.FromError(err))
 		return finish(result, options, diagnostics)
 	}
-	result.RelayVersion = capabilities.ConvoRelayVersion
-	if retainedDigest, err := retain(options.StateDir, "relay-capabilities.json", capabilities); err != nil {
+
+	// The pass driver still reads these three retained paths while its v1
+	// compatibility validator is being migrated in W4d. They are local,
+	// deterministic projections of the v2 adapter and do not represent Relay
+	// capability, catalog, or backend queries.
+	result.RelayVersion = legacyCompatibilityRelayVersion
+	if retainedDigest, err := retain(options.StateDir, "relay-capabilities.json", relayCompatibilityCapabilitiesPayload()); err != nil {
 		return result, err
 	} else {
 		result.ArtifactDigests["relay-capabilities.json"] = retainedDigest
 	}
-	diagnostics = append(diagnostics, ValidateCapabilities(capabilities)...)
-
-	recipes, err := client.RecipesList(ctx)
-	if err != nil {
-		diagnostics = append(diagnostics, commandDiagnostic("recipes list", err))
-		return finish(result, options, diagnostics)
-	}
-	if retainedDigest, err := retain(options.StateDir, "recipes-list.json", recipes); err != nil {
+	if retainedDigest, err := retain(options.StateDir, "recipes-list.json", relayCompatibilityRecipesPayload()); err != nil {
 		return result, err
 	} else {
 		result.ArtifactDigests["recipes-list.json"] = retainedDigest
 	}
-	diagnostics = append(diagnostics, ValidateRecipes(recipes)...)
-
-	backends, err := client.BackendStatus(ctx)
-	if err != nil {
-		diagnostics = append(diagnostics, commandDiagnostic("backends status", err))
-		return finish(result, options, diagnostics)
-	}
-	if retainedDigest, err := retain(options.StateDir, "backend-status.json", backends); err != nil {
+	result.BackendStrata = relayPresentBackendStrata()
+	if retainedDigest, err := retain(options.StateDir, "backend-status.json", relayCompatibilityBackendStatusPayload(result.BackendStrata)); err != nil {
 		return result, err
 	} else {
 		result.ArtifactDigests["backend-status.json"] = retainedDigest
 	}
-	strata, backendDiagnostics := BackendStrata(backends)
-	result.BackendStrata = strata
-	diagnostics = append(diagnostics, backendDiagnostics...)
 
 	bundlePayload, bundleDigest, bundleDiagnostics := loadIntegrationBundle(options.IntegrationBundlePath)
 	diagnostics = append(diagnostics, bundleDiagnostics...)
@@ -300,50 +254,45 @@ func Run(ctx context.Context, options Options) (*Result, error) {
 		} else {
 			result.ArtifactDigests[RetainedIntegrationBundleBodyFile] = retainedDigest
 		}
+		selectedDigests, selectedDiagnostics := selectedContractDigestsFromBundle(bundlePayload)
+		diagnostics = append(diagnostics, selectedDiagnostics...)
+		for contractID, contractDigest := range selectedDigests {
+			result.ContractDigests[contractID] = contractDigest
+		}
 	}
 
-	compileReports := map[string]relayclient.CompileReport{}
+	compiledRecipes := map[string]compiledRecipe{}
 	if len(diagnostics) == 0 {
 		for _, requirement := range RequiredRecipes {
-			report, err := client.CompileRecipe(ctx, requirement.ID, options.IntegrationBundlePath)
+			compiled, report, err := compileRequiredRecipe(requirement, result.ContractDigests)
 			relative := filepath.ToSlash(filepath.Join("compile-reports", requirement.ID+".json"))
 			if err != nil {
-				if retainedDigest, retainErr := retainCommandFailure(options.StateDir, relative, err); retainErr != nil {
-					return result, retainErr
-				} else if retainedDigest != "" {
-					result.CompileReportDigests[requirement.ID] = retainedDigest
-					result.ArtifactDigests[relative] = retainedDigest
-				}
-				diagnostics = append(diagnostics, compileCommandDiagnostic(requirement.ID, err))
+				diagnostics = append(diagnostics, diag.FromError(err))
 				continue
 			}
-			compileReports[requirement.ID] = report
-			if retainedDigest, err := retain(options.StateDir, relative, report.Payload); err != nil {
+			compiledRecipes[requirement.ID] = compiled
+			if retainedDigest, err := retain(options.StateDir, relative, report); err != nil {
 				return result, err
 			} else {
 				result.CompileReportDigests[requirement.ID] = retainedDigest
 				result.ArtifactDigests[relative] = retainedDigest
 			}
-			diagnostics = append(diagnostics, EvaluateCompileReport(requirement, report)...)
-			if report.RootRecipePlan != nil {
-				planRelative := filepath.ToSlash(filepath.Join("recipe-plans", requirement.ID+".json"))
-				if retainedDigest, err := retain(options.StateDir, planRelative, report.RootRecipePlan); err != nil {
-					return result, err
-				} else {
-					result.RecipePlanDigests[requirement.ID] = retainedDigest
-					result.ArtifactDigests[planRelative] = retainedDigest
-				}
+			planRelative := filepath.ToSlash(filepath.Join("recipe-plans", requirement.ID+".json"))
+			if retainedDigest, err := retain(options.StateDir, planRelative, compiled.CompatibilityPlan); err != nil {
+				return result, err
+			} else {
+				result.RecipePlanDigests[requirement.ID] = retainedDigest
+				result.ArtifactDigests[planRelative] = retainedDigest
 			}
 		}
 	}
 
-	contractDigests, relayReportedDigests, contractDiagnostics := selectedContractDigests(bundlePayload, compileReports)
-	diagnostics = append(diagnostics, contractDiagnostics...)
-	for contractID, contractDigest := range contractDigests {
-		result.ContractDigests[contractID] = contractDigest
-	}
-	for contractID, contractDigest := range relayReportedDigests {
-		result.RelayReportedDigests[contractID] = contractDigest
+	for _, compiled := range compiledRecipes {
+		if compiled.ContractDigest != "" {
+			// This field is retained for the W4d state validator's historical
+			// lineage projection. v2 plans do not report contract digests.
+			result.RelayReportedDigests[compiled.Requirement.ContractID] = compiled.ContractDigest
+		}
 	}
 	contractDigestDoc := ContractDigestDocument(*result)
 	if retainedDigest, err := retain(options.StateDir, "contract-digests.json", contractDigestDoc); err != nil {
@@ -458,6 +407,207 @@ func reviewCharterDiagnostic(frozen *charter.FrozenCharter, allowEmptyCharter bo
 	return &diagnostic
 }
 
+type compiledRecipe struct {
+	Requirement       RecipeRequirement
+	ContractDigest    string
+	Plan              plan.Plan
+	CompatibilityPlan map[string]any
+}
+
+// requireRelayExecutable is deliberately a presence check. Relay v2 owns
+// execution and validates supplied plans at run time; preflight has no command
+// for capability, catalog, backend, or recipe negotiation anymore.
+func requireRelayExecutable(path string) error {
+	executable := relayExecutable(path)
+	resolved, err := exec.LookPath(executable)
+	if err == nil || (resolved != "" && errors.Is(err, exec.ErrDot)) {
+		return nil
+	}
+	kind := relayv2.ErrorRelayCommandFailed
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+		kind = relayv2.ErrorRelayNotInstalled
+	}
+	return &relayv2.CommandError{
+		Operation:   "preflight",
+		Executable:  executable,
+		ExitCode:    -1,
+		Kind:        kind,
+		StartFailed: true,
+		Cause:       err,
+	}
+}
+
+func compileRequiredRecipe(requirement RecipeRequirement, contractDigests map[string]string) (compiledRecipe, map[string]any, error) {
+	recipeID, profileID, err := recipeCompileSelection(requirement.ID)
+	if err != nil {
+		return compiledRecipe{}, nil, err
+	}
+	contractDigest := strings.TrimSpace(contractDigests[requirement.ContractID])
+	if !digest.WellFormed(contractDigest) {
+		return compiledRecipe{}, nil, diag.New(
+			CodeContractDigestMissing,
+			fmt.Sprintf("recipe %q cannot bind integration contract %q because its digest is missing or malformed.", requirement.ID, requirement.ContractID),
+			diag.WithDetail("recipe_id", requirement.ID),
+			diag.WithDetail("contract_id", requirement.ContractID),
+		)
+	}
+
+	compiled, err := relayv2.Compile(relayv2.CompileOptions{
+		SessionID: "preflight-" + requirement.ID,
+		Task:      "Validate Witness recipe " + requirement.ID + ".",
+		RecipeID:  recipeID,
+		ProfileID: profileID,
+		BatchID:   requirement.ID,
+		Charter:   []byte(`{"goals":[]}`),
+		Findings:  []byte(`{"findings":[]}`),
+	})
+	if err != nil {
+		return compiledRecipe{}, nil, diag.New(
+			CodeRecipePlanInvalid,
+			fmt.Sprintf("recipe %q did not compile to a valid Relay v2 plan: %v", requirement.ID, err),
+			diag.WithDetail("recipe_id", requirement.ID),
+		)
+	}
+	if err := plan.Validate(compiled.Plan); err != nil {
+		return compiledRecipe{}, nil, diag.New(
+			CodeRecipePlanInvalid,
+			fmt.Sprintf("recipe %q compiled to a plan that failed validation: %v", requirement.ID, err),
+			diag.WithDetail("recipe_id", requirement.ID),
+		)
+	}
+
+	compatibilityPlan, err := strictjson.DecodeBytes[map[string]any](compiled.Canonical, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return compiledRecipe{}, nil, diag.Wrap(
+			err,
+			CodeRecipePlanInvalid,
+			fmt.Sprintf("recipe %q compiled plan could not be retained.", requirement.ID),
+			diag.WithDetail("recipe_id", requirement.ID),
+		)
+	}
+	// This extra field exists only in the pass-facing compatibility projection;
+	// compiled.Plan remains the exact published Relay v2 plan submitted by
+	// relayrun. v2 has no integration-contract field in its plan document.
+	compatibilityPlan["integration_contract_id"] = requirement.ContractID
+	compatibilityPlan["integration_contract_digest"] = contractDigest
+	compatibilityPlan["plan_digest"] = compiled.Digest
+	report := map[string]any{
+		"schema_version":       "witness-relay-v2-local-compile-report-v1",
+		"recipe_id":            requirement.ID,
+		"status":               "usable",
+		"integration_contract": requirement.ContractID,
+		"diagnostics":          []any{},
+		"compiled_plan":        compatibilityPlan,
+		"compiled_plan_digest": compiled.Digest,
+		"contract_digests":     map[string]any{requirement.ContractID: contractDigest},
+		"target":               "root",
+		"source":               "witness-relay-v2-local-compile",
+	}
+	return compiledRecipe{
+		Requirement:       requirement,
+		ContractDigest:    contractDigest,
+		Plan:              compiled.Plan,
+		CompatibilityPlan: compatibilityPlan,
+	}, report, nil
+}
+
+func recipeCompileSelection(recipeID string) (string, string, error) {
+	for _, base := range []string{relayv2.DefaultRecipeID, relayv2.EconomyRecipeID} {
+		switch recipeID {
+		case base:
+			return base, relayv2.DefaultProfileID, nil
+		case base + "-codex":
+			return base, "codex", nil
+		case base + "-claude":
+			return base, "claude", nil
+		}
+	}
+	return "", "", diag.New(
+		CodeRecipePlanInvalid,
+		fmt.Sprintf("recipe %q is not a supported Witness Relay v2 recipe/profile selection.", recipeID),
+		diag.WithDetail("recipe_id", recipeID),
+	)
+}
+
+func relayCompatibilityCapabilitiesPayload() map[string]any {
+	payload := map[string]any{
+		"schema_version":      "witness-relay-v2-compatibility-projection-v1",
+		"convo_relay_version": legacyCompatibilityRelayVersion,
+		"build_platform": map[string]any{
+			"goarch": "local",
+			"goos":   "local",
+		},
+		"workspace_mechanisms": []any{"current", "head-copy"},
+	}
+	contractCapabilities := map[string]any{}
+	payload["contracts"] = contractCapabilities
+	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
+		target := payload
+		if strings.HasPrefix(requirement.Family, "contracts.") {
+			target = contractCapabilities
+			requirementFamily := strings.TrimPrefix(requirement.Family, "contracts.")
+			if _, ok := target[requirementFamily]; !ok {
+				target[requirementFamily] = []any{}
+			}
+			values := target[requirementFamily].([]any)
+			target[requirementFamily] = append(values, requirement.Capability)
+			continue
+		}
+		if _, ok := target[requirement.Family]; !ok {
+			target[requirement.Family] = []any{}
+		}
+		values := target[requirement.Family].([]any)
+		target[requirement.Family] = append(values, requirement.Capability)
+	}
+	return payload
+}
+
+func relayCompatibilityRecipesPayload() map[string]any {
+	recipes := make([]any, 0, len(RequiredRecipes))
+	for _, requirement := range RequiredRecipes {
+		recipes = append(recipes, map[string]any{
+			"id":     requirement.ID,
+			"status": "usable",
+			"source": "witness-relay-v2-local-compile",
+			"declared": map[string]any{
+				"integration_contract": requirement.ContractID,
+			},
+			"resolved": map[string]any{},
+		})
+	}
+	return map[string]any{
+		"schema_version": "witness-relay-v2-local-recipes-v1",
+		"scope":          "recipes",
+		"status":         "usable",
+		"settings_path":  "",
+		"recipes":        recipes,
+	}
+}
+
+func relayPresentBackendStrata() map[string]string {
+	strata := make(map[string]string, len(requiredBackends))
+	for _, backend := range requiredBackends {
+		strata[backend] = "installed_auth_unknown"
+	}
+	return strata
+}
+
+func relayCompatibilityBackendStatusPayload(strata map[string]string) map[string]any {
+	backends := make([]map[string]string, 0, len(requiredBackends))
+	for _, backend := range requiredBackends {
+		backends = append(backends, map[string]string{
+			"backend": backend,
+			"status":  strata[backend],
+		})
+	}
+	return map[string]any{
+		"schema_version": "witness-relay-v2-local-backends-v1",
+		"scope":          "backends",
+		"probe_auth":     false,
+		"backends":       backends,
+	}
+}
+
 func runRelayAbsentPreflight(result *Result, options Options, launchErr error, diagnostics []diag.Diagnostic) (*Result, error) {
 	result.BackendStrata = relayAbsentBackendStrata()
 	if retainedDigest, err := retain(options.StateDir, "relay-capabilities.json", relayAbsentCapabilitiesPayload(options.RelayPath, launchErr)); err != nil {
@@ -523,258 +673,6 @@ func runRelayAbsentPreflight(result *Result, options Options, launchErr error, d
 	return finish(result, options, diagnostics)
 }
 
-func ValidateCapabilities(capabilities relayclient.Capabilities) []diag.Diagnostic {
-	var diagnostics []diag.Diagnostic
-	if capabilities.ConvoRelayVersion != relayclient.RequiredConvoRelayVersion {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeRelayVersionMismatch,
-			"relay version does not exactly match the supported compatibility baseline.",
-			diag.WithDetail("got", capabilities.ConvoRelayVersion),
-			diag.WithDetail("want", relayclient.RequiredConvoRelayVersion),
-		)))
-	}
-	for _, requirement := range RequiredCapabilities {
-		if !capabilityPresent(capabilities, requirement) {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeMissingCapability,
-				"relay capabilities are missing an exact required public contract.",
-				diag.WithPath(requirement.Location),
-				diag.WithDetail("family", requirement.Family),
-				diag.WithDetail("capability", requirement.Capability),
-			)))
-		}
-	}
-	return diagnostics
-}
-
-func ValidateRecipes(list relayclient.RecipesList) []diag.Diagnostic {
-	recipes := map[string]relayclient.Recipe{}
-	for _, recipe := range list.Recipes {
-		recipes[recipe.ID] = recipe
-	}
-	var diagnostics []diag.Diagnostic
-	for _, requirement := range RequiredRecipes {
-		recipe, ok := recipes[requirement.ID]
-		if !ok {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeMissingRecipe,
-				"required v2 structural relay recipe is missing.",
-				diag.WithDetail("recipe_id", requirement.ID),
-			)))
-			continue
-		}
-		if recipe.Status != "usable" && recipe.Status != "requires_integration" {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeRecipeUnavailable,
-				"required v2 structural relay recipe is not usable or waiting for integration.",
-				diag.WithDetail("recipe_id", requirement.ID),
-				diag.WithDetail("status", recipe.Status),
-			)))
-		}
-		if declaredContract, _ := recipe.Declared["integration_contract"].(string); declaredContract != requirement.ContractID {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeRecipeContractMismatch,
-				"required v2 structural relay recipe is bound to an unexpected integration contract.",
-				diag.WithDetail("recipe_id", requirement.ID),
-				diag.WithDetail("got", declaredContract),
-				diag.WithDetail("want", requirement.ContractID),
-			)))
-		}
-	}
-	return diagnostics
-}
-
-func BackendStrata(status relayclient.BackendStatus) (map[string]string, []diag.Diagnostic) {
-	records := map[string]relayclient.BackendRecord{}
-	for _, backend := range status.Backends {
-		records[backend.Backend] = backend
-	}
-	strata := map[string]string{}
-	var diagnostics []diag.Diagnostic
-	for _, name := range requiredBackends {
-		record, ok := records[name]
-		if !ok {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeBackendMissing,
-				"required relay backend family is missing.",
-				diag.WithDetail("backend", name),
-			)))
-			continue
-		}
-		strata[name] = record.Status
-		if !backendAttemptable(record.Status) {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeBackendUnavailable,
-				"required relay backend family is not attemptable.",
-				diag.WithDetail("backend", name),
-				diag.WithDetail("status", record.Status),
-			)))
-		}
-	}
-	return strata, diagnostics
-}
-
-func EvaluateCompileReport(requirement RecipeRequirement, report relayclient.CompileReport) []diag.Diagnostic {
-	var diagnostics []diag.Diagnostic
-	if report.RecipeID != "" && report.RecipeID != requirement.ID {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeCompileReportMismatch,
-			"compile report recipe_id does not match the requested recipe.",
-			diag.WithDetail("recipe_id", requirement.ID),
-			diag.WithDetail("reported_recipe_id", report.RecipeID),
-		)))
-	}
-	if report.IntegrationContract != "" && report.IntegrationContract != requirement.ContractID {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeRecipeContractMismatch,
-			"compile report selected an unexpected integration contract.",
-			diag.WithDetail("recipe_id", requirement.ID),
-			diag.WithDetail("got", report.IntegrationContract),
-			diag.WithDetail("want", requirement.ContractID),
-		)))
-	}
-	for _, relayDiagnostic := range report.Diagnostics {
-		switch {
-		case integrationRequiredFailure(relayDiagnostic.Code):
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeCompileRequiresIntegration,
-				"compile report still requires an integration binding.",
-				diag.WithDetail("recipe_id", requirement.ID),
-				diag.WithDetail("relay_code", relayDiagnostic.Code),
-				diag.WithDetail("relay_message", relayDiagnostic.Message),
-			)))
-		case integrationBindingFailure(relayDiagnostic.Code):
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeCompileIncompatible,
-				"compile report indicates the recipe is unbound or incompatible with the integration bundle.",
-				diag.WithDetail("recipe_id", requirement.ID),
-				diag.WithDetail("relay_code", relayDiagnostic.Code),
-				diag.WithDetail("relay_message", relayDiagnostic.Message),
-			)))
-		}
-	}
-	switch report.Status {
-	case "", "usable", "ok":
-	case "requires_integration":
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeCompileRequiresIntegration,
-			"compile report still requires an integration binding.",
-			diag.WithDetail("recipe_id", requirement.ID),
-		)))
-	case "error", "failed":
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeCompileReportError,
-			"compile report returned an error status.",
-			diag.WithDetail("recipe_id", requirement.ID),
-			diag.WithDetail("status", report.Status),
-		)))
-	default:
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeCompileReportError,
-			"compile report returned an unsupported status.",
-			diag.WithDetail("recipe_id", requirement.ID),
-			diag.WithDetail("status", report.Status),
-		)))
-	}
-	if report.RootRecipePlan == nil {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeCompilePlanMissing,
-			"compile report did not include a retained root recipe plan.",
-			diag.WithDetail("recipe_id", requirement.ID),
-		)))
-	}
-	if strings.TrimSpace(report.IntegrationContractDigest) == "" {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeContractDigestMissing,
-			"compile report did not include the selected integration contract digest.",
-			diag.WithDetail("recipe_id", requirement.ID),
-			diag.WithDetail("contract_id", requirement.ContractID),
-		)))
-	}
-	return diagnostics
-}
-
-func capabilityPresent(capabilities relayclient.Capabilities, requirement CapabilityRequirement) bool {
-	if strings.HasPrefix(requirement.Family, "contracts.") {
-		name := strings.TrimPrefix(requirement.Family, "contracts.")
-		return anySliceContains(capabilities.Contracts[name], requirement.Capability)
-	}
-	return stringSliceContains(capabilityStrings(capabilities, requirement.Family), fmt.Sprint(requirement.Capability))
-}
-
-func capabilityStrings(capabilities relayclient.Capabilities, family string) []string {
-	switch family {
-	case "portable_export":
-		return capabilities.PortableExport
-	case "provider_invocation":
-		return capabilities.ProviderInvocation
-	case "digest_profile":
-		return capabilities.DigestProfile
-	case "prompt_policy":
-		return capabilities.PromptPolicy
-	case "isolation_report":
-		return capabilities.IsolationReport
-	case "prompt_context_projection":
-		return capabilities.PromptContextProjection
-	case "provider_retry_policy":
-		return capabilities.ProviderRetryPolicy
-	case "rendered_prompt":
-		return capabilities.RenderedPrompt
-	default:
-		return nil
-	}
-}
-
-func stringSliceContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
-func anySliceContains(values []any, want any) bool {
-	for _, value := range values {
-		if capabilityValueEqual(value, want) {
-			return true
-		}
-	}
-	return false
-}
-
-func capabilityValueEqual(got any, want any) bool {
-	switch want := want.(type) {
-	case json.Number:
-		switch got := got.(type) {
-		case json.Number:
-			return got.String() == want.String()
-		case int:
-			return fmt.Sprint(got) == want.String()
-		case int64:
-			return fmt.Sprint(got) == want.String()
-		case float64:
-			return fmt.Sprintf("%.0f", got) == want.String()
-		default:
-			return false
-		}
-	case string:
-		gotString, ok := got.(string)
-		return ok && gotString == want
-	default:
-		return fmt.Sprint(got) == fmt.Sprint(want)
-	}
-}
-
-func backendAttemptable(status string) bool {
-	switch status {
-	case "ready", "installed", "installed_auth_unknown", "auth_unknown":
-		return true
-	default:
-		return false
-	}
-}
-
 func RelayAbsent(result Result) bool {
 	for _, backend := range requiredBackends {
 		if result.BackendStrata[backend] != contracts.RelayLaunchStatusAbsent {
@@ -783,12 +681,6 @@ func RelayAbsent(result Result) bool {
 	}
 	return len(result.BackendStrata) > 0
 }
-
-func relayMissing(err error) bool {
-	var commandError *relayclient.CommandError
-	return errors.As(err, &commandError) && commandError.Kind == relayclient.ErrorRelayMissing
-}
-
 func relayAbsentBackendStrata() map[string]string {
 	strata := make(map[string]string, len(requiredBackends))
 	for _, backend := range requiredBackends {
@@ -798,19 +690,19 @@ func relayAbsentBackendStrata() map[string]string {
 }
 
 func relayAbsentCapabilitiesPayload(relayPath string, err error) map[string]any {
-	payload := relayAbsentPayload("witness-relay-absent-capabilities-v1", relayPath, err)
+	payload := relayAbsentPayload("witness-relay-v2-compatibility-absent-v1", relayPath, err)
 	payload["capabilities"] = relayAbsentCapabilities()
 	return payload
 }
 
 func relayAbsentRecipesListPayload(relayPath string, err error) map[string]any {
-	payload := relayAbsentPayload("witness-relay-absent-recipes-list-v1", relayPath, err)
+	payload := relayAbsentPayload("witness-relay-v2-recipes-absent-v1", relayPath, err)
 	payload["recipes"] = []any{}
 	return payload
 }
 
 func relayAbsentBackendStatusPayload(relayPath string, err error) map[string]any {
-	payload := relayAbsentPayload("witness-relay-absent-backend-status-v1", relayPath, err)
+	payload := relayAbsentPayload("witness-relay-v2-backends-absent-v1", relayPath, err)
 	backends := make([]map[string]string, 0, len(requiredBackends))
 	for _, backend := range requiredBackends {
 		backends = append(backends, map[string]string{
@@ -823,7 +715,7 @@ func relayAbsentBackendStatusPayload(relayPath string, err error) map[string]any
 }
 
 func relayAbsentCompileReportPayload(requirement RecipeRequirement, relayPath string, err error) map[string]any {
-	payload := relayAbsentPayload("witness-relay-absent-compile-report-v1", relayPath, err)
+	payload := relayAbsentPayload("witness-relay-v2-recipe-absent-v1", relayPath, err)
 	payload["recipe_id"] = requirement.ID
 	payload["contract_id"] = requirement.ContractID
 	payload["status"] = contracts.RelayLaunchStatusAbsent
@@ -835,18 +727,14 @@ func relayAbsentPayload(schemaVersion string, relayPath string, err error) map[s
 		"schema_version":       schemaVersion,
 		"digest_profile":       digest.Profile,
 		"relay_launch_status":  contracts.RelayLaunchStatusAbsent,
-		"relay_error_kind":     relayclient.ErrorRelayMissing,
+		"relay_error_kind":     relayv2.ErrorRelayNotInstalled,
 		"relay_error_message":  err.Error(),
 		"relay_executable":     relayExecutable(relayPath),
+		"relay_command":        relayExecutable(relayPath),
 		"verification_effect":  contracts.DispositionPendingVerification,
 		"verification_status":  contracts.RecordStatusUnavailable,
 		"verification_reason":  "relay_verification_unavailable",
 		"recorded_degradation": true,
-	}
-	var commandError *relayclient.CommandError
-	if errors.As(err, &commandError) {
-		payload["relay_command"] = commandError.Command
-		payload["relay_args"] = append([]string(nil), commandError.Args...)
 	}
 	return payload
 }
@@ -863,23 +751,7 @@ func relayExecutable(path string) string {
 	if strings.TrimSpace(path) != "" {
 		return path
 	}
-	return relayclient.DefaultExecutable
-}
-
-func integrationBindingFailure(code string) bool {
-	switch strings.ToLower(code) {
-	case "invalid_integration_bundle",
-		"integration_contract_not_found",
-		"integration_contract_incompatible",
-		"integration_contract_id_mismatch":
-		return true
-	default:
-		return false
-	}
-}
-
-func integrationRequiredFailure(code string) bool {
-	return strings.ToLower(code) == "integration_required"
+	return relayv2.DefaultExecutable
 }
 
 func loadIntegrationBundle(path string) (any, string, []diag.Diagnostic) {
@@ -1153,68 +1025,6 @@ func compileReportDigestValueType(value any) string {
 	default:
 		return fmt.Sprintf("%T", value)
 	}
-}
-
-func selectedContractDigests(bundlePayload any, reports map[string]relayclient.CompileReport) (map[string]string, map[string]string, []diag.Diagnostic) {
-	witnessDigests := map[string]string{}
-	var diagnostics []diag.Diagnostic
-	if bundlePayload != nil {
-		bundleDigests, bundleDiagnostics := selectedContractDigestsFromBundle(bundlePayload)
-		diagnostics = append(diagnostics, bundleDiagnostics...)
-		for contractID, contractDigest := range bundleDigests {
-			witnessDigests[contractID] = contractDigest
-		}
-	}
-	relayReportedDigests := map[string]string{}
-	for _, recipeID := range sortedCompileReportKeys(reports) {
-		report := reports[recipeID]
-		reportRecipeID := report.RecipeID
-		if reportRecipeID == "" {
-			reportRecipeID = recipeID
-		}
-		if report.RootRecipePlan != nil && strings.TrimSpace(report.IntegrationContractDigest) == "" {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeContractDigestMissing,
-				"compile report did not include the selected integration contract digest.",
-				diag.WithDetail("recipe_id", reportRecipeID),
-				diag.WithDetail("contract_id", report.IntegrationContract),
-			)))
-		}
-		reportDigests, err := compileReportContractDigests(reportRecipeID, report)
-		if err != nil {
-			diagnostics = append(diagnostics, diag.FromError(err))
-			continue
-		}
-		resolvedDigests, err := ResolveRelayReportedContractDigests(reportDigests, report.IntegrationContract, report.IntegrationContractDigest)
-		if err != nil {
-			diagnostics = append(diagnostics, diag.FromError(err))
-			continue
-		}
-		projectedDigests := ProjectRelayReportedContractDigests(resolvedDigests, report.IntegrationContract)
-		for _, contractID := range sortedStringMapKeys(projectedDigests) {
-			if contractDigest := projectedDigests[contractID]; contractDigest != "" {
-				relayReportedDigests[contractID] = contractDigest
-			}
-		}
-	}
-	for _, contractID := range requiredWitnessContractIDs() {
-		if len(reports) > 0 && relayReportedDigests[contractID] == "" {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeContractDigestMissing,
-				"compile reports did not include the required selected integration contract digest.",
-				diag.WithDetail("contract_id", contractID),
-			)))
-		}
-	}
-	return witnessDigests, relayReportedDigests, diagnostics
-}
-
-func compileReportContractDigests(reportID string, report relayclient.CompileReport) (map[string]string, error) {
-	rawDigests, found := report.Payload["contract_digests"]
-	if !found {
-		rawDigests = report.ContractDigests
-	}
-	return DecodeCompileReportContractDigests(reportID, rawDigests)
 }
 
 func selectedContractDigestsFromBundle(bundlePayload any) (map[string]string, []diag.Diagnostic) {
@@ -1680,23 +1490,6 @@ func retainIntegrationBundleBody(stateDir string, sourcePath string, expectedDig
 	return actualDigest, nil
 }
 
-func retainCommandFailure(stateDir string, relativePath string, err error) (string, error) {
-	var commandError *relayclient.CommandError
-	if !errors.As(err, &commandError) || strings.TrimSpace(commandError.Stdout) == "" {
-		return "", nil
-	}
-	payload, decodeErr := strictjson.DecodeAnyBytes([]byte(commandError.Stdout), strictjson.DefaultMaxBytes)
-	if decodeErr != nil {
-		payload = map[string]any{
-			"relay_error_kind": commandError.Kind,
-			"stdout":           commandError.Stdout,
-			"stderr":           commandError.Stderr,
-			"exit_code":        commandError.ExitCode,
-		}
-	}
-	return retain(stateDir, relativePath, payload)
-}
-
 func validateRelativeOutput(path string) error {
 	if path == "" || filepath.IsAbs(path) || strings.Contains(path, "\x00") {
 		return diag.New(CodeInvalidRecipeID, "preflight retained artifact path must be relative.", diag.WithDetail("path", path))
@@ -1769,111 +1562,11 @@ func pathInside(root string, child string) bool {
 		!filepath.IsAbs(relative)
 }
 
-func commandDiagnostic(command string, err error) diag.Diagnostic {
-	var commandError *relayclient.CommandError
-	if errors.As(err, &commandError) {
-		return diag.FromError(diag.New(
-			commandError.Kind,
-			"relay command failed.",
-			diag.WithDetail("command", command),
-			diag.WithDetail("args", commandError.Args),
-			diag.WithDetail("exit_code", commandError.ExitCode),
-			diag.WithDetail("relay_diagnostic", commandError.Diagnostic),
-		))
-	}
-	return diag.FromError(err)
-}
-
-func compileCommandDiagnostic(recipeID string, err error) diag.Diagnostic {
-	var commandError *relayclient.CommandError
-	if errors.As(err, &commandError) {
-		if commandError.Kind == relayclient.ErrorNonzeroExit || commandError.Kind == relayclient.ErrorSchemaInvalid {
-			if diagnostic, ok := typedCompileFailureDiagnostic(recipeID, commandError.Diagnostic); ok {
-				return diagnostic
-			}
-		}
-		return diag.FromError(diag.New(
-			CodeCompileCommandFailed,
-			"relay compile-recipe command failed.",
-			diag.WithDetail("recipe_id", recipeID),
-			diag.WithDetail("relay_error_kind", commandError.Kind),
-			diag.WithDetail("exit_code", commandError.ExitCode),
-			diag.WithDetail("stdout", commandError.Stdout),
-			diag.WithDetail("stderr", commandError.Stderr),
-		))
-	}
-	return diag.FromError(diag.Wrap(err, CodeCompileCommandFailed, "relay compile-recipe command failed.", diag.WithDetail("recipe_id", recipeID)))
-}
-
-func typedCompileFailureDiagnostic(recipeID string, relayDiagnostic diag.Diagnostic) (diag.Diagnostic, bool) {
-	if relayDiagnostic.Code == "" {
-		return diag.Diagnostic{}, false
-	}
-	details := map[string]any{
-		"recipe_id":     recipeID,
-		"relay_code":    relayDiagnostic.Code,
-		"relay_message": relayDiagnostic.Message,
-	}
-	if relayDiagnostic.Path != "" {
-		details["relay_path"] = relayDiagnostic.Path
-	}
-	for key, value := range relayDiagnostic.Details {
-		details["relay_"+key] = value
-	}
-	switch {
-	case relayDiagnostic.Code == relayclient.ErrorContractDigestMissing:
-		if contractID, ok := relayDiagnostic.Details["integration_contract"].(string); ok && contractID != "" {
-			details["contract_id"] = contractID
-		}
-		return diag.FromError(diag.New(
-			CodeContractDigestMissing,
-			"relay compile-recipe omitted the selected integration contract digest.",
-			diag.WithDetails(details),
-		)), true
-	case integrationRequiredFailure(relayDiagnostic.Code):
-		return diag.FromError(diag.New(
-			CodeCompileRequiresIntegration,
-			"relay compile-recipe still requires an integration binding.",
-			diag.WithDetails(details),
-		)), true
-	case integrationBindingFailure(relayDiagnostic.Code):
-		return diag.FromError(diag.New(
-			CodeCompileIncompatible,
-			"relay compile-recipe reported an unbound or incompatible integration bundle.",
-			diag.WithDetails(details),
-		)), true
-	case relayDiagnostic.Code == relayclient.ErrorSchemaInvalid:
-		return diag.FromError(diag.New(
-			CodeCompileReportError,
-			"relay compile-recipe emitted a schema-invalid diagnostic payload.",
-			diag.WithDetails(details),
-		)), true
-	default:
-		return diag.FromError(diag.New(
-			CodeCompileReportError,
-			"relay compile-recipe emitted a typed failure diagnostic.",
-			diag.WithDetails(details),
-		)), true
-	}
-}
-
 func compatibilityManifest(result *Result, diagnostics []diag.Diagnostic) contracts.RelayCompatibility {
 	relayAbsent := RelayAbsent(*result)
 	capabilities := make(map[string]bool, len(contracts.RequiredRelayCapabilityClosureV3))
-	missing := map[string]bool{}
-	for _, diagnostic := range diagnostics {
-		if diagnostic.Code == CodeMissingCapability {
-			family, _ := diagnostic.Details["family"].(string)
-			capability := fmt.Sprint(diagnostic.Details["capability"])
-			for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
-				if requirement.Family == family && fmt.Sprint(requirement.Capability) == capability {
-					missing[requirement.Key] = true
-				}
-			}
-		}
-	}
 	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
-		capabilities[requirement.Key] = !relayAbsent && !missing[requirement.Key]
+		capabilities[requirement.Key] = !relayAbsent
 	}
 	return contracts.RelayCompatibility{
 		SchemaVersion:           contracts.RelayCompatibilityV3,
@@ -1965,15 +1658,6 @@ func consumerIdentity(input map[string]any) map[string]any {
 		output[key] = value
 	}
 	return output
-}
-
-func sortedCompileReportKeys(reports map[string]relayclient.CompileReport) []string {
-	keys := make([]string, 0, len(reports))
-	for key := range reports {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func sortedStringMapKeys(values map[string]string) []string {

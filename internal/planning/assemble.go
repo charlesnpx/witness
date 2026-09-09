@@ -4,11 +4,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
+	relayplan "github.com/charlesnpx/convo-relay/v2/plan"
+	relayresult "github.com/charlesnpx/convo-relay/v2/result"
 	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/contract/strictjson"
@@ -61,6 +65,7 @@ type RelayEvidence struct {
 	PortableExportDir string
 	PortableExportRef *contracts.ArtifactRef
 	Verdicts          *contracts.RelayWitnessVerdictsDocument
+	VerifiedBundle    *bundle.Verification
 	RunRecords        []map[string]any
 }
 
@@ -223,9 +228,37 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
-		if !hasRelay || relay.PortableExportDir == "" {
+		if !hasRelay || (relay.PortableExportDir == "" && relay.VerifiedBundle == nil) {
 			record.FailureReason = relayUnavailableFailureReason(relay)
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
+			manifest.Batches = append(manifest.Batches, record)
+			continue
+		}
+		if relay.VerifiedBundle != nil {
+			assembled, err := assembleRelayV2Evidence(relay, planned, options.Plan, batchDoc)
+			if err != nil {
+				record.Status = contracts.RecordStatusFailed
+				record.FailureReason = "relay_v2_bundle_invalid"
+				diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "relay v2 bundle evidence could not be bound to the planned verification batch.", diag.WithDetail("batch_id", planned.BatchID))))
+				result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
+				manifest.Batches = append(manifest.Batches, record)
+				continue
+			}
+			record.Status = contracts.RecordStatusValid
+			record.PortableExportDigest = assembled.verified.Manifest.ManifestDigest
+			record.CanonicalResultDigest = assembled.resultDigest
+			record.RelayVerdicts = &assembled.verdicts
+			if relay.PortableExportRef != nil {
+				record.PortableExportRef = relay.PortableExportRef
+			} else {
+				record.PortableExportRef = &contracts.ArtifactRef{
+					Kind:          "relay-root-portable-export",
+					ID:            planned.BatchID,
+					Digest:        assembled.verified.Manifest.ManifestDigest,
+					DigestProfile: digest.Profile,
+					MediaType:     "application/json",
+				}
+			}
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
@@ -440,6 +473,197 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 		return result, &ValidationError{Diagnostics: diagnostics}
 	}
 	return result, nil
+}
+
+type relayV2Assembly struct {
+	verified     bundle.Verification
+	verdicts     contracts.RelayWitnessVerdictsDocument
+	resultDigest string
+}
+
+func assembleRelayV2Evidence(relay RelayEvidence, planned BatchPlan, verificationPlan PlanDocument, batch contracts.VerificationBatchDocument) (relayV2Assembly, error) {
+	if relay.VerifiedBundle == nil {
+		return relayV2Assembly{}, fmt.Errorf("relay v2 verified bundle is required")
+	}
+	verified := *relay.VerifiedBundle
+	if strings.TrimSpace(relay.PortableExportDir) != "" {
+		fresh, err := bundle.VerifyPortableDirectory(relay.PortableExportDir)
+		if err != nil {
+			return relayV2Assembly{}, fmt.Errorf("verify portable bundle: %w", err)
+		}
+		verified = fresh
+	} else {
+		if err := bundle.Validate(verified.Manifest); err != nil {
+			return relayV2Assembly{}, fmt.Errorf("validate portable bundle manifest: %w", err)
+		}
+		if err := relayplan.Validate(verified.Session.Plan); err != nil {
+			return relayV2Assembly{}, fmt.Errorf("validate portable bundle plan: %w", err)
+		}
+		if err := relayresult.ValidateRoot(verified.Session.Root); err != nil {
+			return relayV2Assembly{}, fmt.Errorf("validate portable bundle root: %w", err)
+		}
+		if err := relayresult.ValidateTranscript(verified.Transcript); err != nil {
+			return relayV2Assembly{}, fmt.Errorf("validate portable bundle transcript: %w", err)
+		}
+		if err := relayresult.ValidateDiagnostics(verified.Diagnostics); err != nil {
+			return relayV2Assembly{}, fmt.Errorf("validate portable bundle diagnostics: %w", err)
+		}
+	}
+
+	value := verified.Session.Plan
+	if value.SessionID != planned.BatchID {
+		return relayV2Assembly{}, fmt.Errorf("plan.session_id %q does not match planned batch_id %q", value.SessionID, planned.BatchID)
+	}
+	if value.RecipeID != planned.RecipeFamily {
+		return relayV2Assembly{}, fmt.Errorf("plan.recipe_id %q does not match planned recipe_family %q", value.RecipeID, planned.RecipeFamily)
+	}
+	if err := validateRelayV2PlanInputs(verified, relay.PortableExportDir, value, verificationPlan, planned); err != nil {
+		return relayV2Assembly{}, err
+	}
+
+	verdicts, err := relayV2Verdicts(relay.Verdicts, verified.Session.Root.Result.Value)
+	if err != nil {
+		return relayV2Assembly{}, err
+	}
+	if diagnostics := contracts.ValidateRelayWitnessVerdicts(verdicts, &batch); len(diagnostics) > 0 {
+		return relayV2Assembly{}, fmt.Errorf("validate relay witness verdicts: %s", diagnostics[0].Message)
+	}
+	resultDigest, err := contracts.RelayWitnessVerdictsDigest(verdicts)
+	if err != nil {
+		return relayV2Assembly{}, fmt.Errorf("compute relay witness verdict digest: %w", err)
+	}
+	return relayV2Assembly{verified: verified, verdicts: verdicts, resultDigest: resultDigest}, nil
+}
+
+func validateRelayV2PlanInputs(verified bundle.Verification, directory string, value relayplan.Plan, verificationPlan PlanDocument, planned BatchPlan) error {
+	findings, ok := relayPlanInput(value, "findings")
+	if !ok || len(findings.Contents) != 1 {
+		return fmt.Errorf("plan.inputs.findings must contain exactly one blob")
+	}
+	if got := relayBlobWitnessDigest(findings.Contents[0]); got != planned.BatchDigest {
+		return fmt.Errorf("plan.inputs.findings digest %q does not match planned batch_digest %q", got, planned.BatchDigest)
+	}
+
+	charterDigest := firstNonEmpty(planned.CharterDigest, verificationPlan.CharterDigest)
+	if charterDigest != "" {
+		charter, ok := relayPlanInput(value, "charter")
+		if !ok || len(charter.Contents) != 1 {
+			return fmt.Errorf("plan.inputs.charter must contain exactly one blob")
+		}
+		if got := relayBlobWitnessDigest(charter.Contents[0]); got != charterDigest {
+			return fmt.Errorf("plan.inputs.charter digest %q does not match planned charter_digest %q", got, charterDigest)
+		}
+	}
+
+	expectedArtifacts := plannedArtifactDigests(planned.ArtifactDigestSet...)
+	if len(expectedArtifacts) == 0 {
+		expectedArtifacts = plannedArtifactDigests(planned.ArtifactDigest, verificationPlan.ArtifactDigest)
+	}
+	artifacts, ok := relayPlanInput(value, "artifact")
+	if !ok || len(artifacts.Contents) == 0 {
+		return fmt.Errorf("plan.inputs.artifact must contain at least one blob")
+	}
+	actualArtifacts := map[string]bool{}
+	for _, ref := range artifacts.Contents {
+		candidates := relayBlobWitnessDigests(verified, directory, ref)
+		matched := false
+		for _, candidate := range candidates {
+			if stringSliceContains(expectedArtifacts, candidate) {
+				actualArtifacts[candidate] = true
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("plan.inputs.artifact blob %q does not match planned artifact_digest_set", relayBlobWitnessDigest(ref))
+		}
+	}
+	missing := make([]string, 0)
+	for _, expected := range expectedArtifacts {
+		if !actualArtifacts[expected] {
+			missing = append(missing, expected)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("plan.inputs.artifact digests do not match planned artifact_digest_set; missing %v", missing)
+	}
+	return nil
+}
+
+func relayV2Verdicts(embedded *contracts.RelayWitnessVerdictsDocument, value string) (contracts.RelayWitnessVerdictsDocument, error) {
+	var decoded contracts.RelayWitnessVerdictsDocument
+	if strings.TrimSpace(value) != "" {
+		candidate, err := contracts.ReadRelayWitnessVerdictsBytes([]byte(value))
+		if err != nil {
+			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("decode embedded relay result: %w", err)
+		}
+		decoded = candidate
+	}
+	if embedded == nil {
+		if strings.TrimSpace(value) == "" {
+			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("relay bundle contains no embedded Witness verdicts")
+		}
+		return decoded, nil
+	}
+	if strings.TrimSpace(value) != "" {
+		embeddedDigest, err := contracts.RelayWitnessVerdictsDigest(*embedded)
+		if err != nil {
+			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest embedded relay verdicts: %w", err)
+		}
+		decodedDigest, err := contracts.RelayWitnessVerdictsDigest(decoded)
+		if err != nil {
+			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest bundle relay verdicts: %w", err)
+		}
+		if embeddedDigest != decodedDigest {
+			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("embedded relay verdicts do not match the bundle result")
+		}
+	}
+	return *embedded, nil
+}
+
+func relayPlanInput(value relayplan.Plan, name string) (relayplan.Input, bool) {
+	for _, input := range value.Inputs {
+		if input.Name == name {
+			return input, true
+		}
+	}
+	return relayplan.Input{}, false
+}
+
+func relayBlobWitnessDigest(ref relayplan.BlobRef) string {
+	return "sha256:" + ref.SHA256
+}
+
+func relayBlobWitnessDigests(verified bundle.Verification, directory string, ref relayplan.BlobRef) []string {
+	result := []string{relayBlobWitnessDigest(ref)}
+	if strings.TrimSpace(directory) == "" {
+		return result
+	}
+	for _, entry := range verified.Manifest.PayloadInventory {
+		if entry.Kind != "input" || entry.Blob.SHA256 != ref.SHA256 {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(entry.Path)))
+		if err != nil {
+			return result
+		}
+		if snapshotDigest, ok := frozenSnapshotManifestDigest(body); ok {
+			result = appendUniqueString(result, snapshotDigest)
+		}
+		break
+	}
+	return result
+}
+
+func frozenSnapshotManifestDigest(data []byte) (string, bool) {
+	manifest, err := strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*32)
+	if err != nil || manifest.SchemaVersion != freeze.SchemaVersion {
+		return "", false
+	}
+	manifestDigest, err := freeze.ManifestDigest(manifest)
+	if err != nil || manifest.Source.ManifestDigest != manifestDigest || manifest.Workspace.ManifestDigest != manifestDigest {
+		return "", false
+	}
+	return manifestDigest, true
 }
 
 func attachRelayLaunchStatus(manifest *contracts.VerificationManifest, status string) {
