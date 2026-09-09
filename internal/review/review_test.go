@@ -323,54 +323,18 @@ func TestPrepareResolvesSymlinkedSourceAndDetectsDrift(t *testing.T) {
 	}
 }
 
-func TestPrepareDefaultPacketsStayOutsideSourceAndRejectsInTreePackets(t *testing.T) {
-	sourceDirectory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(sourceDirectory, "source.txt"), []byte("unchanged"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestPrepareRequiresPacketDirectoryAndRejectsInTreePackets(t *testing.T) {
 	options := PrepareOptions{
 		Config:        DefaultConfig(),
 		FrozenCharter: testFrozenCharter(t),
-		SourceDir:     sourceDirectory,
+		SourceDir:     t.TempDir(),
 	}
-	prepared, err := Prepare(options)
-	if err != nil {
-		t.Fatalf("Prepare with default packet directory: %v", err)
-	}
-	for _, packet := range prepared.Packets {
-		if pathWithin(prepared.SourceDirectory, packet.PromptPath) || pathWithin(prepared.SourceDirectory, packet.SchemaPath) {
-			t.Fatalf("packet %q is inside source directory %q", packet.PromptPath, prepared.SourceDirectory)
-		}
-	}
-	resultPaths := testReports(t, prepared.Request, prepared.FrozenCharter)
-	delegate, agentbus := fakeReviewCommands(t, resultPaths, JobExitCompleted)
-	result, err := NewSimpleAdapter(SimpleAdapterOptions{
-		DelegateExecutable: delegate,
-		AgentbusExecutable: agentbus,
-		PollInterval:       -1,
-		TranscriptPageSize: 2,
-	}).Run(context.Background(), SimpleRunOptions{
-		Request:          prepared.Request,
-		FrozenCharter:    prepared.FrozenCharter,
-		Packets:          prepared.Packets,
-		WorkingDirectory: prepared.SourceDirectory,
-		SourceDigest:     prepared.SourceDigest,
-	})
-	if err != nil {
-		t.Fatalf("adapter Run: %v", err)
-	}
-	if result.Completion.Verdict != contractreview.CompletionVerdictSatisfied {
-		t.Fatalf("verdict = %q, want satisfied with unchanged source", result.Completion.Verdict)
-	}
-	after, err := SourceDigest(prepared.SourceDirectory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after != prepared.SourceDigest {
-		t.Fatalf("source digest after unchanged review = %q, want %q", after, prepared.SourceDigest)
+	_, err := Prepare(options)
+	if err == nil || !strings.Contains(err.Error(), "PacketDirectory") {
+		t.Fatalf("Prepare with empty PacketDirectory error = %v, want field-specific error", err)
 	}
 
-	options.PacketDirectory = filepath.Join(sourceDirectory, "packets")
+	options.PacketDirectory = filepath.Join(options.SourceDir, "packets")
 	_, err = Prepare(options)
 	if err == nil || !strings.Contains(err.Error(), "packets written into the reviewed tree would change the thing being reviewed") {
 		t.Fatalf("Prepare with in-tree packet directory error = %v, want containment explanation", err)

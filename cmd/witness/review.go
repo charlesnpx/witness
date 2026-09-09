@@ -130,9 +130,6 @@ func runReviewRun(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve review output directory: %w", err)
 	}
-	if err := os.MkdirAll(absoluteOutDir, 0o700); err != nil {
-		return fmt.Errorf("create review output directory %q: %w", absoluteOutDir, err)
-	}
 	config, err := loadReviewConfig(*configPath)
 	if err != nil {
 		return err

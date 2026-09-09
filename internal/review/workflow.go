@@ -123,29 +123,13 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err := contractreview.RequireValidReviewRequestV2(request); err != nil {
 		return PreparedReview{}, fmt.Errorf("construct review request: %w", err)
 	}
-	packetDirectory := options.PacketDirectory
-	if strings.TrimSpace(packetDirectory) == "" {
-		tempDirectory, tempErr := resolveReviewPath(os.TempDir())
-		if tempErr != nil {
-			return PreparedReview{}, fmt.Errorf("resolve temporary review packet directory: %w", tempErr)
-		}
-		if pathWithin(sourceDirectory, tempDirectory) {
-			return PreparedReview{}, fmt.Errorf("review packet directory %q resolves inside source directory %q; packets written into the reviewed tree would change the thing being reviewed", tempDirectory, sourceDirectory)
-		}
-		packetDirectory, err = os.MkdirTemp(tempDirectory, "witness-review-packets-")
-		if err != nil {
-			return PreparedReview{}, fmt.Errorf("create temporary review packet directory: %w", err)
-		}
-		packetDirectory, err = resolveReviewPath(packetDirectory)
-		if err != nil {
-			return PreparedReview{}, fmt.Errorf("resolve temporary review packet directory %q: %w", packetDirectory, err)
-		}
-	} else {
-		requestedPacketDirectory := packetDirectory
-		packetDirectory, err = resolveReviewPath(requestedPacketDirectory)
-		if err != nil {
-			return PreparedReview{}, fmt.Errorf("resolve review packet directory %q: %w", requestedPacketDirectory, err)
-		}
+	if strings.TrimSpace(options.PacketDirectory) == "" {
+		return PreparedReview{}, errors.New("review preparation requires PacketDirectory")
+	}
+	requestedPacketDirectory := options.PacketDirectory
+	packetDirectory, err := resolveReviewPath(requestedPacketDirectory)
+	if err != nil {
+		return PreparedReview{}, fmt.Errorf("resolve review packet directory %q: %w", requestedPacketDirectory, err)
 	}
 	if pathWithin(sourceDirectory, packetDirectory) {
 		return PreparedReview{}, fmt.Errorf("review packet directory %q resolves inside source directory %q; packets written into the reviewed tree would change the thing being reviewed", packetDirectory, sourceDirectory)
