@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -192,24 +193,27 @@ func Run(ctx context.Context, prepareOptions PrepareOptions, adapterOptions Simp
 	return prepared, runResult, nil
 }
 
-// WriteCompletion persists an in-process completion record as an audit
-// record. It never reads the record back to make a gate decision.
-func WriteCompletion(path string, completion contractreview.ReviewCompletionDocument) error {
-	if strings.TrimSpace(path) == "" {
-		return errors.New("completion output path is empty")
-	}
-	resolvedPath, err := resolveReviewOutputPath(path)
+// WriteCanonical persists a canonical JSON document. A file destination is
+// resolved and written atomically; an empty destination writes to stdout.
+func WriteCanonical(path string, document any) error {
+	data, err := canonjson.Marshal(document)
 	if err != nil {
-		return fmt.Errorf("resolve review completion path %q: %w", path, err)
+		return fmt.Errorf("encode canonical document: %w", err)
 	}
-	data, err := canonjson.Marshal(completion)
-	if err != nil {
-		return fmt.Errorf("encode review completion: %w", err)
+	return writeReviewOutput(path, append(data, '\n'), "canonical document")
+}
+
+// WriteJSON persists a standard JSON document. It shares the same atomic file
+// writer as WriteCanonical while retaining encoding/json's number notation for
+// consumer-facing output that is not bound by a digest.
+func WriteJSON(path string, document any) error {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(document); err != nil {
+		return fmt.Errorf("encode JSON document: %w", err)
 	}
-	if err := writePrivateFile(resolvedPath, append(data, '\n')); err != nil {
-		return fmt.Errorf("write review completion %q: %w", path, err)
-	}
-	return nil
+	return writeReviewOutput(path, buffer.Bytes(), "JSON document")
 }
 
 // SourceDigest returns a deterministic semantic digest of all regular files
@@ -486,6 +490,23 @@ func mustRequestDigest(request contractreview.ReviewRequestV2Document) string {
 		return ""
 	}
 	return digestValue
+}
+
+func writeReviewOutput(path string, data []byte, description string) error {
+	if path == "" {
+		if _, err := os.Stdout.Write(data); err != nil {
+			return fmt.Errorf("write %s to stdout: %w", description, err)
+		}
+		return nil
+	}
+	resolvedPath, err := resolveReviewOutputPath(path)
+	if err != nil {
+		return fmt.Errorf("resolve review output path %q: %w", path, err)
+	}
+	if err := writePrivateFile(resolvedPath, data); err != nil {
+		return fmt.Errorf("write review output %q: %w", path, err)
+	}
+	return nil
 }
 
 func writePrivateFile(path string, data []byte) error {

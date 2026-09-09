@@ -160,13 +160,13 @@ func runReviewRun(args []string) error {
 	requestPath := filepath.Join(absoluteOutDir, "review-request.json")
 	charterOutputPath := filepath.Join(absoluteOutDir, "charter.freeze.json")
 	completionPath := filepath.Join(absoluteOutDir, "review-completion.json")
-	if err := writeCanonical(requestPath, prepared.Request); err != nil {
+	if err := internalreview.WriteCanonical(requestPath, prepared.Request); err != nil {
 		return fmt.Errorf("write prepared review request: %w", err)
 	}
-	if err := writeCanonical(charterOutputPath, prepared.FrozenCharter); err != nil {
+	if err := internalreview.WriteCanonical(charterOutputPath, prepared.FrozenCharter); err != nil {
 		return fmt.Errorf("write prepared frozen Charter: %w", err)
 	}
-	if err := internalreview.WriteCompletion(completionPath, result.Completion); err != nil {
+	if err := internalreview.WriteCanonical(completionPath, result.Completion); err != nil {
 		return err
 	}
 	jobSummaries := make([]map[string]any, 0, len(result.Jobs))

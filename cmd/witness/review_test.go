@@ -6,10 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestReviewRunFailedToRunExitAndOK(t *testing.T) {
+func TestReviewRunFailedToRunExitAndRejectsSymlinkedRequest(t *testing.T) {
 	if os.Getenv("WITNESS_REVIEW_EXIT_HELPER") == "1" {
 		var args []string
 		if err := json.Unmarshal([]byte(os.Getenv("WITNESS_REVIEW_EXIT_ARGS")), &args); err != nil {
@@ -75,7 +76,7 @@ exit 4
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(os.Args[0], "-test.run=TestReviewRunFailedToRunExitAndOK")
+	command := exec.Command(os.Args[0], "-test.run=TestReviewRunFailedToRunExitAndRejectsSymlinkedRequest")
 	command.Env = append(os.Environ(),
 		"WITNESS_REVIEW_EXIT_HELPER=1",
 		"WITNESS_REVIEW_EXIT_ARGS="+string(argsData),
@@ -94,6 +95,30 @@ exit 4
 	}
 	if result["ok"] != false || result["verdict"] != "failed_to_run" {
 		t.Fatalf("review run result = %#v, want ok false and failed_to_run", result)
+	}
+
+	symlinkOutputDirectory := t.TempDir()
+	resolvedOutputDirectory, err := filepath.EvalSymlinks(symlinkOutputDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorPath := filepath.Join(directory, "operator-work.json")
+	operatorBefore := []byte("operator work must survive\n")
+	if err := os.WriteFile(operatorPath, operatorBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(operatorPath, filepath.Join(symlinkOutputDirectory, "review-request.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	symlinkArgs := append([]string(nil), args...)
+	symlinkArgs[5] = symlinkOutputDirectory
+	err = runReviewRun(symlinkArgs)
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(resolvedOutputDirectory, "review-request.json")) {
+		t.Fatalf("review run error = %v, want refusal naming request path %q", err, filepath.Join(resolvedOutputDirectory, "review-request.json"))
+	}
+	after, err := os.ReadFile(operatorPath)
+	if err != nil || string(after) != string(operatorBefore) {
+		t.Fatalf("operator file = %q (read error: %v), want unchanged %q", after, err, operatorBefore)
 	}
 }
 

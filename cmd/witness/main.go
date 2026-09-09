@@ -27,6 +27,7 @@ import (
 	"github.com/charlesnpx/witness/internal/preflight"
 	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/relayrun"
+	internalreview "github.com/charlesnpx/witness/internal/review"
 )
 
 const (
@@ -302,7 +303,7 @@ func runRoleOutputInit(args []string) error {
 	if err := contracts.RequireValidRoleOutput(document, nil); err != nil {
 		return err
 	}
-	return writeCanonical(*out, document)
+	return internalreview.WriteCanonical(*out, document)
 }
 
 func runRoleOutputValidate(args []string) error {
@@ -396,7 +397,7 @@ func runVerificationPreflight(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, result)
+	return internalreview.WriteCanonical(*out, result)
 }
 
 func runVerificationPlan(args []string) error {
@@ -482,7 +483,7 @@ func runVerificationPlan(args []string) error {
 		return err
 	}
 	if *out != "" {
-		return writeCanonical(*out, result.Plan)
+		return internalreview.WriteCanonical(*out, result.Plan)
 	}
 	return diag.WriteCanonical(os.Stdout, result.Plan)
 }
@@ -649,13 +650,13 @@ func runVerificationAssemble(args []string) error {
 	if err != nil {
 		addStateDirDefaultPathDetails(err, missingStateDirDefaults)
 		if result != nil {
-			if writeErr := writeCanonical(*out, result.Manifest); writeErr != nil {
+			if writeErr := internalreview.WriteCanonical(*out, result.Manifest); writeErr != nil {
 				return writeErr
 			}
 		}
 		return err
 	}
-	return writeCanonical(*out, verificationAssembleOutput(result))
+	return internalreview.WriteCanonical(*out, verificationAssembleOutput(result))
 }
 
 func applyVerificationAssembleStateDirDefaults(
@@ -884,7 +885,7 @@ func runAdjudicate(args []string) error {
 		return err
 	}
 	if service.Result != nil {
-		if writeErr := writeCanonical(*out, service.Result); writeErr != nil {
+		if writeErr := internalreview.WriteCanonical(*out, service.Result); writeErr != nil {
 			return writeErr
 		}
 	}
@@ -1016,7 +1017,7 @@ func runLedgerShow(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeJSONOutput(*out, document)
+	return internalreview.WriteJSON(*out, document)
 }
 
 func runLedgerPromote(args []string) error {
@@ -1048,7 +1049,7 @@ func runLedgerPromote(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-promote-v2", record))
+	return internalreview.WriteCanonical(*out, ledgerAppendOutput("witness-ledger-promote-v2", record))
 }
 
 func runLedgerAcceptUnverified(args []string) error {
@@ -1080,7 +1081,7 @@ func runLedgerAcceptUnverified(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, ledgerAppendOutput("witness-ledger-accept-unverified-v2", record))
+	return internalreview.WriteCanonical(*out, ledgerAppendOutput("witness-ledger-accept-unverified-v2", record))
 }
 
 type ledgerAppendDocument struct {
@@ -2092,7 +2093,7 @@ func runCharterInit(args []string) error {
 	if _, err := charter.Normalize(skeleton, nil); err != nil {
 		return err
 	}
-	return writeCanonical(*out, skeleton)
+	return internalreview.WriteCanonical(*out, skeleton)
 }
 
 func runCharterFreeze(args []string) error {
@@ -2117,7 +2118,7 @@ func runCharterFreeze(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, frozen)
+	return internalreview.WriteCanonical(*out, frozen)
 }
 
 func runCharterAmend(args []string) error {
@@ -2156,7 +2157,7 @@ func runCharterAmend(args []string) error {
 	if err := charter.AppendAmendment(*amendmentsPath, event); err != nil {
 		return err
 	}
-	return writeCanonical(*out, frozen)
+	return internalreview.WriteCanonical(*out, frozen)
 }
 
 func runCharterShow(args []string) error {
@@ -2181,7 +2182,7 @@ func runCharterShow(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeCanonical(*out, normalized)
+	return internalreview.WriteCanonical(*out, normalized)
 }
 
 func loadCharterInputs(charterPath string, amendmentsPath string) (charter.Charter, []charter.OwnerEvent, error) {
@@ -2200,55 +2201,6 @@ func loadCharterInputs(charterPath string, amendmentsPath string) (charter.Chart
 		}
 	}
 	return input, amendments, nil
-}
-
-func writeCanonical(path string, value any) error {
-	if path == "" {
-		return diag.WriteCanonical(os.Stdout, value)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return diag.Wrap(
-			err,
-			charter.CodeFileIO,
-			"file operation failed.",
-			diag.WithDetail("action", "write output"),
-			diag.WithDetail("path", path),
-			diag.WithDetail("error", err.Error()),
-		)
-	}
-	defer file.Close()
-	return diag.WriteCanonical(file, value)
-}
-
-// writeJSONOutput renders ledger-show documents as standard
-// JSON with integer-valued counts intact. These are consumer-facing reports, not
-// digest inputs, so they must NOT go through canonical JSON: canonjson canonicalizes
-// integers >= 10 into exponent form (e.g. 11 -> "1.1e1"), which cannot be decoded
-// back into integer fields. Digest-bound documents keep using writeCanonical.
-func writeJSONOutput(path string, value any) error {
-	if path == "" {
-		return writeJSON(os.Stdout, value)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return diag.Wrap(
-			err,
-			charter.CodeFileIO,
-			"file operation failed.",
-			diag.WithDetail("action", "write output"),
-			diag.WithDetail("path", path),
-			diag.WithDetail("error", err.Error()),
-		)
-	}
-	defer file.Close()
-	return writeJSON(file, value)
-}
-
-func writeJSON(writer io.Writer, value any) error {
-	encoder := json.NewEncoder(writer)
-	encoder.SetEscapeHTML(false)
-	return encoder.Encode(value)
 }
 
 type protectedInput struct {
