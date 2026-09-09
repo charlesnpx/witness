@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -320,6 +321,101 @@ func TestPrepareResolvesSymlinkedSourceAndDetectsDrift(t *testing.T) {
 	diagnostics := strings.Join(result.Diagnostics, "\n")
 	if !strings.Contains(diagnostics, before) || !strings.Contains(diagnostics, after) {
 		t.Fatalf("source-change diagnostics = %q, want digests %q and %q", diagnostics, before, after)
+	}
+}
+
+func TestPreparePinsReviewerPacketIdentities(t *testing.T) {
+	subject := contractreview.RequestSubject{Head: "git-head", Tree: "git-tree"}
+	consumer := contractreview.Identity{Kind: "consumer-kind", ID: "consumer-id"}
+	prepared, err := Prepare(PrepareOptions{
+		Config:           DefaultConfig(),
+		FrozenCharter:    testFrozenCharter(t),
+		SourceDir:        t.TempDir(),
+		PacketDirectory:  filepath.Join(t.TempDir(), "packets"),
+		Subject:          subject,
+		ConsumerIdentity: consumer,
+	})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	wantSourceIdentity := sourceIdentityForRequest(prepared.Request)
+	for _, packet := range prepared.Packets {
+		schemaData, err := os.ReadFile(packet.SchemaPath)
+		if err != nil {
+			t.Fatalf("read %s schema: %v", packet.Reviewer, err)
+		}
+		var schemaObject map[string]any
+		if err := json.Unmarshal(schemaData, &schemaObject); err != nil {
+			t.Fatalf("decode %s schema: %v", packet.Reviewer, err)
+		}
+		properties, ok := schemaObject["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s schema properties = %#v", packet.Reviewer, schemaObject["properties"])
+		}
+		for name, want := range map[string]contractreview.Identity{
+			"source_identity":   wantSourceIdentity,
+			"consumer_identity": prepared.Request.ConsumerIdentity,
+		} {
+			property, ok := properties[name].(map[string]any)
+			if !ok {
+				t.Fatalf("%s schema property %q = %#v", packet.Reviewer, name, properties[name])
+			}
+			if !reflect.DeepEqual(property["const"], map[string]any{"kind": want.Kind, "id": want.ID}) {
+				t.Fatalf("%s schema property %q const = %#v, want %#v", packet.Reviewer, name, property["const"], want)
+			}
+		}
+
+		promptData, err := os.ReadFile(packet.PromptPath)
+		if err != nil {
+			t.Fatalf("read %s prompt: %v", packet.Reviewer, err)
+		}
+		wantSourceJSON, err := json.Marshal(wantSourceIdentity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantConsumerJSON, err := json.Marshal(prepared.Request.ConsumerIdentity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantSentence := fmt.Sprintf("The reviewer field must be %q, source_identity must be %s, and consumer_identity must be %s.", packet.Reviewer, wantSourceJSON, wantConsumerJSON)
+		if !strings.Contains(string(promptData), wantSentence) {
+			t.Fatalf("%s prompt does not state pinned identities: %q", packet.Reviewer, wantSentence)
+		}
+
+		report := contractreview.ReviewReportV2Document{
+			SchemaVersion:     contractreview.ReviewReportV2,
+			RequestDigest:     mustRequestDigest(prepared.Request),
+			RecipeDigest:      prepared.Request.RecipeDigest,
+			Reviewer:          packet.Reviewer,
+			CharterHash:       prepared.FrozenCharter.CharterHash,
+			ReviewInputDigest: prepared.Request.ReviewInputDigest,
+			SourceIdentity:    wantSourceIdentity,
+			ConsumerIdentity:  prepared.Request.ConsumerIdentity,
+			Findings:          []contractreview.ReviewReportV2Finding{},
+			Evaluation:        &contractreview.ReportEvaluation{EvaluatedPaths: []string{"."}, EvaluatedGoalIDs: []string{}},
+		}
+		reportData, err := json.Marshal(report)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reportObject map[string]any
+		if err := json.Unmarshal(reportData, &reportObject); err != nil {
+			t.Fatal(err)
+		}
+		reportObject["source_identity"] = map[string]any{"head": subject.Head, "tree": subject.Tree}
+		invalidReportData, err := json.Marshal(reportObject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var invalidReport map[string]any
+		if err := json.Unmarshal(invalidReportData, &invalidReport); err != nil {
+			t.Fatal(err)
+		}
+		// A Draft 2020-12 const matches only an exactly equal JSON value.
+		if reflect.DeepEqual(invalidReport["source_identity"], properties["source_identity"].(map[string]any)["const"]) {
+			t.Fatalf("%s schema accepted subject-shaped source_identity", packet.Reviewer)
+		}
 	}
 }
 
