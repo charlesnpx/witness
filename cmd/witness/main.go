@@ -629,7 +629,7 @@ func runVerificationAssemble(args []string) error {
 		}
 		return err
 	}
-	return writeCanonical(*out, verificationAssembleOutput(result))
+	return writeCanonical(*out, result.Manifest)
 }
 
 func applyVerificationAssembleStateDirDefaults(
@@ -757,13 +757,6 @@ func addStateDirDefaultPathDetails(err error, missing map[string]string) {
 			diagnostic.Details["state_dir_default_path"] = candidate
 		}
 	}
-}
-
-func verificationAssembleOutput(result *planning.AssembleResult) any {
-	if len(result.UnverifiedRelationships) > 0 {
-		return result
-	}
-	return result.Manifest
 }
 
 func runAdjudicate(args []string) error {
@@ -1330,7 +1323,7 @@ func relayEvidenceFromRunResult(result *relayrun.Result) ([]planning.RelayEviden
 		}
 		if run.PortableExportDigest != "" {
 			record.PortableExportRef = &contracts.ArtifactRef{
-				Kind:          "relay-root-portable-export",
+				Kind:          "relay-bundle",
 				ID:            run.BatchID,
 				Digest:        run.PortableExportDigest,
 				DigestProfile: digest.Profile,
@@ -1456,7 +1449,7 @@ func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
 			}
 			if run.PortableExportDigest != "" {
 				record.PortableExportRef = &contracts.ArtifactRef{
-					Kind:          "relay-root-portable-export",
+					Kind:          "relay-bundle",
 					ID:            run.BatchID,
 					Digest:        run.PortableExportDigest,
 					DigestProfile: digest.Profile,

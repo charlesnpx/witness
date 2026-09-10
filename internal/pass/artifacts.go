@@ -40,22 +40,12 @@ func applyOutputDefaults(config *Config) {
 	if strings.TrimSpace(config.Outputs.ManifestPath) == "" {
 		config.Outputs.ManifestPath = filepath.Join(config.StateDir, "verification", "index.json")
 	}
-	if strings.TrimSpace(config.Outputs.AssembleResultPath) == "" {
-		config.Outputs.AssembleResultPath = assembleResultPath(*config)
-	}
 	if strings.TrimSpace(config.Outputs.RoleOutputChangeSurfacePath) == "" {
 		config.Outputs.RoleOutputChangeSurfacePath = roleOutputChangeSurfacePath(*config)
 	}
 	if strings.TrimSpace(config.Outputs.RunResultPath) == "" {
 		config.Outputs.RunResultPath = filepath.Join(config.StateDir, "verdict.json")
 	}
-}
-
-func assembleResultPath(config Config) string {
-	if strings.TrimSpace(config.Outputs.AssembleResultPath) != "" {
-		return config.Outputs.AssembleResultPath
-	}
-	return filepath.Join(config.StateDir, "verification", "assemble-result.json")
 }
 
 func retainedIntegrationBundlePath(config Config) (string, error) {
@@ -239,21 +229,11 @@ func writeAssembleArtifacts(config Config, result *planning.AssembleResult) erro
 	if result == nil {
 		return nil
 	}
-	if err := writeCanonicalFile(config.Outputs.ManifestPath, result.Manifest); err != nil {
-		return err
-	}
-	if !hasSupplementaryAssembleContent(result) {
-		return nil
-	}
-	return writeCanonicalFile(assembleResultPath(config), result)
+	return writeCanonicalFile(config.Outputs.ManifestPath, result.Manifest)
 }
 
-func assembleOutputSpecs(config Config, result *planning.AssembleResult) []artifactInput {
-	specs := []artifactInput{{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digest.ClassRawBytes}}
-	if hasSupplementaryAssembleContent(result) {
-		specs = append(specs, artifactInput{role: "assemble-result", path: assembleResultPath(config), digestClass: digest.ClassRawBytes})
-	}
-	return specs
+func assembleOutputSpecs(config Config) []artifactInput {
+	return []artifactInput{{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digest.ClassRawBytes}}
 }
 
 func preflightInputSpecs(config Config) []artifactInput {
@@ -316,10 +296,6 @@ func sortedStringMapKeys(values map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func hasSupplementaryAssembleContent(result *planning.AssembleResult) bool {
-	return result != nil && len(result.UnverifiedRelationships) > 0
 }
 
 func receiptArtifactInputs(config Config, receipts []contracts.ExecutionReceipt) ([]artifactInput, error) {

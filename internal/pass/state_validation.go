@@ -222,9 +222,6 @@ func mandatoryArtifactsForStage(state *State, stage StageRecord) ([]artifactInpu
 			}
 		}
 		outputs := []artifactInput{{role: "verification-manifest", path: config.Outputs.ManifestPath, digestClass: digestClassRaw()}}
-		if expected, err := expectedAssembleResult(state); err == nil && hasSupplementaryAssembleContent(expected) {
-			outputs = append(outputs, artifactInput{role: "assemble-result", path: assembleResultPath(config), digestClass: digestClassRaw()})
-		}
 		return inputs, outputs, nil
 	case stageAdjudicate:
 		inputs := []artifactInput{
@@ -361,9 +358,7 @@ func validateStageOutput(state *State, stage StageRecord, artifact ArtifactRecor
 	case strings.HasPrefix(artifact.Role, "verification-batch:"):
 		err = validatePlanVerificationBatchOutput(state, artifact, data)
 	case artifact.Role == "verification-manifest":
-		err = validateAssembleStageOutputs(state, artifact.Role)
-	case artifact.Role == "assemble-result":
-		err = validateAssembleStageOutputs(state, artifact.Role)
+		err = validateAssembleStageOutputs(state)
 	case artifact.Role == "run-result":
 		err = validateAdjudicateOutput(state)
 	default:
@@ -1079,42 +1074,19 @@ func expectedPlanningResult(state *State) (*planning.Result, error) {
 	})
 }
 
-func validateAssembleStageOutputs(state *State, role string) error {
+func validateAssembleStageOutputs(state *State) error {
 	expected, err := expectedAssembleResult(state)
 	if err != nil {
 		return err
 	}
-	if hasSupplementaryAssembleContent(expected) {
-		if _, err := os.Stat(assembleResultPath(state.Config)); err != nil {
-			return err
-		}
+	actual, err := readVerificationManifest(state.Config.Outputs.ManifestPath)
+	if err != nil {
+		return err
 	}
-	switch role {
-	case "verification-manifest":
-		actual, err := readVerificationManifest(state.Config.Outputs.ManifestPath)
-		if err != nil {
-			return err
-		}
-		if err := contracts.ErrorFromDiagnostics(contracts.ValidateVerificationManifest(actual)); err != nil {
-			return err
-		}
-		return requireSemanticMatch("verification manifest", actual, expected.Manifest)
-	case "assemble-result":
-		if !hasSupplementaryAssembleContent(expected) {
-			return diag.New(CodeStateInvalid, "assemble-result output is present but not semantically required.")
-		}
-		data, err := os.ReadFile(assembleResultPath(state.Config))
-		if err != nil {
-			return err
-		}
-		actual, err := planning.ReadAssembleResultBytes(data)
-		if err != nil {
-			return err
-		}
-		return requireSemanticMatch("assemble result", actual, *expected)
-	default:
-		return nil
+	if err := contracts.ErrorFromDiagnostics(contracts.ValidateVerificationManifest(actual)); err != nil {
+		return err
 	}
+	return requireSemanticMatch("verification manifest", actual, expected.Manifest)
 }
 
 func expectedAssembleResult(state *State) (*planning.AssembleResult, error) {

@@ -100,7 +100,6 @@ func driverGeneratedOutputs(config Config) []driverGeneratedOutput {
 		{role: "verification-plan", path: config.Outputs.PlanPath},
 		{role: "verification-manifest", path: config.Outputs.ManifestPath},
 		{role: "verification-index-skeleton", path: filepath.Join(config.StateDir, "verification", "index.skeleton.json")},
-		{role: "assemble-result", path: assembleResultPath(config)},
 		{role: roleOutputChangeSurfaceRole, path: roleOutputChangeSurfacePath(config)},
 		{role: "run-result", path: config.Outputs.RunResultPath},
 		{role: "contract-digests", path: filepath.Join(config.StateDir, "contract-digests.json")},

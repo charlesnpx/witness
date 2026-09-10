@@ -75,20 +75,11 @@ type ManifestEvidenceRefs struct {
 }
 
 type AssembleResult struct {
-	SchemaVersion           string                           `json:"schema_version"`
-	Manifest                contracts.VerificationManifest   `json:"manifest"`
-	PendingVerification     []string                         `json:"pending_verification,omitempty"`
-	ReceiptContradictions   []string                         `json:"receipt_contradictions,omitempty"`
-	UnverifiedRelationships []ManifestUnverifiedRelationship `json:"unverified_relationships,omitempty"`
-	Diagnostics             []diag.Diagnostic                `json:"diagnostics,omitempty"`
-}
-
-type ManifestUnverifiedRelationship struct {
-	BatchID        string `json:"batch_id"`
-	Classification string `json:"classification"`
-	Code           string `json:"code"`
-	Relationship   string `json:"relationship"`
-	Reason         string `json:"reason"`
+	SchemaVersion         string                         `json:"schema_version"`
+	Manifest              contracts.VerificationManifest `json:"manifest"`
+	PendingVerification   []string                       `json:"pending_verification,omitempty"`
+	ReceiptContradictions []string                       `json:"receipt_contradictions,omitempty"`
+	Diagnostics           []diag.Diagnostic              `json:"diagnostics,omitempty"`
 }
 
 func ReadAssembleResultBytes(data []byte) (AssembleResult, error) {
@@ -244,7 +235,7 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			record.PortableExportRef = relay.PortableExportRef
 		} else {
 			record.PortableExportRef = &contracts.ArtifactRef{
-				Kind:          "relay-root-portable-export",
+				Kind:          "relay-bundle",
 				ID:            planned.BatchID,
 				Digest:        assembled.verified.Manifest.ManifestDigest,
 				DigestProfile: digest.Profile,

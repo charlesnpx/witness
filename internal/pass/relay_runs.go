@@ -89,11 +89,12 @@ func readRecordedRelayRuns(state *State, batches []RelayBatchRecord) (map[string
 			Backend:           relayBackend(record.RecipeID),
 			PortableExportDir: record.PortableExportDir,
 			Verdicts:          record.RelayVerdicts,
+			VerifiedBundle:    record.VerifiedBundle,
 			RunRecords:        []map[string]any{metadata},
 		}
 		if record.PortableExportDigest != "" {
 			evidence.PortableExportRef = &contracts.ArtifactRef{
-				Kind:          "relay-root-portable-export",
+				Kind:          "relay-bundle",
 				ID:            record.BatchID,
 				Digest:        record.PortableExportDigest,
 				DigestProfile: digest.Profile,

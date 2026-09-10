@@ -2348,7 +2348,7 @@ func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, ro
 		t.Fatal(err)
 	}
 	batchRef := artifactRef("verification-batch", "batch-1", digest.RawBytes([]byte("batch")))
-	exportRef := artifactRef("relay-root-portable-export", "batch-1", digest.RawBytes([]byte("export")))
+	exportRef := artifactRef("relay-bundle", "batch-1", digest.RawBytes([]byte("export")))
 	return contracts.VerificationManifest{
 		SchemaVersion:     contracts.VerificationManifestV6,
 		PlanDigest:        digest.RawBytes([]byte("plan")),

@@ -517,8 +517,7 @@ witness pass resume -state-dir "$STATE"
 ```
 
 This runs the `assemble` stage and writes `verification/index.skeleton.json`
-and `verification/index.json`. If assembly has supplementary unverified
-relationships, it also writes `verification/assemble-result.json`.
+and `verification/index.json`.
 
 ```sh
 witness pass resume -state-dir "$STATE"
@@ -675,7 +674,7 @@ The complete run layout is:
 | Preflight | `preflight.json`, `integration-bundle.json` (authenticated envelope), `integration-bundle.body.json` (directly bindable authored bundle), `contract-digests.json` |
 | Preflight recipe validation | Known Witness v2 recipes are compiled and validated locally; no Relay capability, catalog, backend, or recipe projection is retained |
 | Finders | `role-outputs/defect-output.json`, `role-outputs/economy-output.json` |
-| Plan and assembly | `verification-plan.json`, `verification/index.skeleton.json`, `verification/index.json`, and, when applicable, `verification/assemble-result.json` |
+| Plan and assembly | `verification-plan.json`, `verification/index.skeleton.json`, `verification/index.json` |
 | Adjudication | `verdict.json` (the ledger is `$RUN/ledger.jsonl`) |
 
 ## Intentional boundaries

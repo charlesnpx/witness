@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/contract/digest"
-	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/adjudicate"
 	"github.com/charlesnpx/witness/internal/changesurface"
 	"github.com/charlesnpx/witness/internal/contracts"
@@ -584,20 +582,23 @@ func TestAssembleBindsVerdictsToPortableCanonicalResult(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	batch := planResult.Batches[0]
-	exportVerdicts := contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.Document.BatchID,
-		Verdicts: []contracts.WitnessVerdict{{
-			FindingID:      "finding-1",
-			WitnessDigest:  batch.Document.Findings[0].WitnessDigest,
-			Verdict:        contracts.VerdictSurvived,
-			VerdictClass:   nil,
-			CounterWitness: nil,
-		}},
+	frozenBytes := canonjson.MustMarshal(frozen)
+	verified, portableDir := writePlanningRelayV2Bundle(t, batch, frozenBytes)
+	exportedVerdicts, err := contracts.ReadRelayWitnessVerdictsBytes([]byte(verified.Session.Root.Result.Value))
+	if err != nil {
+		t.Fatalf("decode fake Relay result: %v", err)
 	}
-	portableDir := writePlanningPortableExport(t, exportVerdicts, batch.Document)
-	suppliedVerdicts := exportVerdicts
+	suppliedVerdicts := exportedVerdicts
 	suppliedVerdicts.Verdicts[0].Rationale = "not the exported canonical result"
+	relayEvidence := RelayEvidence{
+		BatchID:           batch.Plan.BatchID,
+		PortableExportDir: portableDir,
+		VerifiedBundle:    verified,
+		Verdicts:          &suppliedVerdicts,
+	}
+	if _, assemblyErr := assembleRelayV2Evidence(relayEvidence, batch.Plan, planResult.Plan, batch.Document); assemblyErr == nil || !strings.Contains(assemblyErr.Error(), "embedded relay verdicts") {
+		t.Fatalf("assembleRelayV2Evidence error = %v, want embedded-result binding diagnostic", assemblyErr)
+	}
 
 	result, err := Assemble(AssembleOptions{
 		Plan: planResult.Plan,
@@ -605,11 +606,7 @@ func TestAssembleBindsVerdictsToPortableCanonicalResult(t *testing.T) {
 			BatchID:  batch.Plan.BatchID,
 			Document: batch.Document,
 		}},
-		RelayResults: []RelayEvidence{{
-			BatchID:           batch.Plan.BatchID,
-			PortableExportDir: portableDir,
-			Verdicts:          &suppliedVerdicts,
-		}},
+		RelayResults: []RelayEvidence{relayEvidence},
 		EvidenceRefs: validManifestEvidenceRefs(),
 	})
 	if err == nil {
@@ -619,8 +616,8 @@ func TestAssembleBindsVerdictsToPortableCanonicalResult(t *testing.T) {
 		t.Fatalf("result = %#v, want manifest batch record", result)
 	}
 	record := result.Manifest.Batches[0]
-	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "relay_verdicts_export_digest_mismatch" {
-		t.Fatalf("manifest batch record = %#v, want export digest mismatch", record)
+	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "relay_v2_bundle_invalid" {
+		t.Fatalf("manifest batch record = %#v, want invalid v2 bundle evidence", record)
 	}
 	if len(result.PendingVerification) != 1 || result.PendingVerification[0] != "finding-1" {
 		t.Fatalf("pending verification = %#v, want finding-1", result.PendingVerification)
@@ -642,18 +639,15 @@ func TestAssembleRejectsPortableCharterDigestMismatchPending(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	batch := planResult.Batches[0]
-	exportVerdicts := contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.Document.BatchID,
-		Verdicts: []contracts.WitnessVerdict{{
-			FindingID:      "finding-1",
-			WitnessDigest:  batch.Document.Findings[0].WitnessDigest,
-			Verdict:        contracts.VerdictSurvived,
-			VerdictClass:   nil,
-			CounterWitness: nil,
-		}},
+	verified, portableDir := writePlanningRelayV2Bundle(t, batch, []byte(`{"charter":"tampered"}`))
+	relayEvidence := RelayEvidence{
+		BatchID:           batch.Plan.BatchID,
+		PortableExportDir: portableDir,
+		VerifiedBundle:    verified,
 	}
-	portableDir := writePlanningPortableExport(t, exportVerdicts, batch.Document)
+	if _, assemblyErr := assembleRelayV2Evidence(relayEvidence, batch.Plan, planResult.Plan, batch.Document); assemblyErr == nil || !strings.Contains(assemblyErr.Error(), "plan.inputs.charter digest") {
+		t.Fatalf("assembleRelayV2Evidence error = %v, want charter digest binding diagnostic", assemblyErr)
+	}
 
 	result, err := Assemble(AssembleOptions{
 		Plan: planResult.Plan,
@@ -661,125 +655,18 @@ func TestAssembleRejectsPortableCharterDigestMismatchPending(t *testing.T) {
 			BatchID:  batch.Plan.BatchID,
 			Document: batch.Document,
 		}},
-		RelayResults: []RelayEvidence{{
-			BatchID:           batch.Plan.BatchID,
-			PortableExportDir: portableDir,
-		}},
+		RelayResults: []RelayEvidence{relayEvidence},
 		EvidenceRefs: validManifestEvidenceRefs(),
 	})
 	if err == nil {
-		t.Fatal("Assemble accepted a portable export with the wrong charter named input")
+		t.Fatal("Assemble accepted a v2 bundle with the wrong charter input")
 	}
 	if result == nil || len(result.Manifest.Batches) != 1 {
 		t.Fatalf("result = %#v, want manifest batch record", result)
 	}
 	record := result.Manifest.Batches[0]
-	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "portable_export_charter_input_mismatch" {
-		t.Fatalf("manifest batch record = %#v, want charter input mismatch", record)
-	}
-	if len(result.PendingVerification) != 1 || result.PendingVerification[0] != "finding-1" {
-		t.Fatalf("pending verification = %#v, want finding-1", result.PendingVerification)
-	}
-}
-
-func TestAssembleRejectsPortableExportWithoutArtifactNamedInput(t *testing.T) {
-	frozen := planningTestFrozenCharter(t)
-	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
-	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
-	planResult, err := Run(Options{
-		FrozenCharter: frozen,
-		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Preflight:     planningTestPreflightBinding(t),
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	batch := planResult.Batches[0]
-	exportVerdicts := contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.Document.BatchID,
-		Verdicts: []contracts.WitnessVerdict{{
-			FindingID:     "finding-1",
-			WitnessDigest: batch.Document.Findings[0].WitnessDigest,
-			Verdict:       contracts.VerdictSurvived,
-		}},
-	}
-	portableDir := writePlanningPortableExport(t, exportVerdicts, batch.Document)
-	removePlanningNamedInput(t, portableDir, "artifact")
-
-	result, err := Assemble(AssembleOptions{
-		Plan: planResult.Plan,
-		Batches: []BatchEvidence{{
-			BatchID:  batch.Plan.BatchID,
-			Document: batch.Document,
-		}},
-		RelayResults: []RelayEvidence{{
-			BatchID:           batch.Plan.BatchID,
-			PortableExportDir: portableDir,
-		}},
-		EvidenceRefs: validManifestEvidenceRefs(),
-	})
-	if err == nil {
-		t.Fatal("Assemble accepted a portable export without an artifact named input")
-	}
-	if result == nil || len(result.Manifest.Batches) != 1 {
-		t.Fatalf("result = %#v, want manifest batch record", result)
-	}
-	record := result.Manifest.Batches[0]
-	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "portable_export_artifact_input_missing" {
-		t.Fatalf("manifest batch record = %#v, want artifact input missing", record)
-	}
-	if len(result.PendingVerification) != 1 || result.PendingVerification[0] != "finding-1" {
-		t.Fatalf("pending verification = %#v, want finding-1", result.PendingVerification)
-	}
-}
-
-func TestAssembleRejectsPortableExportWithExtraUnplannedArtifactNamedInput(t *testing.T) {
-	frozen := planningTestFrozenCharter(t)
-	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
-	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
-	planResult, err := Run(Options{
-		FrozenCharter: frozen,
-		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
-		Preflight:     planningTestPreflightBinding(t),
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	batch := planResult.Batches[0]
-	exportVerdicts := contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.Document.BatchID,
-		Verdicts: []contracts.WitnessVerdict{{
-			FindingID:     "finding-1",
-			WitnessDigest: batch.Document.Findings[0].WitnessDigest,
-			Verdict:       contracts.VerdictSurvived,
-		}},
-	}
-	portableDir := writePlanningPortableExport(t, exportVerdicts, batch.Document)
-	addPlanningArtifactNamedInput(t, portableDir, []byte("unplanned artifact"))
-
-	result, err := Assemble(AssembleOptions{
-		Plan: planResult.Plan,
-		Batches: []BatchEvidence{{
-			BatchID:  batch.Plan.BatchID,
-			Document: batch.Document,
-		}},
-		RelayResults: []RelayEvidence{{
-			BatchID:           batch.Plan.BatchID,
-			PortableExportDir: portableDir,
-		}},
-		EvidenceRefs: validManifestEvidenceRefs(),
-	})
-	if err == nil {
-		t.Fatal("Assemble accepted a portable export with an extra unplanned artifact named input")
-	}
-	if result == nil || len(result.Manifest.Batches) != 1 {
-		t.Fatalf("result = %#v, want manifest batch record", result)
-	}
-	record := result.Manifest.Batches[0]
-	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "portable_export_artifact_input_mismatch" {
-		t.Fatalf("manifest batch record = %#v, want artifact input mismatch", record)
+	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "relay_v2_bundle_invalid" {
+		t.Fatalf("manifest batch record = %#v, want invalid v2 bundle evidence", record)
 	}
 	if len(result.PendingVerification) != 1 || result.PendingVerification[0] != "finding-1" {
 		t.Fatalf("pending verification = %#v, want finding-1", result.PendingVerification)
@@ -799,18 +686,22 @@ func TestAssembleMissingRequiredPromptEvidenceFailsPendingAndVisible(t *testing.
 		t.Fatalf("Run: %v", err)
 	}
 	batch := planResult.Batches[0]
-	exportVerdicts := contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.Document.BatchID,
-		Verdicts: []contracts.WitnessVerdict{{
-			FindingID:     "finding-1",
-			WitnessDigest: batch.Document.Findings[0].WitnessDigest,
-			Verdict:       contracts.VerdictSurvived,
-		}},
+	frozenBytes := canonjson.MustMarshal(frozen)
+	verified, portableDir := writePlanningRelayV2Bundle(t, batch, frozenBytes)
+	// Relay v2 does not export provider-prompt projections. Its required
+	// participant transcript is the durable public conversation evidence.
+	transcriptPath := filepath.Join(portableDir, "payloads", "participant_transcript", "transcript.json")
+	if err := os.Remove(transcriptPath); err != nil {
+		t.Fatalf("remove required v2 transcript evidence: %v", err)
 	}
-	portableDir := writePlanningPortableExport(t, exportVerdicts, batch.Document)
-	removePlanningRenderedPromptRef(t, portableDir, "provider_invocation", "artifact-000002")
-	removePlanningRenderedPromptRef(t, portableDir, "provider_result", "artifact-000001")
+	relayEvidence := RelayEvidence{
+		BatchID:           batch.Plan.BatchID,
+		PortableExportDir: portableDir,
+		VerifiedBundle:    verified,
+	}
+	if _, assemblyErr := assembleRelayV2Evidence(relayEvidence, batch.Plan, planResult.Plan, batch.Document); assemblyErr == nil || !strings.Contains(assemblyErr.Error(), "participant_transcript") {
+		t.Fatalf("assembleRelayV2Evidence error = %v, want missing transcript diagnostic", assemblyErr)
+	}
 
 	result, err := Assemble(AssembleOptions{
 		Plan: planResult.Plan,
@@ -818,35 +709,21 @@ func TestAssembleMissingRequiredPromptEvidenceFailsPendingAndVisible(t *testing.
 			BatchID:  batch.Plan.BatchID,
 			Document: batch.Document,
 		}},
-		RelayResults: []RelayEvidence{{
-			BatchID:           batch.Plan.BatchID,
-			PortableExportDir: portableDir,
-		}},
+		RelayResults: []RelayEvidence{relayEvidence},
 		EvidenceRefs: validManifestEvidenceRefs(),
 	})
 	if err == nil {
-		t.Fatal("Assemble accepted missing required prompt evidence")
+		t.Fatal("Assemble accepted missing required v2 transcript evidence")
 	}
 	if result == nil || len(result.Manifest.Batches) != 1 {
 		t.Fatalf("result = %#v, want manifest batch record", result)
 	}
 	record := result.Manifest.Batches[0]
-	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "portable_export_required_relationship_unverified" {
-		t.Fatalf("manifest batch record = %#v, want required relationship failure", record)
+	if record.Status != contracts.RecordStatusFailed || record.FailureReason != "relay_v2_bundle_invalid" {
+		t.Fatalf("manifest batch record = %#v, want invalid v2 bundle evidence", record)
 	}
 	if len(result.PendingVerification) != 1 || result.PendingVerification[0] != "finding-1" {
 		t.Fatalf("pending verification = %#v, want finding-1", result.PendingVerification)
-	}
-	found := false
-	for _, relationship := range result.UnverifiedRelationships {
-		if relationship.BatchID == batch.Plan.BatchID &&
-			relationship.Classification == "required" &&
-			relationship.Relationship == "trace_only_facilitator_ledger_prompt_projection" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("unverified relationships = %#v, want required prompt projection relationship", result.UnverifiedRelationships)
 	}
 }
 
@@ -1374,17 +1251,6 @@ func TestAssembleRejectsUnplannedRelayEvidenceAlongsidePlannedEvidence(t *testin
 		t.Fatalf("Run: %v", err)
 	}
 	batch := planResult.Batches[0]
-	exportVerdicts := contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.Document.BatchID,
-		Verdicts: []contracts.WitnessVerdict{{
-			FindingID:     "finding-1",
-			WitnessDigest: batch.Document.Findings[0].WitnessDigest,
-			Verdict:       contracts.VerdictSurvived,
-		}},
-	}
-	portableDir := writePlanningPortableExport(t, exportVerdicts, batch.Document)
-
 	_, err = Assemble(AssembleOptions{
 		Plan: planResult.Plan,
 		Batches: []BatchEvidence{{
@@ -1393,10 +1259,9 @@ func TestAssembleRejectsUnplannedRelayEvidenceAlongsidePlannedEvidence(t *testin
 		}},
 		RelayResults: []RelayEvidence{
 			{
-				BatchID:           batch.Plan.BatchID,
-				RecipeFamily:      batch.Plan.RecipeFamily,
-				Backend:           "codex",
-				PortableExportDir: portableDir,
+				BatchID:      batch.Plan.BatchID,
+				RecipeFamily: batch.Plan.RecipeFamily,
+				Backend:      "codex",
 			},
 			{BatchID: "unplanned-batch"},
 		},
@@ -1502,184 +1367,6 @@ func validManifestEvidenceRefs() ManifestEvidenceRefs {
 		SelectedContracts:        selectedContractRefs,
 		SelectedContractEvidence: selectedContractEvidence,
 		ConsumerIdentity:         map[string]any{"kind": "test", "id": "consumer"},
-	}
-}
-
-func removePlanningRenderedPromptRef(t *testing.T, portableDir string, kind string, id string) {
-	t.Helper()
-	mutatePlanningPortablePayload(t, portableDir, kind, id, func(value any) any {
-		object := value.(map[string]any)
-		invocation := object["invocation"].(map[string]any)
-		delete(invocation, "rendered_prompt_ref")
-		delete(invocation, "rendered_prompt_digest")
-		return object
-	})
-}
-
-func removePlanningNamedInput(t *testing.T, portableDir string, name string) {
-	t.Helper()
-	mutatePlanningPortablePayload(t, portableDir, "named_input_manifest", "named-input-manifest", func(value any) any {
-		object := value.(map[string]any)
-		inputs := object["inputs"].([]any)
-		filtered := make([]any, 0, len(inputs))
-		removed := false
-		for _, raw := range inputs {
-			entry := raw.(map[string]any)
-			if entry["name"] == name {
-				removed = true
-				continue
-			}
-			filtered = append(filtered, raw)
-		}
-		if !removed {
-			t.Fatalf("named input %s not found", name)
-		}
-		object["inputs"] = filtered
-		object["input_count"] = len(filtered)
-		return object
-	})
-}
-
-func addPlanningArtifactNamedInput(t *testing.T, portableDir string, data []byte) {
-	t.Helper()
-	sourceID := "named_input_content:000004"
-	content := planningNamedInputContentPayload("artifact", 4, data)
-	content["name_ordinal"] = 2
-	extraPayload := planningPortablePayloadFor(t, "named_input_content", "named-input-content-4", content, planningSourceRef(sourceID))
-	writePlanningPortableFile(t, portableDir, extraPayload.entry["path"].(string), extraPayload.body)
-
-	manifestPath := filepath.Join(portableDir, "manifest.json")
-	manifestBytes, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifestValue, err := strictjson.DecodeAnyBytes(manifestBytes, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest := manifestValue.(map[string]any)
-	inventory := manifest["payload_inventory"].([]any)
-	var namedInputEntry map[string]any
-	for _, raw := range inventory {
-		entry := raw.(map[string]any)
-		if entry["kind"] == "named_input_manifest" && entry["portable_id"] == "named-input-manifest" {
-			namedInputEntry = entry
-			break
-		}
-	}
-	if namedInputEntry == nil {
-		t.Fatal("named input manifest payload not found")
-	}
-
-	namedInputPath := filepath.Join(portableDir, filepath.FromSlash(namedInputEntry["path"].(string)))
-	namedInputBytes, err := os.ReadFile(namedInputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	namedInputValue, err := strictjson.DecodeAnyBytes(namedInputBytes, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	namedInput := namedInputValue.(map[string]any)
-	inputs := namedInput["inputs"].([]any)
-	extraInput := planningNamedInputEntry("artifact", 4, "named-input-content-4", sourceID, len(data), digest.RawBytes(data))
-	extraInput["name_ordinal"] = 2
-	namedInput["inputs"] = append(inputs, extraInput)
-	namedInput["input_count"] = len(inputs) + 1
-	updatedNamedInputBytes, err := canonjson.Marshal(namedInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(namedInputPath, updatedNamedInputBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	namedInputEntry["size_bytes"] = len(updatedNamedInputBytes)
-	namedInputEntry["digest"] = digest.RawBytes(updatedNamedInputBytes)
-
-	inventory = append(inventory, extraPayload.entry)
-	sort.Slice(inventory, func(i, j int) bool {
-		return inventory[i].(map[string]any)["path"].(string) < inventory[j].(map[string]any)["path"].(string)
-	})
-	manifest["payload_inventory"] = inventory
-	inventoryDigest, err := digest.SemanticJSON(inventory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest["inventory_digest"] = inventoryDigest
-	delete(manifest, "manifest_digest")
-	manifestDigest, err := digest.SemanticJSON(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest["manifest_digest"] = manifestDigest
-	updatedManifestBytes, err := canonjson.Marshal(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manifestPath, updatedManifestBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func mutatePlanningPortablePayload(t *testing.T, portableDir string, kind string, id string, mutate func(any) any) {
-	t.Helper()
-	manifestPath := filepath.Join(portableDir, "manifest.json")
-	manifestBytes, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifestValue, err := strictjson.DecodeAnyBytes(manifestBytes, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest := manifestValue.(map[string]any)
-	inventory := manifest["payload_inventory"].([]any)
-	var entry map[string]any
-	for _, raw := range inventory {
-		candidate := raw.(map[string]any)
-		if candidate["kind"] == kind && candidate["portable_id"] == id {
-			entry = candidate
-			break
-		}
-	}
-	if entry == nil {
-		t.Fatalf("payload %s/%s not found", kind, id)
-	}
-	payloadPath := filepath.Join(portableDir, filepath.FromSlash(entry["path"].(string)))
-	payloadBytes, err := os.ReadFile(payloadPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payloadValue, err := strictjson.DecodeAnyBytes(payloadBytes, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	updatedBytes, err := canonjson.Marshal(mutate(payloadValue))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(payloadPath, updatedBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	entry["size_bytes"] = len(updatedBytes)
-	entry["digest"] = digest.RawBytes(updatedBytes)
-	inventoryDigest, err := digest.SemanticJSON(inventory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest["inventory_digest"] = inventoryDigest
-	delete(manifest, "manifest_digest")
-	manifestDigest, err := digest.SemanticJSON(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest["manifest_digest"] = manifestDigest
-	encodedManifest, err := canonjson.Marshal(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manifestPath, encodedManifest, 0o644); err != nil {
-		t.Fatal(err)
 	}
 }
 

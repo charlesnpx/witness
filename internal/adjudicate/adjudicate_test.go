@@ -1230,7 +1230,7 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 		t.Fatal(err)
 	}
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
-	exportRef := testArtifactRef("relay-root-portable-export", "batch-1", "export")
+	exportRef := testArtifactRef("relay-bundle", "batch-1", "export")
 	return contracts.VerificationManifest{
 		SchemaVersion:     contracts.VerificationManifestV6,
 		PlanDigest:        testDigest("plan"),
@@ -1300,7 +1300,7 @@ func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contract
 		t.Fatal(err)
 	}
 	batchRef := testArtifactRef("verification-batch", batchID, "batch-"+batchID)
-	exportRef := testArtifactRef("relay-root-portable-export", batchID, "export-"+batchID)
+	exportRef := testArtifactRef("relay-bundle", batchID, "export-"+batchID)
 	return contracts.VerificationManifestBatch{
 		BatchID:               batchID,
 		Status:                contracts.RecordStatusValid,

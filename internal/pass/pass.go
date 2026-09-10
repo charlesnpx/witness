@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
 	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/diag"
@@ -143,7 +144,6 @@ type Outputs struct {
 	PreflightPath               string `json:"preflight_path"`
 	PlanPath                    string `json:"plan_path"`
 	ManifestPath                string `json:"manifest_path"`
-	AssembleResultPath          string `json:"assemble_result_path,omitempty"`
 	RoleOutputChangeSurfacePath string `json:"role_output_change_surface_path,omitempty"`
 	RunResultPath               string `json:"run_result_path"`
 }
@@ -739,7 +739,7 @@ func runAssemble(state *State) error {
 	if err != nil {
 		return err
 	}
-	outputs, err := artifactRecordsForExistingFiles(assembleOutputSpecs(config, result))
+	outputs, err := artifactRecordsForExistingFiles(assembleOutputSpecs(config))
 	if err != nil {
 		return err
 	}
@@ -753,9 +753,8 @@ func runAssemble(state *State) error {
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"manifest_digest":               manifestDigest,
-			"pending_count":                 len(result.PendingVerification),
-			"unverified_relationship_count": len(result.UnverifiedRelationships),
+			"manifest_digest": manifestDigest,
+			"pending_count":   len(result.PendingVerification),
 		},
 	})
 	return nil
@@ -903,13 +902,12 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		Backend:              strings.TrimSpace(options.Backend),
 		BaselinePass:         options.BaselinePass,
 		Outputs: Outputs{
-			StatePath:          filepath.Join(stateDir, StateFileName),
-			CharterFreezePath:  filepath.Join(stateDir, "charter.freeze.json"),
-			PreflightPath:      filepath.Join(stateDir, "preflight.json"),
-			PlanPath:           filepath.Join(stateDir, "verification-plan.json"),
-			ManifestPath:       filepath.Join(stateDir, "verification", "index.json"),
-			AssembleResultPath: filepath.Join(stateDir, "verification", "assemble-result.json"),
-			RunResultPath:      filepath.Join(stateDir, "verdict.json"),
+			StatePath:         filepath.Join(stateDir, StateFileName),
+			CharterFreezePath: filepath.Join(stateDir, "charter.freeze.json"),
+			PreflightPath:     filepath.Join(stateDir, "preflight.json"),
+			PlanPath:          filepath.Join(stateDir, "verification-plan.json"),
+			ManifestPath:      filepath.Join(stateDir, "verification", "index.json"),
+			RunResultPath:     filepath.Join(stateDir, "verdict.json"),
 		},
 	}
 	for _, assign := range []struct {
@@ -1317,11 +1315,19 @@ func recipeID(taskShape string, backend string) string {
 }
 
 func portableExportReady(path string) bool {
+	_, ok := verifiedPortableExport(path)
+	return ok
+}
+
+func verifiedPortableExport(path string) (*bundle.Verification, bool) {
 	if strings.TrimSpace(path) == "" {
-		return false
+		return nil, false
 	}
-	info, err := os.Stat(filepath.Join(path, "manifest.json"))
-	return err == nil && !info.IsDir()
+	verified, err := bundle.VerifyPortableDirectory(path)
+	if err != nil {
+		return nil, false
+	}
+	return &verified, true
 }
 
 func relayEvidenceFromReadyBatches(state *State, records []RelayBatchRecord) []planning.RelayEvidence {
@@ -1331,7 +1337,8 @@ func relayEvidenceFromReadyBatches(state *State, records []RelayBatchRecord) []p
 	}
 	var evidence []planning.RelayEvidence
 	for _, batch := range records {
-		if !portableExportReady(batch.PortableExportDir) {
+		verified, ok := verifiedPortableExport(batch.PortableExportDir)
+		if !ok {
 			continue
 		}
 		evidence = append(evidence, planning.RelayEvidence{
@@ -1339,6 +1346,7 @@ func relayEvidenceFromReadyBatches(state *State, records []RelayBatchRecord) []p
 			RecipeFamily:      batch.RecipeFamily,
 			Backend:           state.Config.Backend,
 			PortableExportDir: batch.PortableExportDir,
+			VerifiedBundle:    verified,
 		})
 	}
 	return evidence
