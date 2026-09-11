@@ -1638,6 +1638,21 @@ func jsonNumberMatches(value any, want int) bool {
 	return err == nil && actual == float64(want)
 }
 
+func TestReadV2RelayBundleRejectsUnsupportedManifestKind(t *testing.T) {
+	directory := t.TempDir()
+	manifestPath := filepath.Join(directory, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"kind":"unsupported"}`), 0o600); err != nil {
+		t.Fatalf("write unsupported Relay manifest: %v", err)
+	}
+	verified, err := readV2RelayBundle(directory)
+	if err == nil {
+		t.Fatal("readV2RelayBundle accepted an unsupported manifest kind")
+	}
+	if verified != nil {
+		t.Fatalf("readV2RelayBundle returned verification %#v with an unsupported manifest kind", verified)
+	}
+}
+
 func TestMergeRelayEvidenceAllowsStartFailureThenConsumingRetry(t *testing.T) {
 	merged, err := mergeRelayEvidence(
 		[]planning.RelayEvidence{{

@@ -356,32 +356,26 @@ func validateRelayV2PlanInputs(verified bundle.Verification, directory string, v
 }
 
 func relayV2Verdicts(embedded *contracts.RelayWitnessVerdictsDocument, value string) (contracts.RelayWitnessVerdictsDocument, error) {
-	var decoded contracts.RelayWitnessVerdictsDocument
-	if strings.TrimSpace(value) != "" {
-		candidate, err := contracts.ReadRelayWitnessVerdictsBytes([]byte(value))
-		if err != nil {
-			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("decode embedded relay result: %w", err)
-		}
-		decoded = candidate
+	if strings.TrimSpace(value) == "" {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("relay bundle contains no embedded Witness verdicts")
+	}
+	decoded, err := contracts.ReadRelayWitnessVerdictsBytes([]byte(value))
+	if err != nil {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("decode embedded relay result: %w", err)
 	}
 	if embedded == nil {
-		if strings.TrimSpace(value) == "" {
-			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("relay bundle contains no embedded Witness verdicts")
-		}
 		return decoded, nil
 	}
-	if strings.TrimSpace(value) != "" {
-		embeddedDigest, err := contracts.RelayWitnessVerdictsDigest(*embedded)
-		if err != nil {
-			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest embedded relay verdicts: %w", err)
-		}
-		decodedDigest, err := contracts.RelayWitnessVerdictsDigest(decoded)
-		if err != nil {
-			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest bundle relay verdicts: %w", err)
-		}
-		if embeddedDigest != decodedDigest {
-			return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("embedded relay verdicts do not match the bundle result")
-		}
+	embeddedDigest, err := contracts.RelayWitnessVerdictsDigest(*embedded)
+	if err != nil {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest embedded relay verdicts: %w", err)
+	}
+	decodedDigest, err := contracts.RelayWitnessVerdictsDigest(decoded)
+	if err != nil {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest bundle relay verdicts: %w", err)
+	}
+	if embeddedDigest != decodedDigest {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("embedded relay verdicts do not match the bundle result")
 	}
 	return *embedded, nil
 }

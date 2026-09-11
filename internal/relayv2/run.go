@@ -49,6 +49,30 @@ type CommandError struct {
 	Cause       error
 }
 
+// RunOptions supplies the launch-only settings for a supplied Relay plan.
+// The home and settings paths are passed to Relay unchanged when non-empty.
+type RunOptions struct {
+	WorkingDirectory string
+	Home             string
+	SettingsPath     string
+}
+
+// Invocation is the command identity retained by callers that record the
+// exact Relay process launch.
+type Invocation struct {
+	Executable       string
+	Args             []string
+	WorkingDirectory string
+}
+
+// Argv returns the command's argv, including argv[0].
+func (invocation Invocation) Argv() []string {
+	argv := make([]string, 0, len(invocation.Args)+1)
+	argv = append(argv, invocation.Executable)
+	argv = append(argv, invocation.Args...)
+	return argv
+}
+
 func (err *CommandError) Error() string {
 	if err == nil {
 		return ""
@@ -90,30 +114,38 @@ func IsRelayNotInstalled(err error) bool {
 // --blobs, respectively. workingDirectory is the directory in which Relay is
 // actually launched.
 func Run(ctx context.Context, executable string, planPath string, blobsDirectory string, workingDirectory string) (result.Result, error) {
+	value, _, err := RunWithOptions(ctx, executable, planPath, blobsDirectory, RunOptions{WorkingDirectory: workingDirectory})
+	return value, err
+}
+
+// RunWithOptions invokes the supplied-plan command and returns the exact
+// invocation used alongside Relay's decoded result.
+func RunWithOptions(ctx context.Context, executable string, planPath string, blobsDirectory string, options RunOptions) (result.Result, Invocation, error) {
 	var zero result.Result
+	invocation := Invocation{Executable: relayExecutable(executable), WorkingDirectory: options.WorkingDirectory}
 	if err := requireContext(ctx, "run"); err != nil {
-		return zero, err
+		return zero, invocation, err
 	}
 	if strings.TrimSpace(planPath) == "" {
-		return zero, errors.New("relay v2 run requires a plan path")
+		return zero, invocation, errors.New("relay v2 run requires a plan path")
 	}
 	if strings.TrimSpace(blobsDirectory) == "" {
-		return zero, errors.New("relay v2 run requires a blob directory")
+		return zero, invocation, errors.New("relay v2 run requires a blob directory")
 	}
 
-	args := []string{"run", "--plan", planPath, "--blobs", blobsDirectory, "--json"}
-	body, err := invoke(ctx, "run", executable, workingDirectory, args...)
+	invocation.Args = suppliedPlanArgs(planPath, blobsDirectory, options.Home, options.SettingsPath)
+	body, err := invoke(ctx, "run", invocation)
 	if err != nil {
-		return zero, err
+		return zero, invocation, err
 	}
 	value, err := decodeJSON[result.Result](body, "run result")
 	if err != nil {
-		return zero, fmt.Errorf("decode relay v2 run result: %w", err)
+		return zero, invocation, fmt.Errorf("decode relay v2 run result: %w", err)
 	}
 	if err := result.Validate(value); err != nil {
-		return zero, fmt.Errorf("validate relay v2 run result: %w", err)
+		return zero, invocation, fmt.Errorf("validate relay v2 run result: %w", err)
 	}
-	return value, nil
+	return value, invocation, nil
 }
 
 type exportResponse struct {
@@ -145,7 +177,7 @@ func Export(ctx context.Context, executable string, sessionDirectory string, out
 		"--output", outputDirectory,
 		"--json",
 	}
-	body, err := invoke(ctx, "export", executable, "", args...)
+	body, err := invoke(ctx, "export", Invocation{Executable: relayExecutable(executable), Args: args})
 	if err != nil {
 		return err
 	}
@@ -215,28 +247,34 @@ func requireContext(ctx context.Context, operation string) error {
 	return nil
 }
 
-func invoke(ctx context.Context, operation string, executable string, workingDirectory string, args ...string) ([]byte, error) {
-	executable = relayExecutable(executable)
-	commandArgs := append([]string(nil), args...)
-	command := exec.CommandContext(ctx, executable, commandArgs...)
-	command.Dir = workingDirectory
+func invoke(ctx context.Context, operation string, invocation Invocation) ([]byte, error) {
+	commandArgs := append([]string(nil), invocation.Args...)
+	if _, err := exec.LookPath(invocation.Executable); err != nil {
+		return nil, &CommandError{
+			Operation:   operation,
+			Executable:  invocation.Executable,
+			Args:        commandArgs,
+			ExitCode:    -1,
+			Kind:        ErrorRelayNotInstalled,
+			StartFailed: true,
+			Cause:       err,
+		}
+	}
+	command := exec.CommandContext(ctx, invocation.Executable, commandArgs...)
+	command.Dir = invocation.WorkingDirectory
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 
 	if err := command.Start(); err != nil {
-		kind := ErrorRelayCommandFailed
-		if executableMissing(err) {
-			kind = ErrorRelayNotInstalled
-		}
 		return nil, &CommandError{
 			Operation:   operation,
-			Executable:  executable,
+			Executable:  invocation.Executable,
 			Args:        commandArgs,
 			ExitCode:    -1,
 			Stdout:      stdout.String(),
 			Stderr:      stderr.String(),
-			Kind:        kind,
+			Kind:        ErrorRelayCommandFailed,
 			StartFailed: true,
 			Cause:       err,
 		}
@@ -253,7 +291,7 @@ func invoke(ctx context.Context, operation string, executable string, workingDir
 	}
 	return nil, &CommandError{
 		Operation:  operation,
-		Executable: executable,
+		Executable: invocation.Executable,
 		Args:       commandArgs,
 		ExitCode:   exitCode,
 		Stdout:     stdout.String(),
@@ -270,12 +308,15 @@ func relayExecutable(value string) string {
 	return value
 }
 
-func executableMissing(err error) bool {
-	if errors.Is(err, exec.ErrNotFound) {
-		return true
+func suppliedPlanArgs(planPath string, blobsDirectory string, home string, settingsPath string) []string {
+	args := []string{"run", "--plan", planPath, "--blobs", blobsDirectory, "--json"}
+	if home = strings.TrimSpace(home); home != "" {
+		args = append(args, "--home", home)
 	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "executable file not found") || strings.Contains(text, "no such file or directory")
+	if settingsPath = strings.TrimSpace(settingsPath); settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
+	return args
 }
 
 func decodeJSON[T any](body []byte, label string) (T, error) {

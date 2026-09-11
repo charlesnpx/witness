@@ -59,10 +59,6 @@ const (
 	launchCaptureLimitBytes = 64 * 1024
 )
 
-// ErrRelayNotInstalled is the stable sentinel for a Relay process that could
-// not be started because the executable was absent.
-var ErrRelayNotInstalled = relayv2.ErrRelayNotInstalled
-
 type Options struct {
 	RelayPath             string
 	IntegrationBundlePath string
@@ -193,8 +189,12 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		runValue, err := relayv2.Run(ctx, options.RelayPath, planPath, blobsPath, launchCWD)
-		record.RelayLaunch = launchRecordForRelayV2(options.RelayPath, planPath, blobsPath, err, launchCWD)
+		runValue, invocation, err := relayv2.RunWithOptions(ctx, options.RelayPath, planPath, blobsPath, relayv2.RunOptions{
+			WorkingDirectory: launchCWD,
+			Home:             options.RelayHome,
+			SettingsPath:     options.SettingsPath,
+		})
+		record.RelayLaunch = launchRecordForRelayV2(invocation, err)
 		if err != nil {
 			cleanup()
 			record.RelayErrorKind = relayErrorKind(err)
@@ -588,9 +588,15 @@ func effectiveLaunchCWD(value string) string {
 	return abs
 }
 
-func launchRecordForRelayV2(executable string, planPath string, blobsPath string, err error, workingDirectory string) *LaunchRecord {
-	command := relayExecutable(executable)
-	args := []string{"run", "--plan", planPath, "--blobs", blobsPath, "--json"}
+func launchRecordForRelayV2(invocation relayv2.Invocation, err error) *LaunchRecord {
+	invocationArgv := invocation.Argv()
+	command := ""
+	args := []string(nil)
+	if len(invocationArgv) > 0 {
+		command = invocationArgv[0]
+		args = append([]string(nil), invocationArgv[1:]...)
+	}
+	workingDirectory := invocation.WorkingDirectory
 	stdout := []byte(nil)
 	stderr := []byte(nil)
 	exitCode := 0
@@ -758,13 +764,6 @@ func materializeRelayPlan(outputDir string, batchID string, compiled relayv2.Com
 	return cleanup, planPath, blobsPath, nil
 }
 
-func relayExecutable(value string) string {
-	if value = strings.TrimSpace(value); value != "" {
-		return value
-	}
-	return relayv2.DefaultExecutable
-}
-
 func relayCommandError(err error) *relayv2.CommandError {
 	var commandError *relayv2.CommandError
 	if errors.As(err, &commandError) {
@@ -781,13 +780,6 @@ func relayErrorKind(err error) string {
 		return relayv2.ErrorRelayNotInstalled
 	}
 	return ""
-}
-
-// IsRelayNotInstalled preserves Relay's distinguishable start condition at the
-// relayrun boundary for callers that receive an error from a lower-level
-// execution helper.
-func IsRelayNotInstalled(err error) bool {
-	return errors.Is(err, ErrRelayNotInstalled)
 }
 
 func relayResultMap(value result.Result) (map[string]any, error) {

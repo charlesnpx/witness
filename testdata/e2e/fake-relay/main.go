@@ -98,6 +98,10 @@ func runPlan(args []string) error {
 		return err
 	}
 	runResult := resultForPlan(planValue, sessionDir, string(verdictBytes), verdictBytes)
+	if os.Getenv("WITNESS_FAKE_RELAY_EMPTY_ROOT_RESULT") == "1" {
+		runResult.Result = ""
+		runResult.Root.Result.Value = ""
+	}
 	if err := writeJSONFile(filepath.Join(sessionDir, "result.json"), runResult); err != nil {
 		return err
 	}

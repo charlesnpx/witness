@@ -1415,22 +1415,6 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 }
 
 func readV2RelayBundle(directory string) (*bundle.Verification, error) {
-	manifestPath := filepath.Join(directory, "manifest.json")
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return nil, fileReadError(err, manifestPath, "open relay portable bundle manifest")
-	}
-	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*4)
-	if err != nil {
-		return nil, fileReadError(err, manifestPath, "decode relay portable bundle manifest")
-	}
-	manifest, ok := value.(map[string]any)
-	if !ok {
-		return nil, diag.New(diag.CodeInvalidCommand, "relay portable bundle manifest must be a JSON object.", diag.WithDetail("path", manifestPath))
-	}
-	if manifest["kind"] != bundle.Kind {
-		return nil, nil
-	}
 	verified, err := bundle.VerifyPortableDirectory(directory)
 	if err != nil {
 		return nil, diag.Wrap(err, planning.CodeInvalidRelay, "relay v2 portable bundle could not be verified.", diag.WithDetail("path", directory))

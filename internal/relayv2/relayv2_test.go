@@ -150,6 +150,28 @@ func TestAbsentRelayBinaryIsDistinguishable(t *testing.T) {
 	}
 }
 
+func TestExistingRelayWithMissingWorkingDirectoryIsCommandFailure(t *testing.T) {
+	missingWorkingDirectory := filepath.Join(t.TempDir(), "missing-working-directory")
+	trueExecutable := "/bin/true"
+	if _, err := os.Stat(trueExecutable); err != nil {
+		trueExecutable, err = exec.LookPath("true")
+		if err != nil {
+			t.Fatalf("locate true executable: %v", err)
+		}
+	}
+	_, err := Run(context.Background(), trueExecutable, "plan.json", "blobs", missingWorkingDirectory)
+	if err == nil {
+		t.Fatal("run with a missing working directory succeeded")
+	}
+	if IsRelayNotInstalled(err) {
+		t.Fatalf("run with an existing executable and missing working directory was classified as Relay absence: %v", err)
+	}
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) || commandErr.Kind != ErrorRelayCommandFailed || !commandErr.StartFailed {
+		t.Fatalf("missing working-directory error = %T/%#v, want start-failed command error", err, commandErr)
+	}
+}
+
 func requireRelayBinary(t *testing.T) string {
 	t.Helper()
 	path, err := exec.LookPath(DefaultExecutable)

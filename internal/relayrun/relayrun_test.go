@@ -35,8 +35,14 @@ func TestRunBatchesExecutesAndVerifiesRelayV2Plan(t *testing.T) {
 		t.Fatalf("symlink launch CWD: %v", err)
 	}
 	launchMarker := filepath.Join(t.TempDir(), "relay-cwd")
+	launchArgsMarker := filepath.Join(t.TempDir(), "relay-args")
+	options.RelayHome = t.TempDir()
+	options.SettingsPath = filepath.Join(t.TempDir(), "settings.toml")
+	if err := os.WriteFile(options.SettingsPath, []byte("# relayrun test settings\n"), 0o600); err != nil {
+		t.Fatalf("write Relay settings: %v", err)
+	}
 	launcher := filepath.Join(t.TempDir(), "relay-wrapper")
-	launcherScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = run ]; then pwd -P > %q; fi\nexec %q \"$@\"\n", launchMarker, relay)
+	launcherScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = run ]; then pwd -P > %q; printf '%%s\\n' \"$@\" > %q; fi\nexec %q \"$@\"\n", launchMarker, launchArgsMarker, relay)
 	if err := os.WriteFile(launcher, []byte(launcherScript), 0o700); err != nil {
 		t.Fatalf("write Relay wrapper: %v", err)
 	}
@@ -59,8 +65,21 @@ func TestRunBatchesExecutesAndVerifiesRelayV2Plan(t *testing.T) {
 	if got := strings.TrimSpace(string(launchedCWD)); got != wantLaunchCWD {
 		t.Fatalf("Relay working directory = %q, want %q", got, wantLaunchCWD)
 	}
+	launchedArgs, err := os.ReadFile(launchArgsMarker)
+	if err != nil {
+		t.Fatalf("read Relay argv marker: %v", err)
+	}
 	if record.RelayLaunch == nil {
 		t.Fatal("run record omitted Relay launch evidence")
+	}
+	wantLaunchedArgs := strings.Join(record.RelayLaunch.Argv[1:], "\n") + "\n"
+	if string(launchedArgs) != wantLaunchedArgs {
+		t.Fatalf("retained Relay argv = %q, actual invocation args = %q", record.RelayLaunch.Argv, string(launchedArgs))
+	}
+	for _, expected := range []string{"--home", options.RelayHome, "--settings", options.SettingsPath} {
+		if !strings.Contains(wantLaunchedArgs, expected+"\n") && !strings.HasSuffix(wantLaunchedArgs, expected) {
+			t.Fatalf("retained Relay argv = %q, missing passed argument %q", record.RelayLaunch.Argv, expected)
+		}
 	}
 	if got := evalRelayPath(t, record.RelayLaunch.WorkingDirectory); got != wantLaunchCWD {
 		t.Fatalf("retained Relay working directory = %q, want %q", got, wantLaunchCWD)
@@ -378,7 +397,11 @@ func TestRunBatchesRejectsInvalidInputsBeforeRelayV2Launch(t *testing.T) {
 }
 
 func testCommandLaunchRecord(stdout, stderr []byte, exitCode int, startFailed bool) *LaunchRecord {
-	return launchRecordForRelayV2("fake-relay", "/tmp/plan.json", "/tmp/blobs", &relayv2.CommandError{
+	return launchRecordForRelayV2(relayv2.Invocation{
+		Executable:       "fake-relay",
+		Args:             []string{"run", "--plan", "/tmp/plan.json", "--blobs", "/tmp/blobs", "--json"},
+		WorkingDirectory: "/tmp/workspace",
+	}, &relayv2.CommandError{
 		Executable:  "fake-relay",
 		Args:        []string{"run", "--plan", "/tmp/plan.json", "--blobs", "/tmp/blobs", "--json"},
 		ExitCode:    exitCode,
@@ -386,7 +409,7 @@ func testCommandLaunchRecord(stdout, stderr []byte, exitCode int, startFailed bo
 		Stderr:      string(stderr),
 		Kind:        relayv2.ErrorRelayCommandFailed,
 		StartFailed: startFailed,
-	}, "/tmp/workspace")
+	})
 }
 
 func invalidInputFixture(t *testing.T, dir string, withArtifact bool) (BatchInput, Options) {

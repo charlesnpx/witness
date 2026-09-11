@@ -623,6 +623,62 @@ func TestAssembleBindsVerdictsToPortableCanonicalResult(t *testing.T) {
 	}
 }
 
+func TestAssembleLeavesEmptyVerifiedResultPendingDespiteSuppliedVerdicts(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	t.Setenv("WITNESS_FAKE_RELAY_EMPTY_ROOT_RESULT", "1")
+	verified, portableDir := writePlanningRelayV2Bundle(t, batch, canonjson.MustMarshal(frozen))
+	suppliedVerdicts := contracts.RelayWitnessVerdictsDocument{
+		SchemaVersion: contracts.RelayWitnessVerdictsV2,
+		BatchID:       batch.Plan.BatchID,
+		Verdicts: []contracts.WitnessVerdict{{
+			FindingID:     finding.ID,
+			WitnessDigest: batch.Document.Findings[0].WitnessDigest,
+			Verdict:       contracts.VerdictSurvived,
+			Rationale:     "stale verdict supplied separately from the empty bundle result",
+		}},
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:           batch.Plan.BatchID,
+			RecipeFamily:      batch.Plan.RecipeFamily,
+			Backend:           "codex",
+			PortableExportDir: portableDir,
+			VerifiedBundle:    verified,
+			Verdicts:          &suppliedVerdicts,
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted supplied verdicts for an empty verified result")
+	}
+	if result == nil || len(result.Manifest.Batches) != 1 {
+		t.Fatalf("result = %#v, want one manifest batch", result)
+	}
+	if record := result.Manifest.Batches[0]; record.Status != contracts.RecordStatusFailed || record.FailureReason != "relay_v2_bundle_invalid" {
+		t.Fatalf("manifest batch = %#v, want failed relay bundle", record)
+	}
+	if len(result.PendingVerification) != 1 || result.PendingVerification[0] != finding.ID {
+		t.Fatalf("pending verification = %#v, want %s", result.PendingVerification, finding.ID)
+	}
+}
+
 func TestAssembleRejectsSerializedVerifiedBundleWithoutPortableDirectory(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
