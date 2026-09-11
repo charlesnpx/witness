@@ -63,8 +63,12 @@ bin_path="$home_root/.local/bin/$NAME"
 harness_bin_path="$home_root/.local/bin/witness-harness"
 codex_skill_path="$home_root/.codex/skills/$NAME/SKILL.md"
 codex_bundle_path="$home_root/.codex/skills/$NAME/bundle/relay-integration-bundle-v2.json"
+codex_review_skill_path="$home_root/.codex/skills/review/SKILL.md"
+codex_review_configure_skill_path="$home_root/.codex/skills/review:configure/SKILL.md"
 claude_skill_path="$home_root/.claude/skills/$NAME/SKILL.md"
 claude_bundle_path="$home_root/.claude/skills/$NAME/bundle/relay-integration-bundle-v2.json"
+claude_review_skill_path="$home_root/.claude/skills/review/SKILL.md"
+claude_review_configure_skill_path="$home_root/.claude/skills/review:configure/SKILL.md"
 
 include_tools="false"
 include_codex="false"
@@ -114,13 +118,19 @@ install_target_files() {
 	fi
 	if [[ "$include_codex" == "true" ]]; then
 		mkdir -p "$(dirname "$codex_bundle_path")"
+		mkdir -p "$(dirname "$codex_review_skill_path")" "$(dirname "$codex_review_configure_skill_path")"
 		install -m 0644 "$repo_root/skill/SKILL.md" "$codex_skill_path"
 		install -m 0644 "$repo_root/skill/bundle/relay-integration-bundle-v2.json" "$codex_bundle_path"
+		install -m 0644 "$repo_root/skill/review/SKILL.md" "$codex_review_skill_path"
+		install -m 0644 "$repo_root/skill/review-configure/SKILL.md" "$codex_review_configure_skill_path"
 	fi
 	if [[ "$include_claude" == "true" ]]; then
 		mkdir -p "$(dirname "$claude_bundle_path")"
+		mkdir -p "$(dirname "$claude_review_skill_path")" "$(dirname "$claude_review_configure_skill_path")"
 		install -m 0644 "$repo_root/skill/SKILL.md" "$claude_skill_path"
 		install -m 0644 "$repo_root/skill/bundle/relay-integration-bundle-v2.json" "$claude_bundle_path"
+		install -m 0644 "$repo_root/skill/review/SKILL.md" "$claude_review_skill_path"
+		install -m 0644 "$repo_root/skill/review-configure/SKILL.md" "$claude_review_configure_skill_path"
 	fi
 }
 
@@ -129,10 +139,10 @@ uninstall_target_files() {
 		rm -f "$bin_path" "$harness_bin_path"
 	fi
 	if [[ "$include_codex" == "true" ]]; then
-		rm -f "$codex_skill_path" "$codex_bundle_path"
+		rm -f "$codex_skill_path" "$codex_bundle_path" "$codex_review_skill_path" "$codex_review_configure_skill_path"
 	fi
 	if [[ "$include_claude" == "true" ]]; then
-		rm -f "$claude_skill_path" "$claude_bundle_path"
+		rm -f "$claude_skill_path" "$claude_bundle_path" "$claude_review_skill_path" "$claude_review_configure_skill_path"
 	fi
 }
 
@@ -178,13 +188,13 @@ emit_report() {
 			printf ','
 		fi
 		first_target="false"
-		emit_target "codex" "$codex_skill_path" "$codex_bundle_path"
+		emit_target "codex" "$codex_skill_path" "$codex_bundle_path" "$codex_review_skill_path" "$codex_review_configure_skill_path"
 	fi
 	if [[ "$include_claude" == "true" ]]; then
 		if [[ "$first_target" != "true" ]]; then
 			printf ','
 		fi
-		emit_target "claude" "$claude_skill_path" "$claude_bundle_path"
+		emit_target "claude" "$claude_skill_path" "$claude_bundle_path" "$claude_review_skill_path" "$claude_review_configure_skill_path"
 	fi
 
 	printf '},"warnings":[]}\n'

@@ -10,6 +10,18 @@ Witness deliberately does not edit reviewed source, apply findings, retry
 models, add review roles, or own an iteration loop. Those decisions remain
 with the caller or repository owner.
 
+## Depends on / Depended on by
+
+Witness depends on nothing in the delegate/convo-relay/witness set as a Go
+module today; it invokes the `convo-relay` CLI. After its in-flight migration
+lands, it will depend on `github.com/charlesnpx/convo-relay/v2` as a Go module.
+
+`delegate` and `feature-implement` both import
+`github.com/charlesnpx/witness/contract/review` and pin a released Witness
+version. `contract/review` is the shared review contract; v1 and v2 documents
+both live there, and a change to either is a breaking change for both
+consumers.
+
 The project is early-stage `v0.x` software. Its JSON contracts are strict and
 versioned; compatibility changes are made explicitly rather than inferred.
 
