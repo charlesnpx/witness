@@ -228,7 +228,6 @@ func selectedContractEvidenceDigestPresent(evidence []SelectedContractEvidence, 
 					diag.WithDetail("actual_digest", contract.ContractDigest),
 					diag.WithDetail("witness_digest", contract.ContractDigest),
 					diag.WithDetail("ref_digest", item.Ref.Digest),
-					diag.WithDetail("relay_reported_digest", item.Ref.Digest),
 				)
 			}
 			if contract.ContractDigest == digestValue {
@@ -318,7 +317,6 @@ func selectedContractEvidenceDiagnostics(evidence []SelectedContractEvidence) []
 					diag.WithDetail("actual_digest", contract.ContractDigest),
 					diag.WithDetail("witness_digest", contract.ContractDigest),
 					diag.WithDetail("ref_digest", item.Ref.Digest),
-					diag.WithDetail("relay_reported_digest", item.Ref.Digest),
 				)))
 			}
 		}

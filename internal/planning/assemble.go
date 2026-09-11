@@ -4,11 +4,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
+	relayplan "github.com/charlesnpx/convo-relay/v2/plan"
 	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/contract/strictjson"
@@ -16,21 +19,18 @@ import (
 	"github.com/charlesnpx/witness/internal/contracts"
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/harness"
-	"github.com/charlesnpx/witness/internal/portable"
 )
 
 const (
-	AssembleResultSchemaVersion         = "witness-verification-assemble-result-v2"
-	CodeMissingEvidenceRef              = "assemble_missing_evidence_ref"
-	CodeMissingBatch                    = "assemble_missing_batch"
-	CodeInvalidAssembleBatch            = "assemble_invalid_batch"
-	CodeInvalidRelay                    = "assemble_invalid_relay_verification"
-	CodeInvalidReceipt                  = "assemble_invalid_execution_receipt"
-	CodeInvalidManifest                 = "assemble_invalid_manifest"
-	CodeInvalidCompatibility            = "assemble_invalid_relay_compatibility"
-	CodeInvalidPlanDigest               = "assemble_invalid_plan_digest"
-	CodeInvalidRelayRunRecord           = "assemble_invalid_relay_run_record"
-	CodeUnsupportedAssembleResultSchema = "assemble_unsupported_result_schema"
+	AssembleResultSchemaVersion = "witness-verification-assemble-result-v2"
+	CodeMissingEvidenceRef      = "assemble_missing_evidence_ref"
+	CodeMissingBatch            = "assemble_missing_batch"
+	CodeInvalidAssembleBatch    = "assemble_invalid_batch"
+	CodeInvalidRelay            = "assemble_invalid_relay_verification"
+	CodeInvalidReceipt          = "assemble_invalid_execution_receipt"
+	CodeInvalidManifest         = "assemble_invalid_manifest"
+	CodeInvalidPlanDigest       = "assemble_invalid_plan_digest"
+	CodeInvalidRelayRunRecord   = "assemble_invalid_relay_run_record"
 )
 
 type AssembleOptions struct {
@@ -61,13 +61,11 @@ type RelayEvidence struct {
 	PortableExportDir string
 	PortableExportRef *contracts.ArtifactRef
 	Verdicts          *contracts.RelayWitnessVerdictsDocument
+	VerifiedBundle    *bundle.Verification
 	RunRecords        []map[string]any
 }
 
 type ManifestEvidenceRefs struct {
-	CompatibilityManifest    contracts.ArtifactRef
-	RelayCompatibility       *contracts.RelayCompatibility
-	RelayCapabilities        contracts.ArtifactRef
 	IntegrationBundle        contracts.ArtifactRef
 	SelectedContracts        []contracts.ArtifactRef
 	SelectedContractEvidence []SelectedContractEvidence
@@ -75,42 +73,11 @@ type ManifestEvidenceRefs struct {
 }
 
 type AssembleResult struct {
-	SchemaVersion           string                           `json:"schema_version"`
-	Manifest                contracts.VerificationManifest   `json:"manifest"`
-	PendingVerification     []string                         `json:"pending_verification,omitempty"`
-	ReceiptContradictions   []string                         `json:"receipt_contradictions,omitempty"`
-	UnverifiedRelationships []ManifestUnverifiedRelationship `json:"unverified_relationships,omitempty"`
-	Diagnostics             []diag.Diagnostic                `json:"diagnostics,omitempty"`
-}
-
-type ManifestUnverifiedRelationship struct {
-	BatchID        string `json:"batch_id"`
-	Classification string `json:"classification"`
-	Code           string `json:"code"`
-	Relationship   string `json:"relationship"`
-	Reason         string `json:"reason"`
-}
-
-func ReadAssembleResultBytes(data []byte) (AssembleResult, error) {
-	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
-	if err != nil {
-		return AssembleResult{}, err
-	}
-	document, ok := value.(map[string]any)
-	if !ok {
-		return AssembleResult{}, diag.New(CodeUnsupportedAssembleResultSchema, "verification assemble result must be a JSON object.", diag.WithPath("/schema_version"))
-	}
-	actual, _ := document["schema_version"].(string)
-	if actual != AssembleResultSchemaVersion {
-		return AssembleResult{}, diag.New(
-			CodeUnsupportedAssembleResultSchema,
-			unsupportedSchemaVersionMessage("verification assemble result", actual, AssembleResultSchemaVersion, "witness-verification-assemble-result-v1", "after the embedded verification manifest expanded its exclusion reasons."),
-			diag.WithPath("/schema_version"),
-			diag.WithDetail("expected", AssembleResultSchemaVersion),
-			diag.WithDetail("actual", actual),
-		)
-	}
-	return strictjson.DecodeBytes[AssembleResult](data, strictjson.DefaultMaxBytes*8)
+	SchemaVersion         string                         `json:"schema_version"`
+	Manifest              contracts.VerificationManifest `json:"manifest"`
+	PendingVerification   []string                       `json:"pending_verification,omitempty"`
+	ReceiptContradictions []string                       `json:"receipt_contradictions,omitempty"`
+	Diagnostics           []diag.Diagnostic              `json:"diagnostics,omitempty"`
 }
 
 func Assemble(options AssembleOptions) (*AssembleResult, error) {
@@ -126,26 +93,24 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 	result := &AssembleResult{SchemaVersion: AssembleResultSchemaVersion}
 	var diagnostics []diag.Diagnostic
 	manifest := contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV6,
-		PlanDigest:            options.Plan.PlanDigest,
-		CharterHash:           options.Plan.CharterHash,
-		ArtifactDigest:        options.Plan.ArtifactDigest,
-		ScopePolicy:           options.Plan.ScopePolicy,
-		ChangeSurface:         options.Plan.ChangeSurface,
-		ChangeSurfaceDigest:   options.Plan.ChangeSurfaceDigest,
-		BaselinePass:          options.Plan.BaselinePass,
-		CompatibilityManifest: options.EvidenceRefs.CompatibilityManifest,
-		RelayCapabilities:     options.EvidenceRefs.RelayCapabilities,
-		IntegrationBundle:     options.EvidenceRefs.IntegrationBundle,
-		SelectedContracts:     append(make([]contracts.ArtifactRef, 0, len(options.EvidenceRefs.SelectedContracts)), options.EvidenceRefs.SelectedContracts...),
-		Batches:               make([]contracts.VerificationManifestBatch, 0, len(options.Plan.Batches)),
-		ExcludedFindings:      manifestExcludedFindings(options.Plan.ExcludedFindings),
-		ConsumerIdentity:      sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
+		SchemaVersion:       contracts.VerificationManifestV6,
+		PlanDigest:          options.Plan.PlanDigest,
+		CharterHash:         options.Plan.CharterHash,
+		ArtifactDigest:      options.Plan.ArtifactDigest,
+		ScopePolicy:         options.Plan.ScopePolicy,
+		ChangeSurface:       options.Plan.ChangeSurface,
+		ChangeSurfaceDigest: options.Plan.ChangeSurfaceDigest,
+		BaselinePass:        options.Plan.BaselinePass,
+		IntegrationBundle:   options.EvidenceRefs.IntegrationBundle,
+		SelectedContracts:   append(make([]contracts.ArtifactRef, 0, len(options.EvidenceRefs.SelectedContracts)), options.EvidenceRefs.SelectedContracts...),
+		Batches:             make([]contracts.VerificationManifestBatch, 0, len(options.Plan.Batches)),
+		ExcludedFindings:    manifestExcludedFindings(options.Plan.ExcludedFindings),
+		ConsumerIdentity:    sanitizedManifestConsumerIdentity(options.EvidenceRefs.ConsumerIdentity),
 	}
 	if len(manifest.ConsumerIdentity) == 0 {
 		manifest.ConsumerIdentity = sanitizedManifestConsumerIdentity(options.Plan.ConsumerIdentity)
 	}
-	relayLaunchStatus := relayLaunchStatusForCompatibility(options.EvidenceRefs.RelayCompatibility)
+	relayLaunchStatus := relayLaunchStatusForPreflight(options.Plan.PreflightRelayPresent)
 	attachRelayLaunchStatus(&manifest, relayLaunchStatus)
 	diagnostics = append(diagnostics, validateRelayEvidencePlanMembership(options.Plan, options.RelayResults)...)
 	if refDiagnostics := validateManifestEvidenceRefs(options.Plan, options.EvidenceRefs); len(refDiagnostics) > 0 {
@@ -223,194 +188,32 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
-		if !hasRelay || relay.PortableExportDir == "" {
+		if !hasRelay || relay.VerifiedBundle == nil {
 			record.FailureReason = relayUnavailableFailureReason(relay)
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
-		portableReport, err := portable.VerifyDirectoryDetailed(relay.PortableExportDir)
+		assembled, err := assembleRelayV2Evidence(relay, planned, options.Plan, batchDoc)
 		if err != nil {
 			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export failed Witness validation.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		exportResult, err := portable.ReducerResultFromReport(portableReport)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_missing_canonical_result"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export canonical reducer result could not be validated.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		findingsDigest, err := portable.NamedInputRawDigest(portableReport, "findings")
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_batch_input_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export contract-designated findings input could not be validated.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if findingsDigest != planned.BatchDigest {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_batch_input_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export contract-designated findings input does not match the planned verification-batch digest.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("actual_batch_digest", findingsDigest),
-				diag.WithDetail("expected_batch_digest", planned.BatchDigest),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if bindingDiagnostics, failureReason := validatePortablePassBindings(portableReport, options.Plan, planned); len(bindingDiagnostics) > 0 {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = failureReason
-			diagnostics = append(diagnostics, prefixAssembleDiagnostics(CodeInvalidRelay, planned.BatchID, bindingDiagnostics)...)
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		contractBinding, err := portable.ContractBindingFromReport(portableReport)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_binding_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export selected contract binding could not be validated.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if !selectedContractDigestClaimed(options.EvidenceRefs.SelectedContracts, contractBinding.ContractDigest) {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_manifest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export selected contract digest is not claimed by verification manifest selected_contracts.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("contract_id", contractBinding.ContractID),
-				diag.WithDetail("contract_digest", contractBinding.ContractDigest),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		contractDigestPresent, err := selectedContractEvidenceDigestPresent(options.EvidenceRefs.SelectedContractEvidence, contractBinding.ContractDigest)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_evidence_invalid"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "selected-contract evidence could not be authenticated.", diag.WithDetail("batch_id", planned.BatchID), diag.WithDetail("contract_id", contractBinding.ContractID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if !contractDigestPresent {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_contract_digest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export selected contract digest does not match authenticated retained selected-contract evidence.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("contract_id", contractBinding.ContractID),
-				diag.WithDetail("contract_digest", contractBinding.ContractDigest),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		unverified, requiredMissing := classifyPortableUnverifiedRelationships(planned.BatchID, portableReport.UnverifiedRelationships)
-		result.UnverifiedRelationships = append(result.UnverifiedRelationships, unverified...)
-		if len(requiredMissing) > 0 {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "portable_export_required_relationship_unverified"
-			for _, item := range requiredMissing {
-				diagnostics = append(diagnostics, diag.FromError(diag.New(
-					CodeInvalidRelay,
-					"portable export is missing required relationship evidence.",
-					diag.WithDetail("batch_id", planned.BatchID),
-					diag.WithDetail("relationship", item.Relationship),
-					diag.WithDetail("unverified_code", item.Code),
-					diag.WithDetail("reason", item.Reason),
-				)))
-			}
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		verdicts := relay.Verdicts
-		if verdicts == nil {
-			decoded, err := decodeExportVerdicts(exportResult.Value)
-			if err != nil {
-				record.Status = contracts.RecordStatusFailed
-				record.FailureReason = "portable_export_canonical_result_invalid"
-				diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "portable export canonical reducer result is not a relay verdict document.", diag.WithDetail("batch_id", planned.BatchID))))
-				result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-				manifest.Batches = append(manifest.Batches, record)
-				continue
-			}
-			verdicts = &decoded
-		}
-		verdictDiagnostics := contracts.ValidateRelayWitnessVerdicts(*verdicts, &batchDoc)
-		if len(verdictDiagnostics) > 0 {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "relay_verdicts_invalid"
-			diagnostics = append(diagnostics, prefixAssembleDiagnostics(CodeInvalidRelay, planned.BatchID, verdictDiagnostics)...)
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		resultDigest, err := contracts.RelayWitnessVerdictsDigest(*verdicts)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "relay_verdicts_digest_failed"
-			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "relay verdict digest could not be recomputed.", diag.WithDetail("batch_id", planned.BatchID))))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		if resultDigest != exportResult.Digest {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "relay_verdicts_export_digest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"relay verdicts are not the portable export canonical reducer result.",
-				diag.WithDetail("batch_id", planned.BatchID),
-				diag.WithDetail("verdict_digest", resultDigest),
-				diag.WithDetail("export_canonical_result_digest", exportResult.Digest),
-			)))
+			record.FailureReason = "relay_v2_bundle_invalid"
+			diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidRelay, "relay v2 bundle evidence could not be bound to the planned verification batch.", diag.WithDetail("batch_id", planned.BatchID))))
 			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
 			manifest.Batches = append(manifest.Batches, record)
 			continue
 		}
 		record.Status = contracts.RecordStatusValid
-		record.PortableExportDigest = portableReport.ManifestDigest
-		record.CanonicalResultDigest = resultDigest
-		if record.CanonicalResultDigest != exportResult.Digest {
-			record.Status = contracts.RecordStatusFailed
-			record.FailureReason = "manifest_canonical_result_digest_mismatch"
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"verification manifest canonical_result_digest does not match the portable export canonical reducer result.",
-				diag.WithDetail("batch_id", planned.BatchID),
-			)))
-			result.PendingVerification = append(result.PendingVerification, planned.FindingIDs...)
-			manifest.Batches = append(manifest.Batches, record)
-			continue
-		}
-		record.RelayVerdicts = verdicts
+		record.PortableExportDigest = assembled.verified.Manifest.ManifestDigest
+		record.CanonicalResultDigest = assembled.resultDigest
+		record.RelayVerdicts = &assembled.verdicts
 		if relay.PortableExportRef != nil {
 			record.PortableExportRef = relay.PortableExportRef
 		} else {
 			record.PortableExportRef = &contracts.ArtifactRef{
-				Kind:          "relay-root-portable-export",
+				Kind:          "relay-bundle",
 				ID:            planned.BatchID,
-				Digest:        portableReport.ManifestDigest,
+				Digest:        assembled.verified.Manifest.ManifestDigest,
 				DigestProfile: digest.Profile,
 				MediaType:     "application/json",
 			}
@@ -440,6 +243,187 @@ func Assemble(options AssembleOptions) (*AssembleResult, error) {
 		return result, &ValidationError{Diagnostics: diagnostics}
 	}
 	return result, nil
+}
+
+type relayV2Assembly struct {
+	verified     bundle.Verification
+	verdicts     contracts.RelayWitnessVerdictsDocument
+	resultDigest string
+}
+
+func assembleRelayV2Evidence(relay RelayEvidence, planned BatchPlan, verificationPlan PlanDocument, batch contracts.VerificationBatchDocument) (relayV2Assembly, error) {
+	if relay.VerifiedBundle == nil {
+		return relayV2Assembly{}, fmt.Errorf("relay v2 verified bundle is required")
+	}
+	if strings.TrimSpace(relay.PortableExportDir) == "" {
+		return relayV2Assembly{}, fmt.Errorf("relay v2 portable bundle directory is required")
+	}
+	verified, err := bundle.VerifyPortableDirectory(relay.PortableExportDir)
+	if err != nil {
+		return relayV2Assembly{}, fmt.Errorf("verify portable bundle: %w", err)
+	}
+
+	value := verified.Session.Plan
+	if value.SessionID != planned.BatchID {
+		return relayV2Assembly{}, fmt.Errorf("plan.session_id %q does not match planned batch_id %q", value.SessionID, planned.BatchID)
+	}
+	if value.RecipeID != planned.RecipeFamily {
+		return relayV2Assembly{}, fmt.Errorf("plan.recipe_id %q does not match planned recipe_family %q", value.RecipeID, planned.RecipeFamily)
+	}
+	actualPlanDigest, err := relayplan.Digest(value)
+	if err != nil {
+		return relayV2Assembly{}, fmt.Errorf("compute verified Relay v2 plan digest: %w", err)
+	}
+	if consuming := consumingRelayRunRecord(relay.RunRecords); consuming != nil {
+		recordedPlanDigest, _ := consuming["plan_digest"].(string)
+		if !digest.WellFormed(strings.TrimSpace(recordedPlanDigest)) {
+			return relayV2Assembly{}, fmt.Errorf("consuming relay run record is missing a well-formed plan_digest")
+		}
+		if strings.TrimSpace(recordedPlanDigest) != actualPlanDigest {
+			return relayV2Assembly{}, fmt.Errorf("relay run record plan_digest %q does not match verified Relay v2 plan digest %q", recordedPlanDigest, actualPlanDigest)
+		}
+	}
+	if err := validateRelayV2PlanInputs(verified, relay.PortableExportDir, value, verificationPlan, planned); err != nil {
+		return relayV2Assembly{}, err
+	}
+
+	verdicts, err := relayV2Verdicts(relay.Verdicts, verified.Session.Root.Result.Value)
+	if err != nil {
+		return relayV2Assembly{}, err
+	}
+	if diagnostics := contracts.ValidateRelayWitnessVerdicts(verdicts, &batch); len(diagnostics) > 0 {
+		return relayV2Assembly{}, fmt.Errorf("validate relay witness verdicts: %s", diagnostics[0].Message)
+	}
+	resultDigest, err := contracts.RelayWitnessVerdictsDigest(verdicts)
+	if err != nil {
+		return relayV2Assembly{}, fmt.Errorf("compute relay witness verdict digest: %w", err)
+	}
+	return relayV2Assembly{verified: verified, verdicts: verdicts, resultDigest: resultDigest}, nil
+}
+
+func validateRelayV2PlanInputs(verified bundle.Verification, directory string, value relayplan.Plan, verificationPlan PlanDocument, planned BatchPlan) error {
+	findings, ok := relayPlanInput(value, "findings")
+	if !ok || len(findings.Contents) != 1 {
+		return fmt.Errorf("plan.inputs.findings must contain exactly one blob")
+	}
+	if got := relayBlobWitnessDigest(findings.Contents[0]); got != planned.BatchDigest {
+		return fmt.Errorf("plan.inputs.findings digest %q does not match planned batch_digest %q", got, planned.BatchDigest)
+	}
+
+	charterDigest := firstNonEmpty(planned.CharterDigest, verificationPlan.CharterDigest)
+	if charterDigest != "" {
+		charter, ok := relayPlanInput(value, "charter")
+		if !ok || len(charter.Contents) != 1 {
+			return fmt.Errorf("plan.inputs.charter must contain exactly one blob")
+		}
+		if got := relayBlobWitnessDigest(charter.Contents[0]); got != charterDigest {
+			return fmt.Errorf("plan.inputs.charter digest %q does not match planned charter_digest %q", got, charterDigest)
+		}
+	}
+
+	expectedArtifacts := plannedArtifactDigests(planned.ArtifactDigestSet...)
+	if len(expectedArtifacts) == 0 {
+		expectedArtifacts = plannedArtifactDigests(planned.ArtifactDigest, verificationPlan.ArtifactDigest)
+	}
+	artifacts, ok := relayPlanInput(value, "artifact")
+	if !ok || len(artifacts.Contents) == 0 {
+		return fmt.Errorf("plan.inputs.artifact must contain at least one blob")
+	}
+	actualArtifacts := map[string]bool{}
+	for _, ref := range artifacts.Contents {
+		candidates := relayBlobWitnessDigests(verified, directory, ref)
+		matched := false
+		for _, candidate := range candidates {
+			if stringSliceContains(expectedArtifacts, candidate) {
+				actualArtifacts[candidate] = true
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("plan.inputs.artifact blob %q does not match planned artifact_digest_set", relayBlobWitnessDigest(ref))
+		}
+	}
+	missing := make([]string, 0)
+	for _, expected := range expectedArtifacts {
+		if !actualArtifacts[expected] {
+			missing = append(missing, expected)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("plan.inputs.artifact digests do not match planned artifact_digest_set; missing %v", missing)
+	}
+	return nil
+}
+
+func relayV2Verdicts(embedded *contracts.RelayWitnessVerdictsDocument, value string) (contracts.RelayWitnessVerdictsDocument, error) {
+	if strings.TrimSpace(value) == "" {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("relay bundle contains no embedded Witness verdicts")
+	}
+	decoded, err := contracts.ReadRelayWitnessVerdictsBytes([]byte(value))
+	if err != nil {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("decode embedded relay result: %w", err)
+	}
+	if embedded == nil {
+		return decoded, nil
+	}
+	embeddedDigest, err := contracts.RelayWitnessVerdictsDigest(*embedded)
+	if err != nil {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest embedded relay verdicts: %w", err)
+	}
+	decodedDigest, err := contracts.RelayWitnessVerdictsDigest(decoded)
+	if err != nil {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("digest bundle relay verdicts: %w", err)
+	}
+	if embeddedDigest != decodedDigest {
+		return contracts.RelayWitnessVerdictsDocument{}, fmt.Errorf("embedded relay verdicts do not match the bundle result")
+	}
+	return *embedded, nil
+}
+
+func relayPlanInput(value relayplan.Plan, name string) (relayplan.Input, bool) {
+	for _, input := range value.Inputs {
+		if input.Name == name {
+			return input, true
+		}
+	}
+	return relayplan.Input{}, false
+}
+
+func relayBlobWitnessDigest(ref relayplan.BlobRef) string {
+	return "sha256:" + ref.SHA256
+}
+
+func relayBlobWitnessDigests(verified bundle.Verification, directory string, ref relayplan.BlobRef) []string {
+	result := []string{relayBlobWitnessDigest(ref)}
+	if strings.TrimSpace(directory) == "" {
+		return result
+	}
+	for _, entry := range verified.Manifest.PayloadInventory {
+		if entry.Kind != "input" || entry.Blob.SHA256 != ref.SHA256 {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(entry.Path)))
+		if err != nil {
+			return result
+		}
+		if snapshotDigest, ok := frozenSnapshotManifestDigest(body); ok {
+			result = appendUniqueString(result, snapshotDigest)
+		}
+		break
+	}
+	return result
+}
+
+func frozenSnapshotManifestDigest(data []byte) (string, bool) {
+	manifest, err := strictjson.DecodeBytes[freeze.Manifest](data, strictjson.DefaultMaxBytes*32)
+	if err != nil || manifest.SchemaVersion != freeze.SchemaVersion {
+		return "", false
+	}
+	manifestDigest, err := freeze.ManifestDigest(manifest)
+	if err != nil || manifest.Source.ManifestDigest != manifestDigest || manifest.Workspace.ManifestDigest != manifestDigest {
+		return "", false
+	}
+	return manifestDigest, true
 }
 
 func attachRelayLaunchStatus(manifest *contracts.VerificationManifest, status string) {
@@ -488,7 +472,9 @@ func relayUnavailableFailureReason(relay RelayEvidence) string {
 	for _, record := range relay.RunRecords {
 		status, _ := record["status"].(string)
 		providerInvoked, _ := record["provider_invoked"].(string)
-		if status == "launch_failed" && providerInvoked == "false" {
+		launch, _ := record["relay_launch"].(map[string]any)
+		startFailed, _ := launch["start_failed"].(bool)
+		if status == "launch_failed" && providerInvoked == "false" && startFailed {
 			return "relay_launch_failed"
 		}
 	}
@@ -564,6 +550,14 @@ func validateRelayRunRecordEvidence(planned BatchPlan, relay RelayEvidence) []di
 		}
 		if consumesBatch {
 			consumingRecordIndexes = append(consumingRecordIndexes, index)
+			planDigest, _ := record["plan_digest"].(string)
+			if !digest.WellFormed(strings.TrimSpace(planDigest)) {
+				diagnostics = append(diagnostics, invalidRelayRunRecordDiagnostic(
+					planned.BatchID,
+					index,
+					"consuming relay run record plan_digest must be a well-formed digest.",
+				))
+			}
 			continue
 		}
 		if !relayRunRecordIsStartFailure(record) {
@@ -626,6 +620,7 @@ func SanitizeRelayRunRecordMetadata(record map[string]any) map[string]any {
 		"schema_version",
 		"batch_id",
 		"recipe_id",
+		"plan_digest",
 		"status",
 		"provider_invoked",
 	} {
@@ -805,14 +800,11 @@ func relayLaunchInteger(value any, nonNegative bool) (int, bool) {
 	return converted, true
 }
 
-func relayLaunchStatusForCompatibility(compatibility *contracts.RelayCompatibility) string {
-	if compatibility == nil {
-		return ""
+func relayLaunchStatusForPreflight(relayPresent bool) string {
+	if relayPresent {
+		return contracts.RelayLaunchStatusPresent
 	}
-	if contracts.RelayCompatibilityRelayAbsent(*compatibility) {
-		return contracts.RelayLaunchStatusAbsent
-	}
-	return contracts.RelayLaunchStatusPresent
+	return contracts.RelayLaunchStatusAbsent
 }
 
 func sanitizedManifestConsumerIdentity(input map[string]any) map[string]any {
@@ -1004,14 +996,6 @@ func prefixDiagnosticPaths(prefix string, diagnostics []diag.Diagnostic) []diag.
 	return result
 }
 
-func decodeExportVerdicts(value any) (contracts.RelayWitnessVerdictsDocument, error) {
-	data, err := contracts.CanonicalBytes(value)
-	if err != nil {
-		return contracts.RelayWitnessVerdictsDocument{}, err
-	}
-	return contracts.ReadRelayWitnessVerdictsBytes(data)
-}
-
 func assembleReceiptRecords(options AssembleOptions) ([]contracts.ExecutionReceiptManifestRecord, []diag.Diagnostic, []string) {
 	var records []contracts.ExecutionReceiptManifestRecord
 	var diagnostics []diag.Diagnostic
@@ -1114,8 +1098,6 @@ func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) 
 		value string
 	}{
 		{label: "preflight_snapshot", value: plan.PreflightSnapshotDigest},
-		{label: "preflight_compatibility", value: plan.PreflightCompatibilityDigest},
-		{label: "preflight_relay_capabilities", value: plan.PreflightRelayCapabilitiesDigest},
 		{label: "integration_bundle", value: plan.IntegrationBundleDigest},
 	} {
 		if strings.TrimSpace(item.value) == "" {
@@ -1130,8 +1112,6 @@ func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) 
 		label string
 		ref   contracts.ArtifactRef
 	}{
-		{label: "compatibility_manifest", ref: refs.CompatibilityManifest},
-		{label: "relay_capabilities", ref: refs.RelayCapabilities},
 		{label: "integration_bundle", ref: refs.IntegrationBundle},
 	} {
 		if item.ref.Digest == "" {
@@ -1160,127 +1140,8 @@ func validateManifestEvidenceRefs(plan PlanDocument, refs ManifestEvidenceRefs) 
 	} else {
 		diagnostics = append(diagnostics, selectedContractManifestDiagnostics(refs.SelectedContracts, refs.SelectedContractEvidence)...)
 	}
-	if refs.RelayCompatibility == nil {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidCompatibility,
-			"assemble requires a strictly decoded relay compatibility manifest.",
-			diag.WithDetail("ref", "compatibility_manifest"),
-		)))
-		return diagnostics
-	}
-	compatibility := *refs.RelayCompatibility
-	if compatibilityDiagnostics := contracts.ValidateRelayCompatibility(compatibility); len(compatibilityDiagnostics) > 0 {
-		diagnostics = append(diagnostics, prefixAssembleDiagnostics(CodeInvalidCompatibility, "", compatibilityDiagnostics)...)
-	}
-	compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
-	if err != nil {
-		diagnostics = append(diagnostics, diag.FromError(diag.Wrap(err, CodeInvalidCompatibility, "relay compatibility manifest digest could not be recomputed.")))
-	} else {
-		appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "compatibility manifest ref does not match retained compatibility content.", "compatibility_manifest", refs.CompatibilityManifest.Digest, compatibilityDigest)
-		appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "verification plan compatibility digest does not match retained compatibility content.", "preflight_compatibility", plan.PreflightCompatibilityDigest, compatibilityDigest)
-	}
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "relay capabilities ref does not match retained compatibility state.", "relay_capabilities", refs.RelayCapabilities.Digest, compatibility.CapabilitiesDigest)
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "verification plan relay capabilities digest does not match retained compatibility state.", "preflight_relay_capabilities", plan.PreflightRelayCapabilitiesDigest, compatibility.CapabilitiesDigest)
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "integration bundle ref does not match retained compatibility state.", "integration_bundle", refs.IntegrationBundle.Digest, compatibility.IntegrationBundleDigest)
-	appendDigestMismatch(&diagnostics, CodeInvalidCompatibility, "verification plan integration bundle digest does not match retained compatibility state.", "integration_bundle", plan.IntegrationBundleDigest, compatibility.IntegrationBundleDigest)
-	if consumesRelayContracts {
-		for _, contract := range compatibility.SelectedContracts {
-			if strings.TrimSpace(contract.Digest) == "" {
-				continue
-			}
-			if !selectedContractDigestClaimed(refs.SelectedContracts, contract.Digest) {
-				diagnostics = append(diagnostics, diag.FromError(diag.New(
-					CodeInvalidCompatibility,
-					"selected-contract ref does not match retained compatibility state.",
-					diag.WithDetail("contract_id", contract.ContractID),
-					diag.WithDetail("contract_digest", contract.Digest),
-				)))
-			}
-		}
-	}
+	appendDigestMismatch(&diagnostics, CodeInvalidManifest, "integration bundle ref does not match the verification plan.", "integration_bundle", refs.IntegrationBundle.Digest, plan.IntegrationBundleDigest)
 	return diagnostics
-}
-
-func validatePortablePassBindings(report *portable.DetailedReport, plan PlanDocument, planned BatchPlan) ([]diag.Diagnostic, string) {
-	var diagnostics []diag.Diagnostic
-	charterDigest := firstNonEmpty(planned.CharterDigest, plan.CharterDigest)
-	if charterDigest != "" {
-		actual, err := portable.NamedInputRawDigest(report, "charter")
-		if err != nil {
-			return []diag.Diagnostic{diag.FromError(err)}, "portable_export_charter_input_invalid"
-		}
-		if actual != charterDigest {
-			diagnostics = append(diagnostics, diag.FromError(diag.New(
-				CodeInvalidRelay,
-				"portable export charter named input does not match the planned frozen Charter bytes.",
-				diag.WithDetail("actual_digest", actual),
-				diag.WithDetail("expected_digest", charterDigest),
-			)))
-			return diagnostics, "portable_export_charter_input_mismatch"
-		}
-	}
-	expectedArtifactDigests := plannedArtifactDigests(planned.ArtifactDigest, plan.ArtifactDigest)
-	if len(expectedArtifactDigests) == 0 {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export artifact named input requires a planned reviewed artifact digest.",
-		)))
-		return diagnostics, "portable_export_artifact_input_missing"
-	}
-	artifactDigestSets, err := portable.NamedInputArtifactDigestSets(report, "artifact")
-	if err != nil {
-		return []diag.Diagnostic{diag.FromError(err)}, "portable_export_artifact_input_invalid"
-	}
-	if len(artifactDigestSets) == 0 {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export requires at least one artifact named input.",
-			diag.WithDetail("expected_digests", expectedArtifactDigests),
-		)))
-		return diagnostics, "portable_export_artifact_input_missing"
-	}
-	plannedArtifactSet := stringSet(expectedArtifactDigests)
-	presentArtifactDigests := map[string]bool{}
-	var unplannedArtifactDigests []string
-	for _, digestSet := range artifactDigestSets {
-		if matched := markPlannedArtifactDigests(presentArtifactDigests, plannedArtifactSet, digestSet); !matched {
-			unplannedArtifactDigests = append(unplannedArtifactDigests, digestSet...)
-		}
-	}
-	missingArtifactDigests := missingPlannedArtifactDigests(expectedArtifactDigests, presentArtifactDigests)
-	if len(unplannedArtifactDigests) > 0 || len(missingArtifactDigests) > 0 {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export artifact named inputs do not match the planned reviewed artifact digests.",
-			diag.WithDetail("actual_digest_sets", artifactDigestSets),
-			diag.WithDetail("expected_digests", expectedArtifactDigests),
-			diag.WithDetail("missing_digests", missingArtifactDigests),
-			diag.WithDetail("unplanned_digests", uniqueStrings(unplannedArtifactDigests)),
-		)))
-		return diagnostics, "portable_export_artifact_input_mismatch"
-	}
-	expectedBundleDigest := firstNonEmpty(planned.IntegrationBundleDigest, plan.IntegrationBundleDigest)
-	if expectedBundleDigest == "" {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export integration bundle binding requires a planned pass bundle digest.",
-		)))
-		return diagnostics, "portable_export_bundle_identity_missing"
-	}
-	binding, err := portable.IntegrationBundleBindingFromReport(report)
-	if err != nil {
-		return []diag.Diagnostic{diag.FromError(err)}, "portable_export_bundle_identity_invalid"
-	}
-	if binding.BundleDigest != expectedBundleDigest {
-		diagnostics = append(diagnostics, diag.FromError(diag.New(
-			CodeInvalidRelay,
-			"portable export root recipe plan integration bundle digest does not match the planned pass bundle.",
-			diag.WithDetail("actual_digest", binding.BundleDigest),
-			diag.WithDetail("expected_digest", expectedBundleDigest),
-		)))
-		return diagnostics, "portable_export_bundle_identity_mismatch"
-	}
-	return nil, ""
 }
 
 func appendDigestMismatch(diagnostics *[]diag.Diagnostic, code string, message string, label string, actual string, expected string) {
@@ -1384,35 +1245,6 @@ func uniqueStrings(values []string) []string {
 	}
 	sort.Strings(unique)
 	return unique
-}
-
-func classifyPortableUnverifiedRelationships(batchID string, items []portable.UnverifiedRelationship) ([]ManifestUnverifiedRelationship, []ManifestUnverifiedRelationship) {
-	records := make([]ManifestUnverifiedRelationship, 0, len(items))
-	var requiredMissing []ManifestUnverifiedRelationship
-	for _, item := range items {
-		classification := "supplementary"
-		// The signed root recipe/selected-contract prompt_context contract makes
-		// trace-only facilitator-ledger projection checkable only through retained
-		// rendered_prompt artifacts. When that evidence is absent, the relationship
-		// is REQUIRED-missing; ambiguous retained strings remain supplementary and
-		// are surfaced without invalidating the batch.
-		if item.Relationship == "trace_only_facilitator_ledger_prompt_projection" &&
-			(item.Code == "rendered_prompt_ref_missing" || item.Code == "rendered_prompt_unavailable") {
-			classification = "required"
-		}
-		record := ManifestUnverifiedRelationship{
-			BatchID:        batchID,
-			Classification: classification,
-			Code:           item.Code,
-			Relationship:   item.Relationship,
-			Reason:         item.Reason,
-		}
-		records = append(records, record)
-		if classification == "required" {
-			requiredMissing = append(requiredMissing, record)
-		}
-	}
-	return records, requiredMissing
 }
 
 func prefixAssembleDiagnostics(code string, batchID string, diagnostics []diag.Diagnostic) []diag.Diagnostic {

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
 	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/diag"
@@ -25,7 +26,6 @@ import (
 	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
-	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/relayrun"
 	internalreview "github.com/charlesnpx/witness/internal/review"
 )
@@ -37,11 +37,9 @@ const (
 	verificationAssembleMultipleConsumingRunRecords = "verification_assemble_multiple_consuming_run_records"
 	verificationAssembleConflictingRelayProvenance  = "verification_assemble_conflicting_relay_provenance"
 
-	assembleStateDirCompatibilityManifest = "compatibility-manifest.json"
-	assembleStateDirRelayCapabilities     = "relay-capabilities.json"
-	assembleStateDirIntegrationBundle     = "integration-bundle.json"
-	assembleStateDirSelectedContract      = "selected-contract.json"
-	assembleStateDirPreflightResult       = "preflight.json"
+	assembleStateDirIntegrationBundle = "integration-bundle.json"
+	assembleStateDirSelectedContract  = "selected-contract.json"
+	assembleStateDirPreflightResult   = "preflight.json"
 )
 
 var witnessCommands = map[string]map[string]bool{
@@ -79,8 +77,6 @@ var singleCommands = map[string]bool{
 	"adjudicate":       true,
 	"review:configure": true,
 }
-
-var verificationAssembleRelayRunner relayclient.Runner
 
 func main() {
 	if err := route(os.Args[1:]); err != nil {
@@ -493,8 +489,6 @@ func runVerificationAssemble(args []string) error {
 	planPath := flags.String("plan", "", "verification plan path")
 	baseManifestPath := flags.String("base-manifest", "", "base freeze manifest path for delta change-surface verification")
 	headManifestPath := flags.String("head-manifest", "", "head freeze manifest path for delta change-surface verification")
-	compatibilityPath := flags.String("compatibility-manifest", "", "retained compatibility manifest path")
-	capabilitiesPath := flags.String("relay-capabilities", "", "retained relay capabilities path")
 	integrationBundlePath := flags.String("integration-bundle", "", "retained integration bundle path")
 	stateDir := flags.String("state-dir", "", "verification state directory")
 	runRelay := flags.Bool("run-relay", false, "run planned relay verification batches before assembly")
@@ -538,8 +532,6 @@ func runVerificationAssemble(args []string) error {
 	}
 	missingStateDirDefaults := applyVerificationAssembleStateDirDefaults(
 		*stateDir,
-		compatibilityPath,
-		capabilitiesPath,
 		integrationBundlePath,
 		&selectedContractPaths,
 	)
@@ -547,8 +539,6 @@ func runVerificationAssemble(args []string) error {
 		{role: "plan", path: *planPath},
 		{role: "base-manifest", path: *baseManifestPath},
 		{role: "head-manifest", path: *headManifestPath},
-		{role: "compatibility-manifest", path: *compatibilityPath},
-		{role: "relay-capabilities", path: *capabilitiesPath},
 		{role: "integration-bundle", path: *integrationBundlePath},
 		{role: "charter-freeze", path: *charterPath},
 		{role: "state-dir", path: *stateDir},
@@ -616,7 +606,6 @@ func runVerificationAssemble(args []string) error {
 			LaunchCWD:               *launchCWD,
 			SettingsPath:            *settingsPath,
 			AllowDirtySource:        *allowDirtySource,
-			Runner:                  verificationAssembleRelayRunner,
 		})
 		if err != nil {
 			return err
@@ -631,7 +620,7 @@ func runVerificationAssemble(args []string) error {
 	if err != nil {
 		return err
 	}
-	evidenceRefs, err := manifestEvidenceRefs(*compatibilityPath, *capabilitiesPath, *integrationBundlePath, selectedContractPaths, plan.ConsumerIdentity)
+	evidenceRefs, err := manifestEvidenceRefs(*integrationBundlePath, selectedContractPaths, plan.ConsumerIdentity)
 	if err != nil {
 		return err
 	}
@@ -656,13 +645,11 @@ func runVerificationAssemble(args []string) error {
 		}
 		return err
 	}
-	return internalreview.WriteCanonical(*out, verificationAssembleOutput(result))
+	return internalreview.WriteCanonical(*out, result.Manifest)
 }
 
 func applyVerificationAssembleStateDirDefaults(
 	stateDir string,
-	compatibilityPath *string,
-	capabilitiesPath *string,
 	integrationBundlePath *string,
 	selectedContractPaths *repeatedStrings,
 ) map[string]string {
@@ -676,8 +663,6 @@ func applyVerificationAssembleStateDirDefaults(
 		relative string
 		path     *string
 	}{
-		{ref: "compatibility_manifest", relative: assembleStateDirCompatibilityManifest, path: compatibilityPath},
-		{ref: "relay_capabilities", relative: assembleStateDirRelayCapabilities, path: capabilitiesPath},
 		{ref: "integration_bundle", relative: assembleStateDirIntegrationBundle, path: integrationBundlePath},
 	} {
 		if *item.path != "" {
@@ -788,13 +773,6 @@ func addStateDirDefaultPathDetails(err error, missing map[string]string) {
 			diagnostic.Details["state_dir_default_path"] = candidate
 		}
 	}
-}
-
-func verificationAssembleOutput(result *planning.AssembleResult) any {
-	if len(result.UnverifiedRelationships) > 0 {
-		return result
-	}
-	return result.Manifest
 }
 
 func runAdjudicate(args []string) error {
@@ -1189,8 +1167,7 @@ func readPreflightFile(path string) (preflight.Result, error) {
 func planningPreflightBinding(result preflight.Result) planning.PreflightBinding {
 	return planning.PreflightBinding{
 		SnapshotDigest:          result.SnapshotDigest,
-		CompatibilityDigest:     result.ArtifactDigests["compatibility-manifest.json"],
-		RelayCapabilitiesDigest: result.ArtifactDigests["relay-capabilities.json"],
+		RelayPresent:            result.RelayPresent,
 		IntegrationBundleDigest: result.ContractDigests["integration_bundle"],
 	}
 }
@@ -1228,8 +1205,6 @@ func validatePlanningPreflightBinding(binding planning.PreflightBinding) error {
 		value string
 	}{
 		{label: "snapshot_digest", value: binding.SnapshotDigest},
-		{label: "compatibility_manifest", value: binding.CompatibilityDigest},
-		{label: "relay_capabilities", value: binding.RelayCapabilitiesDigest},
 		{label: "integration_bundle", value: binding.IntegrationBundleDigest},
 	} {
 		if strings.TrimSpace(item.value) == "" {
@@ -1358,11 +1333,13 @@ func relayEvidenceFromRunResult(result *relayrun.Result) ([]planning.RelayEviden
 			RecipeFamily:      relayRecipeFamilyFromRecipeID(run.RecipeID),
 			Backend:           relayBackendFromRecipeID(run.RecipeID),
 			PortableExportDir: run.PortableExportDir,
+			Verdicts:          run.RelayVerdicts,
+			VerifiedBundle:    run.VerifiedBundle,
 			RunRecords:        []map[string]any{runRecord},
 		}
 		if run.PortableExportDigest != "" {
 			record.PortableExportRef = &contracts.ArtifactRef{
-				Kind:          "relay-root-portable-export",
+				Kind:          "relay-bundle",
 				ID:            run.BatchID,
 				Digest:        run.PortableExportDigest,
 				DigestProfile: digest.Profile,
@@ -1402,6 +1379,11 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 		record := byBatch[batchID]
 		record.BatchID = batchID
 		record.PortableExportDir = path
+		verified, err := readV2RelayBundle(path)
+		if err != nil {
+			return nil, err
+		}
+		record.VerifiedBundle = verified
 		byBatch[batchID] = record
 	}
 	for _, spec := range verdictSpecs {
@@ -1432,6 +1414,14 @@ func readRelayEvidence(verdictSpecs []string, portableSpecs []string) ([]plannin
 	return result, nil
 }
 
+func readV2RelayBundle(directory string) (*bundle.Verification, error) {
+	verified, err := bundle.VerifyPortableDirectory(directory)
+	if err != nil {
+		return nil, diag.Wrap(err, planning.CodeInvalidRelay, "relay v2 portable bundle could not be verified.", diag.WithDetail("path", directory))
+	}
+	return &verified, nil
+}
+
 func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
 	evidence := make([]planning.RelayEvidence, 0, len(paths))
 	for _, path := range paths {
@@ -1454,11 +1444,12 @@ func readRunRecordEvidence(paths []string) ([]planning.RelayEvidence, error) {
 				Backend:           relayBackendFromRecipeID(run.RecipeID),
 				PortableExportDir: run.PortableExportDir,
 				Verdicts:          run.RelayVerdicts,
+				VerifiedBundle:    run.VerifiedBundle,
 				RunRecords:        []map[string]any{runRecord},
 			}
 			if run.PortableExportDigest != "" {
 				record.PortableExportRef = &contracts.ArtifactRef{
-					Kind:          "relay-root-portable-export",
+					Kind:          "relay-bundle",
 					ID:            run.BatchID,
 					Digest:        run.PortableExportDigest,
 					DigestProfile: digest.Profile,
@@ -1510,6 +1501,9 @@ func mergeRelayEvidence(sources ...[]planning.RelayEvidence) ([]planning.RelayEv
 			if incoming.Verdicts != nil {
 				current.Verdicts = incoming.Verdicts
 			}
+			if incoming.VerifiedBundle != nil {
+				current.VerifiedBundle = incoming.VerifiedBundle
+			}
 			runRecords, err := mergeRelayRunRecords(incoming.BatchID, current.RunRecords, incoming.RunRecords)
 			if err != nil {
 				return nil, err
@@ -1539,6 +1533,10 @@ func requireMatchingRelayEvidenceProvenance(batchID string, current, incoming pl
 		if conflictingRelayProvenanceValue(field.current, field.incoming) {
 			return conflictingRelayProvenance(batchID, field.name)
 		}
+	}
+	if current.VerifiedBundle != nil && incoming.VerifiedBundle != nil &&
+		current.VerifiedBundle.Manifest.ManifestDigest != incoming.VerifiedBundle.Manifest.ManifestDigest {
+		return conflictingRelayProvenance(batchID, "portable_export_bundle_identity")
 	}
 	if current.Verdicts == nil || incoming.Verdicts == nil {
 		return nil
@@ -1666,31 +1664,12 @@ func readReceipts(paths []string) ([]contracts.ExecutionReceipt, error) {
 }
 
 func manifestEvidenceRefs(
-	compatibilityPath string,
-	capabilitiesPath string,
 	integrationBundlePath string,
 	selectedContractPaths []string,
 	consumerIdentity map[string]any,
 ) (planning.ManifestEvidenceRefs, error) {
 	refs := planning.ManifestEvidenceRefs{ConsumerIdentity: cloneMap(consumerIdentity)}
 	var err error
-	if compatibilityPath != "" {
-		refs.CompatibilityManifest, err = artifactRefForFile("compatibility-manifest", compatibilityPath)
-		if err != nil {
-			return refs, err
-		}
-		compatibility, err := relayCompatibilityFromArtifactFile(compatibilityPath)
-		if err != nil {
-			return refs, err
-		}
-		refs.RelayCompatibility = &compatibility
-	}
-	if capabilitiesPath != "" {
-		refs.RelayCapabilities, err = artifactRefForFile("relay-capabilities", capabilitiesPath)
-		if err != nil {
-			return refs, err
-		}
-	}
 	if integrationBundlePath != "" {
 		refs.IntegrationBundle, err = artifactRefForFile("integration-bundle", integrationBundlePath)
 		if err != nil {
@@ -1706,21 +1685,6 @@ func manifestEvidenceRefs(
 		refs.SelectedContractEvidence = append(refs.SelectedContractEvidence, contractEvidence...)
 	}
 	return refs, nil
-}
-
-func relayCompatibilityFromArtifactFile(path string) (contracts.RelayCompatibility, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.RelayCompatibility{}, fileReadError(err, path, "open compatibility manifest")
-	}
-	payloadBytes, err := retainedPayloadCanonicalBytes(data)
-	if err != nil {
-		return contracts.RelayCompatibility{}, err
-	}
-	if len(payloadBytes) == 0 {
-		payloadBytes = data
-	}
-	return contracts.ReadRelayCompatibilityBytes(payloadBytes)
 }
 
 func selectedContractRefsForFile(path string) ([]contracts.ArtifactRef, error) {
@@ -1805,39 +1769,6 @@ func artifactRefForFile(kind string, path string) (contracts.ArtifactRef, error)
 		}
 	}
 	return artifactRef(kind, artifactIDFromPath(path), refDigest), nil
-}
-
-func retainedPayloadCanonicalBytes(data []byte) ([]byte, error) {
-	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		return nil, nil
-	}
-	object, ok := value.(map[string]any)
-	if !ok {
-		return nil, nil
-	}
-	payloadDigest, ok := object["payload_digest"].(string)
-	if !ok || strings.TrimSpace(payloadDigest) == "" {
-		return nil, nil
-	}
-	payload, hasPayload := object["payload"]
-	if !hasPayload {
-		return nil, diag.New(diag.CodeInvalidCommand, "retained artifact payload_digest requires a retained payload.")
-	}
-	payloadBytes, err := canonjson.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	actualDigest := digest.RawBytes(payloadBytes)
-	if actualDigest != strings.TrimSpace(payloadDigest) {
-		return nil, diag.New(
-			diag.CodeInvalidCommand,
-			"retained artifact payload_digest does not match the retained payload.",
-			diag.WithDetail("actual_digest", actualDigest),
-			diag.WithDetail("expected_digest", strings.TrimSpace(payloadDigest)),
-		)
-	}
-	return payloadBytes, nil
 }
 
 func artifactRef(kind string, id string, refDigest string) contracts.ArtifactRef {

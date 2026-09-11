@@ -230,16 +230,6 @@ func TestReducerSchemaSourceContainsNoCommentAndIsStrictJSON(t *testing.T) {
 	}
 }
 
-func TestRelayCompatibilityRequiresFullCapabilityClosure(t *testing.T) {
-	document := validRelayCompatibility()
-	if diagnostics := ValidateRelayCompatibility(document); len(diagnostics) > 0 {
-		t.Fatalf("valid compatibility diagnostics = %#v", diagnostics)
-	}
-	delete(document.Capabilities, "root_recipe_plan_v2")
-	diagnostics := ValidateRelayCompatibility(document)
-	assertDiagnosticCode(t, diagnostics, CodeInvalidCompatibility)
-}
-
 func TestVerificationBatchPreservesExplicitEmptyWitnessArtifactRefs(t *testing.T) {
 	frozen := validFrozenCharter(t)
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "role-output-defect.json"))
@@ -493,35 +483,6 @@ func validCounterWitness() *CounterWitness {
 	}
 }
 
-func validRelayCompatibility() RelayCompatibility {
-	capabilities := make(map[string]bool, len(RequiredRelayCapabilitiesV3))
-	for _, capability := range RequiredRelayCapabilitiesV3 {
-		capabilities[capability] = true
-	}
-	recipePlans := make([]RecipePlanDigest, 0, len(RequiredWitnessRecipeContractsV2))
-	for _, required := range RequiredWitnessRecipeContractsV2 {
-		recipePlans = append(recipePlans, RecipePlanDigest{
-			RecipeID:   required.RecipeID,
-			ContractID: required.ContractID,
-			Digest:     testDigest("recipe:" + required.RecipeID),
-		})
-	}
-	return RelayCompatibility{
-		SchemaVersion:           RelayCompatibilityV3,
-		ConvoRelayVersion:       "v1.4.0",
-		DigestProfile:           digest.Profile,
-		Capabilities:            capabilities,
-		CapabilitiesDigest:      testDigest("capabilities"),
-		IntegrationBundleDigest: testDigest("integration-bundle"),
-		SelectedContracts: []ContractDigest{
-			{ContractID: "witnessed-review/witness-falsification-v2", Digest: testDigest("contract:falsification")},
-			{ContractID: "witnessed-review/economy-equivalence-v2", Digest: testDigest("contract:economy")},
-		},
-		RecipePlans:      recipePlans,
-		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
-	}
-}
-
 func validSurvivedVerdicts(batch VerificationBatchDocument) RelayWitnessVerdictsDocument {
 	return RelayWitnessVerdictsDocument{
 		SchemaVersion: RelayWitnessVerdictsV2,
@@ -549,13 +510,11 @@ func validVerificationManifest(t *testing.T, batch VerificationBatchDocument, ve
 	portableExportDigest := testDigest("portable-export")
 	portableExportRef := testArtifactRef("portable-export", "portable-export-1", portableExportDigest)
 	return VerificationManifest{
-		SchemaVersion:         VerificationManifestV6,
-		PlanDigest:            testDigest("plan"),
-		CharterHash:           batch.CharterHash,
-		ArtifactDigest:        batch.ArtifactDigest,
-		CompatibilityManifest: testArtifactRef("compatibility-manifest", "compatibility", testDigest("compatibility")),
-		RelayCapabilities:     testArtifactRef("relay-capabilities", "capabilities", testDigest("capabilities")),
-		IntegrationBundle:     testArtifactRef("integration-bundle", "bundle", testDigest("bundle")),
+		SchemaVersion:     VerificationManifestV6,
+		PlanDigest:        testDigest("plan"),
+		CharterHash:       batch.CharterHash,
+		ArtifactDigest:    batch.ArtifactDigest,
+		IntegrationBundle: testArtifactRef("integration-bundle", "bundle", testDigest("bundle")),
 		Batches: []VerificationManifestBatch{{
 			BatchID:               batch.BatchID,
 			Status:                RecordStatusValid,

@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 
@@ -25,7 +22,6 @@ import (
 	passdriver "github.com/charlesnpx/witness/internal/pass"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/preflight"
-	"github.com/charlesnpx/witness/internal/relayclient"
 	"github.com/charlesnpx/witness/internal/relayrun"
 	internalreview "github.com/charlesnpx/witness/internal/review"
 )
@@ -629,51 +625,17 @@ func TestRelayExecutableResolution(t *testing.T) {
 		if !result.OK || len(result.Diagnostics) != 0 {
 			t.Fatalf("preflight result = %#v, want ok degraded result without blocking diagnostics", result)
 		}
-		if !preflight.RelayAbsent(result) {
-			t.Fatalf("backend strata = %#v, want relay_absent", result.BackendStrata)
+		if result.RelayPresent {
+			t.Fatal("preflight result reports Relay present for a missing executable")
 		}
 		for _, required := range []string{
-			"compatibility-manifest.json",
-			"relay-capabilities.json",
 			"integration-bundle.json",
-			filepath.ToSlash(filepath.Join("compile-reports", "witness-falsify-v2.json")),
+			"integration-bundle.body.json",
+			"contract-digests.json",
 		} {
 			if result.ArtifactDigests[required] == "" {
 				t.Fatalf("artifact digests = %#v, missing %s", result.ArtifactDigests, required)
 			}
-		}
-		capabilitiesBytes, err := os.ReadFile(filepath.Join(stateDir, "relay-capabilities.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		capabilitiesPayload, err := retainedPayloadCanonicalBytes(capabilitiesBytes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		absentPayload, err := strictjson.DecodeBytes[map[string]any](capabilitiesPayload, strictjson.DefaultMaxBytes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if absentPayload["relay_error_kind"] != relayclient.ErrorRelayMissing || absentPayload["relay_executable"] != missingRelay || absentPayload["relay_command"] != missingRelay {
-			t.Fatalf("relay-absent payload = %#v, want the attempted bare executable and relay_missing", absentPayload)
-		}
-		compatibilityBytes, err := os.ReadFile(filepath.Join(stateDir, "compatibility-manifest.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		payloadBytes, err := retainedPayloadCanonicalBytes(compatibilityBytes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		compatibility, err := contracts.ReadRelayCompatibilityBytes(payloadBytes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !contracts.RelayCompatibilityRelayAbsent(compatibility) {
-			t.Fatalf("compatibility backend status = %#v, want relay_absent", compatibility.BackendStatus)
-		}
-		if diagnostics := contracts.ValidateRelayCompatibility(compatibility); len(diagnostics) != 0 {
-			t.Fatalf("compatibility diagnostics = %#v", diagnostics)
 		}
 	})
 }
@@ -759,10 +721,8 @@ func TestVerificationPlanRejectsFailedPreflightResult(t *testing.T) {
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
 	planOut := filepath.Join(dir, "plan-out.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility-failed-preflight.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities-failed-preflight.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-failed-preflight.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight-failed.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-failed.json", stateDir, bundle)
 
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
@@ -774,20 +734,13 @@ func TestVerificationPlanRejectsFailedPreflightResult(t *testing.T) {
 		SchemaVersion: preflight.SchemaVersion,
 		OK:            false,
 		StateDir:      stateDir,
-		ArtifactDigests: map[string]string{
-			"compatibility-manifest.json": digest.RawBytes([]byte("compatibility")),
-			"relay-capabilities.json":     digest.RawBytes([]byte("capabilities")),
-		},
-		CompileReportDigests: map[string]string{},
-		RecipePlanDigests:    map[string]string{},
 		ContractDigests: map[string]string{
 			"integration_bundle": digest.RawBytes([]byte("bundle")),
 		},
-		BackendStrata:    map[string]string{},
 		SnapshotDigest:   digest.RawBytes([]byte("snapshot")),
 		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
 		Diagnostics: []diag.Diagnostic{{
-			Code:    preflight.CodeMissingCapability,
+			Code:    preflight.CodeRecipePlanInvalid,
 			Message: "preflight failed",
 		}},
 	}
@@ -862,10 +815,8 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	planOut := filepath.Join(dir, "plan-out.json")
 	manifestOut := filepath.Join(dir, "manifest.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities.json")
 	bundle := writeCLIArtifact(t, dir, "bundle.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, bundle)
 
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
@@ -900,8 +851,6 @@ func TestVerificationPlanAndAssembleCLI(t *testing.T) {
 		"verification", "assemble",
 		"-plan", filepath.Join(stateDir, "verification-plan.json"),
 		"-batch", batchPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", manifestOut,
@@ -929,10 +878,8 @@ func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	planOut := filepath.Join(dir, "plan-out.json")
 	manifestOut := filepath.Join(dir, "manifest.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities.json")
 	bundle := writeCLIArtifact(t, dir, "bundle.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, bundle)
 
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
@@ -960,8 +907,6 @@ func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
 	if err := route([]string{
 		"verification", "assemble",
 		"-plan", filepath.Join(stateDir, "verification-plan.json"),
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-out", manifestOut,
 	}); err != nil {
@@ -986,11 +931,11 @@ func TestVerificationAssembleEmptyPlanWithoutSelectedContract(t *testing.T) {
 func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
-	compatibility, capabilities, bundle, selectedContract := writeCLIStateDirAssembleArtifacts(t, stateDir)
+	bundle, selectedContract := writeCLIStateDirAssembleArtifacts(t, stateDir)
 	frozen := validCLIFrozenCharter(t)
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutputPath := filepath.Join(dir, "role-output.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, bundle)
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
@@ -1013,8 +958,6 @@ func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
 		"verification", "assemble",
 		"-plan", filepath.Join(stateDir, "verification-plan.json"),
 		"-batch", batchPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", explicitOut,
@@ -1041,138 +984,6 @@ func TestVerificationAssembleStateDirDefaultsMatchExplicitInputs(t *testing.T) {
 	}
 	if !bytes.Equal(defaultedBytes, explicitBytes) {
 		t.Fatalf("defaulted assemble output differs from explicit input output:\ndefaulted: %s\nexplicit: %s", defaultedBytes, explicitBytes)
-	}
-}
-
-func TestVerificationAssembleStateDirDefaultsUseRetainedPreflightInventory(t *testing.T) {
-	dir := t.TempDir()
-	stateDir := filepath.Join(dir, "state")
-	staleCompatibility, _, _, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
-	if err := internalreview.WriteCanonical(staleCompatibility, map[string]any{"not": "the retained compatibility manifest"}); err != nil {
-		t.Fatal(err)
-	}
-	retainedDir := filepath.Join(stateDir, "retained")
-	if err := os.MkdirAll(retainedDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	capabilities := filepath.Join(retainedDir, "relay-capabilities-retained.json")
-	if err := internalreview.WriteCanonical(capabilities, map[string]any{"name": filepath.Base(capabilities)}); err != nil {
-		t.Fatal(err)
-	}
-	bundle := filepath.Join(retainedDir, "integration-bundle-retained.json")
-	if err := internalreview.WriteCanonical(bundle, map[string]any{"name": filepath.Base(bundle)}); err != nil {
-		t.Fatal(err)
-	}
-	compatibility := writeCLICompatibilityArtifact(t, retainedDir, "compatibility-manifest-retained.json", filepath.Base(capabilities), filepath.Base(bundle))
-	preflightPath := writeCLIPreflightResult(t, stateDir, assembleStateDirPreflightResult, stateDir, compatibility, capabilities, bundle)
-	preflightData, err := os.ReadFile(preflightPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	preflightResult, err := strictjson.DecodeBytes[preflight.Result](preflightData, strictjson.DefaultMaxBytes*4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	preflightResult.RetainedArtifacts = map[string]string{
-		"compatibility_manifest": filepath.ToSlash(filepath.Join("retained", filepath.Base(compatibility))),
-		"relay_capabilities":     filepath.ToSlash(filepath.Join("retained", filepath.Base(capabilities))),
-		"integration_bundle":     filepath.ToSlash(filepath.Join("retained", filepath.Base(bundle))),
-	}
-	if err := internalreview.WriteCanonical(preflightPath, preflightResult); err != nil {
-		t.Fatal(err)
-	}
-
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	roleOutputPath := filepath.Join(dir, "role-output.json")
-	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
-		t.Fatal(err)
-	}
-	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
-		t.Fatal(err)
-	}
-	if err := route([]string{
-		"verification", "plan",
-		"-charter-freeze", frozenPath,
-		"-preflight", preflightPath,
-		"-role-output", roleOutputPath,
-		"-state-dir", stateDir,
-		"-out", filepath.Join(dir, "plan.json"),
-	}); err != nil {
-		t.Fatalf("verification plan: %v", err)
-	}
-	manifestOut := filepath.Join(dir, "manifest.json")
-	if err := route([]string{
-		"verification", "assemble",
-		"-plan", filepath.Join(stateDir, "verification-plan.json"),
-		"-batch", filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json"),
-		"-state-dir", stateDir,
-		"-out", manifestOut,
-	}); err != nil {
-		t.Fatalf("verification assemble with retained preflight inventory: %v", err)
-	}
-	manifestData, err := os.ReadFile(manifestOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](manifestData, strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := manifest.CompatibilityManifest.ID, artifactIDFromPath(compatibility); got != want {
-		t.Fatalf("compatibility manifest ref = %q, want retained inventory %q", got, want)
-	}
-}
-
-func TestVerificationAssembleExplicitInputOverridesStateDirDefault(t *testing.T) {
-	dir := t.TempDir()
-	stateDir := filepath.Join(dir, "state")
-	defaultCompatibility, capabilities, bundle, _ := writeCLIStateDirAssembleArtifacts(t, stateDir)
-	overrideCompatibility := writeCLICompatibilityArtifact(t, dir, "compatibility-override.json", filepath.Base(capabilities), filepath.Base(bundle))
-	if err := internalreview.WriteCanonical(defaultCompatibility, map[string]any{"not": "a compatibility manifest"}); err != nil {
-		t.Fatal(err)
-	}
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	roleOutputPath := filepath.Join(dir, "role-output.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight.json", stateDir, overrideCompatibility, capabilities, bundle)
-	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
-		t.Fatal(err)
-	}
-	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
-		t.Fatal(err)
-	}
-	if err := route([]string{
-		"verification", "plan",
-		"-charter-freeze", frozenPath,
-		"-preflight", preflightPath,
-		"-role-output", roleOutputPath,
-		"-state-dir", stateDir,
-		"-out", filepath.Join(dir, "plan.json"),
-	}); err != nil {
-		t.Fatalf("verification plan: %v", err)
-	}
-	manifestOut := filepath.Join(dir, "manifest.json")
-	if err := route([]string{
-		"verification", "assemble",
-		"-plan", filepath.Join(stateDir, "verification-plan.json"),
-		"-batch", filepath.Join(stateDir, "verification", "batches", "defect-batch-1.json"),
-		"-state-dir", stateDir,
-		"-compatibility-manifest", overrideCompatibility,
-		"-out", manifestOut,
-	}); err != nil {
-		t.Fatalf("verification assemble with compatibility override: %v", err)
-	}
-	data, err := os.ReadFile(manifestOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := strictjson.DecodeBytes[contracts.VerificationManifest](data, strictjson.DefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := manifest.CompatibilityManifest.ID, artifactIDFromPath(overrideCompatibility); got != want {
-		t.Fatalf("compatibility manifest ref = %q, want explicit override %q", got, want)
 	}
 }
 
@@ -1440,11 +1251,9 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
 	manifestOut := filepath.Join(dir, "manifest-run.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility-run.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities-run.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-run.json")
 	artifactPath := writeCLIReviewedArtifact(t, dir)
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight-run.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-run.json", stateDir, bundle)
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
@@ -1462,10 +1271,9 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 		t.Fatalf("verification plan: %v", err)
 	}
 
-	runner := &assembleFakeRelayRunner{t: t}
-	previousRunner := verificationAssembleRelayRunner
-	verificationAssembleRelayRunner = runner
-	defer func() { verificationAssembleRelayRunner = previousRunner }()
+	relayPath := filepath.Join(dir, "fake-relay")
+	buildCLIFakeRelay(t, relayPath)
+	t.Setenv("WITNESS_FAKE_RELAY_FAIL_RUN", "1")
 
 	selectedContract := writeCLISelectedContractArtifact(t, dir, "contract-run.json")
 	if err := route([]string{
@@ -1473,20 +1281,15 @@ func TestVerificationAssembleRunRelayRoutesLaunchFailurePending(t *testing.T) {
 		"-run-relay",
 		"-plan", filepath.Join(stateDir, "verification-plan.json"),
 		"-state-dir", stateDir,
-		"-relay", "fake-relay",
+		"-relay", relayPath,
 		"-backend", "codex",
 		"-charter-freeze", frozenPath,
 		"-artifact", artifactPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", manifestOut,
 	}); err != nil {
 		t.Fatalf("verification assemble -run-relay: %v", err)
-	}
-	if runner.calls != 1 {
-		t.Fatalf("relay run calls = %d, want 1", runner.calls)
 	}
 	data, err := os.ReadFile(manifestOut)
 	if err != nil {
@@ -1618,8 +1421,6 @@ func TestVerificationAssembleRunRelayRetainsConsumingRecordAcrossBudgetRejection
 		"-backend", "codex",
 		"-charter-freeze", filepath.Join(stateDir, "charter.freeze.json"),
 		"-artifact", filepath.Join(stateDir, "source-snapshot", "manifest.json"),
-		"-compatibility-manifest", filepath.Join(stateDir, "compatibility-manifest.json"),
-		"-relay-capabilities", filepath.Join(stateDir, "relay-capabilities.json"),
 		"-integration-bundle", filepath.Join(stateDir, "integration-bundle.body.json"),
 		"-selected-contract", filepath.Join(stateDir, "integration-bundle.body.json"),
 		"-out", manifestOut,
@@ -1679,10 +1480,8 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
 	manifestOut := filepath.Join(dir, "manifest-run-record.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility-run-record.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities-run-record.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-run-record.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight-run-record.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-run-record.json", stateDir, bundle)
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
@@ -1739,8 +1538,6 @@ func TestVerificationAssembleRunRecordRetainsUnavailableLaunchEvidence(t *testin
 		"-plan", filepath.Join(stateDir, "verification-plan.json"),
 		"-batch", batchPath,
 		"-run-record", runRecordPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", manifestOut,
@@ -1839,6 +1636,21 @@ func jsonNumberMatches(value any, want int) bool {
 	}
 	actual, err := number.Float64()
 	return err == nil && actual == float64(want)
+}
+
+func TestReadV2RelayBundleRejectsUnsupportedManifestKind(t *testing.T) {
+	directory := t.TempDir()
+	manifestPath := filepath.Join(directory, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"kind":"unsupported"}`), 0o600); err != nil {
+		t.Fatalf("write unsupported Relay manifest: %v", err)
+	}
+	verified, err := readV2RelayBundle(directory)
+	if err == nil {
+		t.Fatal("readV2RelayBundle accepted an unsupported manifest kind")
+	}
+	if verified != nil {
+		t.Fatalf("readV2RelayBundle returned verification %#v with an unsupported manifest kind", verified)
+	}
 }
 
 func TestMergeRelayEvidenceAllowsStartFailureThenConsumingRetry(t *testing.T) {
@@ -2056,10 +1868,8 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 	frozenPath := filepath.Join(dir, "frozen.json")
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
-	compatibility := writeCLIArtifact(t, dir, "compatibility-verdict-merge.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities-verdict-merge.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-verdict-merge.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight-verdict-merge.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-verdict-merge.json", stateDir, bundle)
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
@@ -2075,6 +1885,10 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 		"-out", filepath.Join(dir, "plan-verdict-merge.json"),
 	}); err != nil {
 		t.Fatalf("verification plan: %v", err)
+	}
+	plan, err := readPlanFile(filepath.Join(stateDir, "verification-plan.json"))
+	if err != nil {
+		t.Fatalf("read verification plan: %v", err)
 	}
 
 	verdicts := contracts.RelayWitnessVerdictsDocument{
@@ -2094,6 +1908,7 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 		RecipeID:        "witness-falsify-v2-codex",
 		ProviderInvoked: relayrun.ProviderInvokedTrue,
 		ConsumesBatch:   true,
+		PlanDigest:      plan.PlanDigest,
 		RelayVerdicts:   &verdicts,
 	}); err != nil {
 		t.Fatal(err)
@@ -2111,8 +1926,6 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 		"-batch", batchPath,
 		"-relay-verdict", batchID + "=" + verdictPath,
 		"-run-record", runRecordPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", manifestOut,
@@ -2144,8 +1957,6 @@ func TestVerificationAssembleMergesRelayVerdictAndRunRecordWithoutVerdictMetadat
 		"-batch", batchPath,
 		"-relay-verdict", batchID + "=" + conflictingVerdictPath,
 		"-run-record", runRecordPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", filepath.Join(dir, "manifest-verdict-conflict.json"),
@@ -2166,11 +1977,9 @@ func TestVerificationAssembleRunRelayRoundTripPasses(t *testing.T) {
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
 	manifestOut := filepath.Join(dir, "manifest-success.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility-success.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities-success.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-success.json")
 	artifactPath := writeCLIReviewedArtifact(t, dir)
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight-success.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-success.json", stateDir, bundle)
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
@@ -2188,10 +1997,8 @@ func TestVerificationAssembleRunRelayRoundTripPasses(t *testing.T) {
 		t.Fatalf("verification plan: %v", err)
 	}
 
-	runner := &assembleSuccessRelayRunner{t: t}
-	previousRunner := verificationAssembleRelayRunner
-	verificationAssembleRelayRunner = runner
-	defer func() { verificationAssembleRelayRunner = previousRunner }()
+	relayPath := filepath.Join(dir, "fake-relay")
+	buildCLIFakeRelay(t, relayPath)
 
 	selectedContract := writeCLISelectedContractArtifact(t, dir, "contract-success.json")
 	if err := route([]string{
@@ -2199,20 +2006,15 @@ func TestVerificationAssembleRunRelayRoundTripPasses(t *testing.T) {
 		"-run-relay",
 		"-plan", filepath.Join(stateDir, "verification-plan.json"),
 		"-state-dir", stateDir,
-		"-relay", "fake-relay",
+		"-relay", relayPath,
 		"-backend", "codex",
 		"-charter-freeze", frozenPath,
 		"-artifact", artifactPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", manifestOut,
 	}); err != nil {
 		t.Fatalf("verification assemble -run-relay: %v", err)
-	}
-	if runner.runCalls != 1 || runner.exportCalls != 1 || runner.verifyCalls != 1 {
-		t.Fatalf("runner calls = run %d export %d verify %d", runner.runCalls, runner.exportCalls, runner.verifyCalls)
 	}
 	data, err := os.ReadFile(manifestOut)
 	if err != nil {
@@ -2230,82 +2032,6 @@ func TestVerificationAssembleRunRelayRoundTripPasses(t *testing.T) {
 	}
 }
 
-func TestVerificationAssembleOutputContainsUnverifiedRelationships(t *testing.T) {
-	dir := t.TempDir()
-	frozen := validCLIFrozenCharter(t)
-	frozenPath := filepath.Join(dir, "frozen.json")
-	roleOutputPath := filepath.Join(dir, "role-output.json")
-	stateDir := filepath.Join(dir, "state")
-	manifestOut := filepath.Join(dir, "manifest-unverified.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility-unverified.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities-unverified.json")
-	bundle := writeCLIArtifact(t, dir, "bundle-unverified.json")
-	artifactPath := writeCLIReviewedArtifact(t, dir)
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight-unverified.json", stateDir, compatibility, capabilities, bundle)
-	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
-		t.Fatal(err)
-	}
-	if err := internalreview.WriteCanonical(roleOutputPath, validCLIRoleOutput(frozen)); err != nil {
-		t.Fatal(err)
-	}
-	if err := route([]string{
-		"verification", "plan",
-		"-charter-freeze", frozenPath,
-		"-preflight", preflightPath,
-		"-role-output", roleOutputPath,
-		"-state-dir", stateDir,
-		"-out", filepath.Join(dir, "plan-unverified.json"),
-	}); err != nil {
-		t.Fatalf("verification plan: %v", err)
-	}
-
-	runner := &assembleSuccessRelayRunner{t: t, supplementaryUnverified: true}
-	previousRunner := verificationAssembleRelayRunner
-	verificationAssembleRelayRunner = runner
-	defer func() { verificationAssembleRelayRunner = previousRunner }()
-
-	selectedContract := writeCLISelectedContractArtifact(t, dir, "contract-unverified.json")
-	if err := route([]string{
-		"verification", "assemble",
-		"-run-relay",
-		"-plan", filepath.Join(stateDir, "verification-plan.json"),
-		"-state-dir", stateDir,
-		"-relay", "fake-relay",
-		"-backend", "codex",
-		"-charter-freeze", frozenPath,
-		"-artifact", artifactPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
-		"-integration-bundle", bundle,
-		"-selected-contract", selectedContract,
-		"-out", manifestOut,
-	}); err != nil {
-		t.Fatalf("verification assemble -run-relay: %v", err)
-	}
-	data, err := os.ReadFile(manifestOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := planning.ReadAssembleResultBytes(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Manifest.Batches) != 1 || result.Manifest.Batches[0].Status != contracts.RecordStatusValid {
-		t.Fatalf("manifest batches = %#v, want valid relay verification", result.Manifest.Batches)
-	}
-	found := false
-	for _, relationship := range result.UnverifiedRelationships {
-		if relationship.Classification == "supplementary" &&
-			relationship.Code == "facilitator_ledger_content_collision" &&
-			relationship.Relationship == "trace_only_facilitator_ledger_prompt_projection" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("unverified relationships = %#v, want supplementary collision relationship", result.UnverifiedRelationships)
-	}
-}
-
 func TestVerificationAssembleWritesManifestBeforeBatchError(t *testing.T) {
 	dir := t.TempDir()
 	frozen := validCLIFrozenCharter(t)
@@ -2313,10 +2039,8 @@ func TestVerificationAssembleWritesManifestBeforeBatchError(t *testing.T) {
 	roleOutputPath := filepath.Join(dir, "role-output.json")
 	stateDir := filepath.Join(dir, "state")
 	manifestOut := filepath.Join(dir, "manifest-error.json")
-	compatibility := writeCLIArtifact(t, dir, "compatibility-error.json")
-	capabilities := writeCLIArtifact(t, dir, "capabilities-error.json")
 	bundle := writeCLIArtifact(t, dir, "bundle-error.json")
-	preflightPath := writeCLIPreflightResult(t, dir, "preflight-error.json", stateDir, compatibility, capabilities, bundle)
+	preflightPath := writeCLIPreflightResult(t, dir, "preflight-error.json", stateDir, bundle)
 	if err := internalreview.WriteCanonical(frozenPath, frozen); err != nil {
 		t.Fatal(err)
 	}
@@ -2353,8 +2077,6 @@ func TestVerificationAssembleWritesManifestBeforeBatchError(t *testing.T) {
 		"verification", "assemble",
 		"-plan", filepath.Join(stateDir, "verification-plan.json"),
 		"-batch", tamperedBatchPath,
-		"-compatibility-manifest", compatibility,
-		"-relay-capabilities", capabilities,
 		"-integration-bundle", bundle,
 		"-selected-contract", selectedContract,
 		"-out", manifestOut,
@@ -2428,501 +2150,6 @@ func TestSelectedContractRefsRejectsTamperedSelectedContractEnvelope(t *testing.
 	}
 }
 
-type assembleFakeRelayRunner struct {
-	t     *testing.T
-	calls int
-}
-
-func (runner *assembleFakeRelayRunner) Run(ctx context.Context, executable string, args ...string) relayclient.CommandResult {
-	runner.t.Helper()
-	if executable != "fake-relay" {
-		runner.t.Fatalf("executable = %s, want fake-relay", executable)
-	}
-	if len(args) == 0 || args[0] != "run" {
-		runner.t.Fatalf("unexpected relay command: %v", args)
-	}
-	runner.calls++
-	return relayclient.CommandResult{
-		Stdout:   []byte(`{"error":"launch failed"}`),
-		Stderr:   []byte("launch failed"),
-		ExitCode: 1,
-		Err:      errors.New("exit status 1"),
-	}
-}
-
-type assembleSuccessRelayRunner struct {
-	t                       *testing.T
-	runCalls                int
-	exportCalls             int
-	verifyCalls             int
-	sessionDir              string
-	batch                   contracts.VerificationBatchDocument
-	batchBytes              []byte
-	charterBytes            []byte
-	artifactBytes           []byte
-	bundleDigest            string
-	supplementaryUnverified bool
-}
-
-func (runner *assembleSuccessRelayRunner) Run(ctx context.Context, executable string, args ...string) relayclient.CommandResult {
-	runner.t.Helper()
-	if executable != "fake-relay" {
-		runner.t.Fatalf("executable = %s, want fake-relay", executable)
-	}
-	if len(args) == 0 {
-		runner.t.Fatalf("missing relay command")
-	}
-	switch args[0] {
-	case "run":
-		runner.runCalls++
-		binding := testArgAfter(args, "--input", "findings=")
-		if binding == "" {
-			runner.t.Fatalf("run args missing findings input: %v", args)
-		}
-		charterBinding := testArgAfter(args, "--input", "charter=")
-		if charterBinding == "" {
-			runner.t.Fatalf("run args missing charter input: %v", args)
-		}
-		artifactBinding := testArgAfter(args, "--input", "artifact=")
-		if artifactBinding == "" {
-			runner.t.Fatalf("run args missing artifact input: %v", args)
-		}
-		bundlePath := testArgAfter(args, "--integration-bundle", "")
-		if bundlePath == "" {
-			runner.t.Fatalf("run args missing integration bundle: %v", args)
-		}
-		bundleBytes, err := os.ReadFile(bundlePath)
-		if err != nil {
-			runner.t.Fatal(err)
-		}
-		bundlePayload, err := strictjson.DecodeAnyBytes(bundleBytes, strictjson.DefaultMaxBytes)
-		if err != nil {
-			runner.t.Fatal(err)
-		}
-		bundleDigest, err := digest.SemanticJSON(bundlePayload)
-		if err != nil {
-			runner.t.Fatal(err)
-		}
-		charterBytes, err := os.ReadFile(charterBinding)
-		if err != nil {
-			runner.t.Fatal(err)
-		}
-		artifactBytes, err := os.ReadFile(artifactBinding)
-		if err != nil {
-			runner.t.Fatal(err)
-		}
-		data, err := os.ReadFile(binding)
-		if err != nil {
-			runner.t.Fatal(err)
-		}
-		batch, err := contracts.ReadVerificationBatchBytes(data)
-		if err != nil {
-			runner.t.Fatal(err)
-		}
-		runner.batch = batch
-		runner.batchBytes = append([]byte(nil), data...)
-		runner.charterBytes = append([]byte(nil), charterBytes...)
-		runner.artifactBytes = append([]byte(nil), artifactBytes...)
-		runner.bundleDigest = bundleDigest
-		runner.sessionDir = filepath.Join(runner.t.TempDir(), "relay-session")
-		return relayclient.CommandResult{Stdout: []byte(`{"session_dir":"` + runner.sessionDir + `"}`)}
-	case "export":
-		runner.exportCalls++
-		output := testArgAfter(args, "--output", "")
-		if output == "" {
-			runner.t.Fatalf("export args missing output: %v", args)
-		}
-		manifestDigest := writeCLIPortableExport(runner.t, output, runner.batch, runner.batchBytes, runner.charterBytes, runner.artifactBytes, runner.bundleDigest)
-		if runner.supplementaryUnverified {
-			manifestDigest = addCLISupplementaryUnverifiedRelationship(runner.t, output)
-		}
-		return relayclient.CommandResult{Stdout: []byte(`{"manifest_digest":"` + manifestDigest + `"}`)}
-	case "verify-export":
-		runner.verifyCalls++
-		return relayclient.CommandResult{Stdout: []byte(`{"status":"valid"}`)}
-	default:
-		runner.t.Fatalf("unexpected relay command: %v", args)
-		return relayclient.CommandResult{ExitCode: 1, Err: errors.New("unexpected command")}
-	}
-}
-
-type cliPortablePayload struct {
-	entry map[string]any
-	body  []byte
-}
-
-func writeCLIPortableExport(t *testing.T, dir string, batch contracts.VerificationBatchDocument, batchBytes []byte, charterBytes []byte, artifactBytes []byte, bundleDigest string) string {
-	t.Helper()
-	if len(batchBytes) == 0 {
-		t.Fatal("batch bytes are required")
-	}
-	if len(charterBytes) == 0 {
-		t.Fatal("charter bytes are required")
-	}
-	if len(artifactBytes) == 0 {
-		t.Fatal("artifact bytes are required")
-	}
-	if bundleDigest == "" {
-		t.Fatal("bundle digest is required")
-	}
-	verdicts := contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.BatchID,
-		Verdicts: []contracts.WitnessVerdict{{
-			FindingID:      batch.Findings[0].FindingID,
-			WitnessDigest:  batch.Findings[0].WitnessDigest,
-			Verdict:        contracts.VerdictSurvived,
-			VerdictClass:   nil,
-			CounterWitness: nil,
-		}},
-	}
-	contractID := "witnessed-review/witness-falsification-v2"
-	contract := cliContractBody(contractID)
-	contractDigest, err := digest.SemanticJSON(contract)
-	if err != nil {
-		t.Fatal(err)
-	}
-	integrationContract := map[string]any{
-		"kind":            "integration_contract",
-		"schema_version":  2,
-		"digest_profile":  digest.Profile,
-		"contract_id":     contractID,
-		"contract_digest": contractDigest,
-		"contract":        contract,
-	}
-	integrationContractDigest, err := digest.StorageEnvelope("integration_contract", integrationContract)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payloads := []cliPortablePayload{
-		cliPortablePayloadFor(t, "root_session", "session", map[string]any{
-			"execution_kind":  "recipe",
-			"kind":            "portable_root_session",
-			"provider_retry":  "forbid",
-			"result_source":   "reducer",
-			"status":          "completed",
-			"terminal_status": "completed",
-		}, nil),
-		cliPortablePayloadFor(t, "participant_transcript", "transcript", []any{
-			map[string]any{"participant_turn": 1, "actor": "presenter", "content": "turn one", "provider_result_ref": cliPortableRef("artifact-000001", "provider_result:000001")},
-			map[string]any{"participant_turn": 2, "actor": "falsifier", "content": "turn two", "provider_result_ref": cliPortableRef("artifact-000007", "provider_result:000003")},
-			map[string]any{"participant_turn": 3, "actor": "presenter", "content": "turn three", "provider_result_ref": cliPortableRef("artifact-000013", "provider_result:000005")},
-			map[string]any{"participant_turn": 4, "actor": "falsifier", "content": "turn four", "provider_result_ref": cliPortableRef("artifact-000019", "provider_result:000007")},
-		}, nil),
-		cliPortablePayloadFor(t, "diagnostics", "diagnostics", map[string]any{"execution_kind": "recipe", "status": "completed"}, nil),
-		cliPortablePayloadFor(t, "root_recipe_plan", "root-plan", map[string]any{
-			"kind":                        "root_recipe_plan",
-			"schema_version":              2,
-			"digest_profile":              digest.Profile,
-			"recipe_id":                   "witness-falsify-v2-codex",
-			"provider_retry":              "forbid",
-			"result_source":               "reducer",
-			"participant_turns":           4,
-			"integration_bundle_digest":   bundleDigest,
-			"integration_contract_id":     contractID,
-			"integration_contract_digest": contractDigest,
-			"integration_contract_ref":    cliPortableRefWithDigest("integration-contract", "integration_contract:selected", integrationContractDigest),
-			"prompt_context":              map[string]any{"participant_transcript": "complete", "facilitator_ledger": "trace_only"},
-		}, cliSourceRef("root_recipe_plan:selected")),
-		cliPortablePayloadFor(t, "integration_contract", "integration-contract", integrationContract, map[string]any{"id": "integration_contract:selected", "digest": integrationContractDigest}),
-		cliPortablePayloadFor(t, "named_input_content", "named-input-content-1", cliNamedInputContentPayload("charter", 1, charterBytes), cliSourceRef("named_input_content:000001")),
-		cliPortablePayloadFor(t, "named_input_content", "named-input-content-2", cliNamedInputContentPayload("findings", 2, batchBytes), cliSourceRef("named_input_content:000002")),
-		cliPortablePayloadFor(t, "named_input_content", "named-input-content-3", cliNamedInputContentPayload("artifact", 3, artifactBytes), cliSourceRef("named_input_content:000003")),
-		cliPortablePayloadFor(t, "named_input_manifest", "named-input-manifest", map[string]any{
-			"kind":           "named_input_manifest",
-			"schema_version": 2,
-			"digest_profile": digest.Profile,
-			"contract_id":    contractID,
-			"input_count":    3,
-			"inputs": []any{
-				cliNamedInputEntry("charter", 1, "named-input-content-1", "named_input_content:000001", len(charterBytes), digest.RawBytes(charterBytes)),
-				cliNamedInputEntry("findings", 2, "named-input-content-2", "named_input_content:000002", len(batchBytes), digest.RawBytes(batchBytes)),
-				cliNamedInputEntry("artifact", 3, "named-input-content-3", "named_input_content:000003", len(artifactBytes), digest.RawBytes(artifactBytes)),
-			},
-		}, cliSourceRef("named_input_manifest:selected")),
-		cliPortablePayloadFor(t, "canonical_result", "canonical-result", map[string]any{
-			"kind":           "canonical_result",
-			"schema_version": 2,
-			"digest_profile": digest.Profile,
-			"transport":      "json",
-			"canonical_json": string(mustCanonicalBytes(t, verdicts)),
-			"value":          verdicts,
-		}, cliSourceRef("canonical_result:selected")),
-		cliPortablePayloadFor(t, "result_validation", "result-validation", map[string]any{
-			"kind":                 "result_validation",
-			"schema_version":       2,
-			"digest_profile":       digest.Profile,
-			"status":               "validated",
-			"canonical_result_ref": cliPortableRef("canonical-result", "canonical_result:selected"),
-		}, cliSourceRef("result_validation:selected")),
-	}
-	for _, spec := range []struct {
-		resultID     string
-		invocationID string
-		promptID     string
-		source       string
-		phase        string
-		ordinal      int
-	}{
-		{resultID: "artifact-000001", invocationID: "artifact-000002", promptID: "artifact-000003", source: "000001", phase: "participant", ordinal: 1},
-		{resultID: "artifact-000004", invocationID: "artifact-000005", promptID: "artifact-000006", source: "000002", phase: "facilitator", ordinal: 1},
-		{resultID: "artifact-000007", invocationID: "artifact-000008", promptID: "artifact-000009", source: "000003", phase: "participant", ordinal: 2},
-		{resultID: "artifact-000010", invocationID: "artifact-000011", promptID: "artifact-000012", source: "000004", phase: "facilitator", ordinal: 2},
-		{resultID: "artifact-000013", invocationID: "artifact-000014", promptID: "artifact-000015", source: "000005", phase: "participant", ordinal: 3},
-		{resultID: "artifact-000016", invocationID: "artifact-000017", promptID: "artifact-000018", source: "000006", phase: "facilitator", ordinal: 3},
-		{resultID: "artifact-000019", invocationID: "artifact-000020", promptID: "artifact-000021", source: "000007", phase: "participant", ordinal: 4},
-		{resultID: "artifact-000022", invocationID: "artifact-000023", promptID: "artifact-000024", source: "000008", phase: "facilitator", ordinal: 4},
-		{resultID: "artifact-000025", invocationID: "artifact-000026", promptID: "artifact-000027", source: "000009", phase: "reducer"},
-	} {
-		prompt := cliRenderedPromptPayload(spec.phase + " prompt " + spec.source)
-		rawDigest := prompt["rendered_prompt"].(map[string]any)["raw_digest"].(string)
-		result, invocation := cliProviderPayloads(spec.resultID, spec.promptID, spec.source, spec.phase, spec.ordinal, rawDigest)
-		payloads = append(payloads,
-			cliPortablePayloadFor(t, "provider_result", spec.resultID, result, cliSourceRef("provider_result:"+spec.source)),
-			cliPortablePayloadFor(t, "provider_invocation", spec.invocationID, invocation, cliSourceRef("provider_invocation:"+spec.source)),
-			cliPortablePayloadFor(t, "rendered_prompt", spec.promptID, prompt, cliSourceRef("rendered_prompt:"+spec.source)),
-		)
-	}
-	sort.Slice(payloads, func(i, j int) bool {
-		return payloads[i].entry["path"].(string) < payloads[j].entry["path"].(string)
-	})
-	inventory := make([]any, 0, len(payloads))
-	for _, payload := range payloads {
-		writeCLIPortableFile(t, dir, payload.entry["path"].(string), payload.body)
-		inventory = append(inventory, payload.entry)
-	}
-	inventoryDigest, err := digest.SemanticJSON(inventory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest := map[string]any{
-		"schema_version":      "relay-root-portable-export-v2",
-		"convo_relay_version": "v1.4.0",
-		"digest_profile":      digest.Profile,
-		"terminal_status":     "completed",
-		"stop_reason":         nil,
-		"session_payload":     "payloads/root_session/session.json",
-		"transcript_payload":  "payloads/participant_transcript/transcript.json",
-		"diagnostics_payload": "payloads/diagnostics/diagnostics.json",
-		"payload_inventory":   inventory,
-		"inventory_digest":    inventoryDigest,
-	}
-	manifestDigest, err := digest.SemanticJSON(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest["manifest_digest"] = manifestDigest
-	writeCLIPortableFile(t, dir, "manifest.json", mustCanonicalBytes(t, manifest))
-	return manifestDigest
-}
-
-func addCLISupplementaryUnverifiedRelationship(t *testing.T, dir string) string {
-	t.Helper()
-	const marker = "SHARED_CONTEXT_MARKER"
-	mutateCLIPortablePayload(t, dir, "participant_transcript", "transcript", func(value any) any {
-		transcript := value.([]any)
-		entry := transcript[0].(map[string]any)
-		entry["content"] = entry["content"].(string) + " " + marker
-		entry["ledger"] = map[string]any{
-			"settled":   []any{},
-			"contested": []any{marker},
-			"withdrawn": []any{},
-		}
-		return transcript
-	})
-	promptDigest := ""
-	mutateCLIPortablePayload(t, dir, "rendered_prompt", "artifact-000003", func(any) any {
-		prompt := cliRenderedPromptPayload("participant prompt includes " + marker)
-		promptDigest = prompt["rendered_prompt"].(map[string]any)["raw_digest"].(string)
-		return prompt
-	})
-	mutateCLIPortablePayload(t, dir, "provider_result", "artifact-000001", func(value any) any {
-		result := value.(map[string]any)
-		result["invocation"].(map[string]any)["rendered_prompt_digest"] = promptDigest
-		return result
-	})
-	return mutateCLIPortablePayload(t, dir, "provider_invocation", "artifact-000002", func(value any) any {
-		invocation := value.(map[string]any)
-		invocation["invocation"].(map[string]any)["rendered_prompt_digest"] = promptDigest
-		return invocation
-	})
-}
-
-func mutateCLIPortablePayload(t *testing.T, dir string, kind string, id string, mutate func(any) any) string {
-	t.Helper()
-	manifestPath := filepath.Join(dir, "manifest.json")
-	manifestBytes, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifestValue, err := strictjson.DecodeAnyBytes(manifestBytes, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest := manifestValue.(map[string]any)
-	inventory := manifest["payload_inventory"].([]any)
-	var entry map[string]any
-	for _, raw := range inventory {
-		candidate := raw.(map[string]any)
-		if candidate["kind"] == kind && candidate["portable_id"] == id {
-			entry = candidate
-			break
-		}
-	}
-	if entry == nil {
-		t.Fatalf("payload %s/%s not found", kind, id)
-	}
-	payloadPath := filepath.Join(dir, filepath.FromSlash(entry["path"].(string)))
-	payloadBytes, err := os.ReadFile(payloadPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payloadValue, err := strictjson.DecodeAnyBytes(payloadBytes, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	updatedBytes := mustCanonicalBytes(t, mutate(payloadValue))
-	if err := os.WriteFile(payloadPath, updatedBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	entry["size_bytes"] = len(updatedBytes)
-	entry["digest"] = digest.RawBytes(updatedBytes)
-	inventoryDigest, err := digest.SemanticJSON(inventory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest["inventory_digest"] = inventoryDigest
-	delete(manifest, "manifest_digest")
-	manifestDigest, err := digest.SemanticJSON(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest["manifest_digest"] = manifestDigest
-	writeCLIPortableFile(t, dir, "manifest.json", mustCanonicalBytes(t, manifest))
-	return manifestDigest
-}
-
-func cliProviderPayloads(resultPortableID string, promptPortableID string, sourceOrdinal string, phase string, participantOrdinal int, promptDigest string) (map[string]any, map[string]any) {
-	invocationDraft := map[string]any{
-		"schema_version":            "relay-provider-invocation-v2",
-		"invocation_id":             phase + ":" + sourceOrdinal,
-		"phase":                     phase,
-		"actor":                     "Agent " + sourceOrdinal,
-		"participant_ordinal":       nil,
-		"reducer_fresh":             phase == "reducer",
-		"rendered_prompt_ref":       cliPortableRef(promptPortableID, "rendered_prompt:"+sourceOrdinal),
-		"rendered_prompt_digest":    promptDigest,
-		"backend":                   "codex",
-		"mapped_working_directory":  ".",
-		"runner_attempt":            1,
-		"provider_launch_attempted": true,
-		"provider_retry":            "forbid",
-		"started_at":                "2026-01-01T00:00:00Z",
-		"completed_at":              "2026-01-01T00:00:01Z",
-		"outcome":                   "completed",
-		"failure_stage":             nil,
-		"classification":            nil,
-		"provider_result_ref":       nil,
-	}
-	if participantOrdinal > 0 {
-		invocationDraft["participant_ordinal"] = participantOrdinal
-	}
-	resultPayload := map[string]any{
-		"kind":            "provider_result",
-		"schema_version":  2,
-		"digest_profile":  digest.Profile,
-		"invocation_id":   invocationDraft["invocation_id"],
-		"phase":           invocationDraft["phase"],
-		"actor":           invocationDraft["actor"],
-		"runner_attempt":  invocationDraft["runner_attempt"],
-		"provider_retry":  invocationDraft["provider_retry"],
-		"backend":         invocationDraft["backend"],
-		"started_at":      invocationDraft["started_at"],
-		"completed_at":    invocationDraft["completed_at"],
-		"outcome":         invocationDraft["outcome"],
-		"failure_stage":   invocationDraft["failure_stage"],
-		"classification":  invocationDraft["classification"],
-		"provider_result": map[string]any{"backend": "codex", "return_code": 0},
-		"invocation":      invocationDraft,
-	}
-	boundInvocation := cloneMap(invocationDraft)
-	boundInvocation["provider_result_ref"] = cliPortableRef(resultPortableID, "provider_result:"+sourceOrdinal)
-	return resultPayload, map[string]any{
-		"kind":           "provider_invocation",
-		"schema_version": 2,
-		"digest_profile": digest.Profile,
-		"invocation":     boundInvocation,
-	}
-}
-
-func cliPortablePayloadFor(t *testing.T, kind string, id string, value any, sourceRef map[string]any) cliPortablePayload {
-	t.Helper()
-	body := mustCanonicalBytes(t, value)
-	entry := map[string]any{
-		"kind":         kind,
-		"portable_id":  id,
-		"path":         filepath.ToSlash(filepath.Join("payloads", kind, id+".json")),
-		"media_type":   "application/json",
-		"size_bytes":   len(body),
-		"digest_class": digest.ClassRawBytes,
-		"digest":       digest.RawBytes(body),
-	}
-	if sourceRef != nil {
-		entry["source_artifact_id"] = sourceRef["id"]
-		entry["source_artifact_digest"] = sourceRef["digest"]
-	}
-	return cliPortablePayload{entry: entry, body: body}
-}
-
-func cliNamedInputContentPayload(name string, ordinal int, data []byte) map[string]any {
-	return map[string]any{
-		"kind":           "named_input_content",
-		"schema_version": 2,
-		"digest_profile": digest.Profile,
-		"ordinal":        ordinal,
-		"name":           name,
-		"name_ordinal":   1,
-		"encoding":       "base64",
-		"bytes_base64":   base64.StdEncoding.EncodeToString(data),
-		"size_bytes":     len(data),
-		"raw_digest":     digest.RawBytes(data),
-		"media_type":     "application/json",
-		"schema_status":  "unchecked",
-	}
-}
-
-func cliRenderedPromptPayload(text string) map[string]any {
-	data := []byte(text)
-	return map[string]any{
-		"kind":           "rendered_prompt",
-		"schema_version": 2,
-		"digest_profile": digest.Profile,
-		"rendered_prompt": map[string]any{
-			"schema_version": "relay-rendered-prompt-v1",
-			"media_type":     "text/plain; charset=utf-8",
-			"encoding":       "base64",
-			"bytes_base64":   base64.StdEncoding.EncodeToString(data),
-			"size_bytes":     len(data),
-			"raw_digest":     digest.RawBytes(data),
-		},
-	}
-}
-
-func cliNamedInputEntry(name string, ordinal int, portableID string, sourceID string, sizeBytes int, rawDigest string) map[string]any {
-	return map[string]any{
-		"ordinal":       ordinal,
-		"name":          name,
-		"name_ordinal":  1,
-		"source_path":   name + ".json",
-		"display_name":  name + ".json",
-		"size_bytes":    sizeBytes,
-		"raw_digest":    rawDigest,
-		"media_type":    "application/json",
-		"schema_status": "unchecked",
-		"content_ref":   cliPortableRef(portableID, sourceID),
-	}
-}
-
 func cliContractBody(contractID string) map[string]any {
 	return map[string]any{
 		"id": contractID,
@@ -2946,34 +2173,6 @@ func cliContractBody(contractID string) map[string]any {
 	}
 }
 
-func cliPortableRef(portableID string, sourceID string) map[string]any {
-	return cliPortableRefWithDigest(portableID, sourceID, cliSourceRef(sourceID)["digest"].(string))
-}
-
-func cliPortableRefWithDigest(portableID string, sourceID string, sourceDigest string) map[string]any {
-	return map[string]any{
-		"kind":                   "portable_payload_ref",
-		"portable_id":            portableID,
-		"source_artifact_id":     sourceID,
-		"source_artifact_digest": sourceDigest,
-	}
-}
-
-func cliSourceRef(id string) map[string]any {
-	return map[string]any{"id": id, "digest": digest.RawBytes([]byte(id))}
-}
-
-func writeCLIPortableFile(t *testing.T, root string, relative string, body []byte) {
-	t.Helper()
-	path := filepath.Join(root, filepath.FromSlash(relative))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func mustCanonicalBytes(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := contracts.CanonicalBytes(value)
@@ -2981,23 +2180,6 @@ func mustCanonicalBytes(t *testing.T, value any) []byte {
 		t.Fatal(err)
 	}
 	return data
-}
-
-func testArgAfter(args []string, key string, trimPrefix string) string {
-	for index := 0; index+1 < len(args); index++ {
-		if args[index] != key {
-			continue
-		}
-		value := args[index+1]
-		if trimPrefix != "" {
-			if len(value) <= len(trimPrefix) || value[:len(trimPrefix)] != trimPrefix {
-				continue
-			}
-			return value[len(trimPrefix):]
-		}
-		return value
-	}
-	return ""
 }
 
 func assertOutputPathConflict(t *testing.T, err error) {
@@ -3182,16 +2364,14 @@ func validCLIAdjudicationManifest(t *testing.T, frozen charter.FrozenCharter, ro
 		t.Fatal(err)
 	}
 	batchRef := artifactRef("verification-batch", "batch-1", digest.RawBytes([]byte("batch")))
-	exportRef := artifactRef("relay-root-portable-export", "batch-1", digest.RawBytes([]byte("export")))
+	exportRef := artifactRef("relay-bundle", "batch-1", digest.RawBytes([]byte("export")))
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV6,
-		PlanDigest:            digest.RawBytes([]byte("plan")),
-		CharterHash:           frozen.CharterHash,
-		ArtifactDigest:        roleOutput.ArtifactDigest,
-		CompatibilityManifest: artifactRef("compatibility-manifest", "compatibility", digest.RawBytes([]byte("compatibility"))),
-		RelayCapabilities:     artifactRef("relay-capabilities", "capabilities", digest.RawBytes([]byte("capabilities"))),
-		IntegrationBundle:     artifactRef("integration-bundle", "bundle", digest.RawBytes([]byte("bundle"))),
-		SelectedContracts:     []contracts.ArtifactRef{artifactRef("selected-contract", "contract", digest.RawBytes([]byte("contract")))},
+		SchemaVersion:     contracts.VerificationManifestV6,
+		PlanDigest:        digest.RawBytes([]byte("plan")),
+		CharterHash:       frozen.CharterHash,
+		ArtifactDigest:    roleOutput.ArtifactDigest,
+		IntegrationBundle: artifactRef("integration-bundle", "bundle", digest.RawBytes([]byte("bundle"))),
+		SelectedContracts: []contracts.ArtifactRef{artifactRef("selected-contract", "contract", digest.RawBytes([]byte("contract")))},
 		Batches: []contracts.VerificationManifestBatch{{
 			BatchID:               "batch-1",
 			Status:                contracts.RecordStatusValid,
@@ -3210,21 +2390,6 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	value := any(map[string]any{"name": name})
-	if strings.HasPrefix(name, "compatibility") {
-		compatibility := validCLICompatibility(t, name)
-		compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
-		if err != nil {
-			t.Fatal(err)
-		}
-		value = map[string]any{
-			"schema_version":  "witness-retained-artifact-v1",
-			"digest_profile":  digest.Profile,
-			"payload_digest":  compatibilityDigest,
-			"payload":         compatibility,
-			"retention_kind":  "compatibility-manifest",
-			"retention_scope": "test",
-		}
-	}
 	if strings.HasPrefix(name, "bundle") {
 		value = validCLIIntegrationBundle()
 	}
@@ -3234,43 +2399,17 @@ func writeCLIArtifact(t *testing.T, dir string, name string) string {
 	return path
 }
 
-func writeCLIStateDirAssembleArtifacts(t *testing.T, stateDir string) (string, string, string, string) {
+func writeCLIStateDirAssembleArtifacts(t *testing.T, stateDir string) (string, string) {
 	t.Helper()
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	capabilitiesPath := filepath.Join(stateDir, assembleStateDirRelayCapabilities)
-	if err := internalreview.WriteCanonical(capabilitiesPath, map[string]any{"name": assembleStateDirRelayCapabilities}); err != nil {
-		t.Fatal(err)
-	}
 	bundlePath := filepath.Join(stateDir, assembleStateDirIntegrationBundle)
-	if err := internalreview.WriteCanonical(bundlePath, map[string]any{"name": assembleStateDirIntegrationBundle}); err != nil {
+	if err := internalreview.WriteCanonical(bundlePath, validCLIIntegrationBundle()); err != nil {
 		t.Fatal(err)
 	}
-	compatibilityPath := writeCLICompatibilityArtifact(t, stateDir, assembleStateDirCompatibilityManifest, filepath.Base(capabilitiesPath), filepath.Base(bundlePath))
 	selectedContractPath := writeCLISelectedContractArtifact(t, stateDir, assembleStateDirSelectedContract)
-	return compatibilityPath, capabilitiesPath, bundlePath, selectedContractPath
-}
-
-func writeCLICompatibilityArtifact(t *testing.T, dir string, name string, capabilitiesName string, bundleName string) string {
-	t.Helper()
-	compatibility := validCLICompatibility(t, "compatibility.json")
-	compatibility.CapabilitiesDigest = cliWrittenCanonicalDigest(t, map[string]any{"name": capabilitiesName})
-	compatibility.IntegrationBundleDigest = cliSemanticDigest(t, map[string]any{"name": bundleName})
-	compatibilityDigest, err := contracts.RelayCompatibilityDigest(compatibility)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, name)
-	if err := internalreview.WriteCanonical(path, map[string]any{
-		"schema_version": "witness-retained-artifact-v1",
-		"digest_profile": digest.Profile,
-		"payload_digest": compatibilityDigest,
-		"payload":        compatibility,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return bundlePath, selectedContractPath
 }
 
 func writeCLIReviewedArtifact(t *testing.T, dir string) string {
@@ -3282,16 +2421,8 @@ func writeCLIReviewedArtifact(t *testing.T, dir string) string {
 	return path
 }
 
-func writeCLIPreflightResult(t *testing.T, dir string, name string, stateDir string, compatibilityPath string, capabilitiesPath string, bundlePath string) string {
+func writeCLIPreflightResult(t *testing.T, dir string, name string, stateDir string, bundlePath string) string {
 	t.Helper()
-	compatibilityRef, err := artifactRefForFile("compatibility-manifest", compatibilityPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	capabilitiesRef, err := artifactRefForFile("relay-capabilities", capabilitiesPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	bundleRef, err := artifactRefForFile("integration-bundle", bundlePath)
 	if err != nil {
 		t.Fatal(err)
@@ -3301,16 +2432,10 @@ func writeCLIPreflightResult(t *testing.T, dir string, name string, stateDir str
 		SchemaVersion: preflight.SchemaVersion,
 		OK:            true,
 		StateDir:      stateDir,
-		ArtifactDigests: map[string]string{
-			"compatibility-manifest.json": compatibilityRef.Digest,
-			"relay-capabilities.json":     capabilitiesRef.Digest,
-		},
-		CompileReportDigests: map[string]string{},
-		RecipePlanDigests:    map[string]string{},
+		RelayPresent:  true,
 		ContractDigests: map[string]string{
 			"integration_bundle": bundleRef.Digest,
 		},
-		BackendStrata:    map[string]string{},
 		SnapshotDigest:   digest.RawBytes([]byte("artifact")),
 		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
 	}
@@ -3318,63 +2443,6 @@ func writeCLIPreflightResult(t *testing.T, dir string, name string, stateDir str
 		t.Fatal(err)
 	}
 	return path
-}
-
-func validCLICompatibility(t *testing.T, compatibilityName string) contracts.RelayCompatibility {
-	t.Helper()
-	suffix := strings.TrimPrefix(compatibilityName, "compatibility")
-	capabilitiesName := "capabilities" + suffix
-	capabilities := map[string]bool{}
-	for _, requirement := range contracts.RequiredRelayCapabilityClosureV3 {
-		capabilities[requirement.Key] = true
-	}
-	selectedContracts := make([]contracts.ContractDigest, 0, 2)
-	for _, contractID := range []string{
-		"witnessed-review/witness-falsification-v2",
-		"witnessed-review/economy-equivalence-v2",
-	} {
-		contractDigest, err := digest.SemanticJSON(cliContractBody(contractID))
-		if err != nil {
-			t.Fatal(err)
-		}
-		selectedContracts = append(selectedContracts, contracts.ContractDigest{
-			ContractID: contractID,
-			Digest:     contractDigest,
-		})
-	}
-	recipePlans := make([]contracts.RecipePlanDigest, 0, len(contracts.RequiredWitnessRecipeContractsV2))
-	compileReports := make([]contracts.CompileReportRef, 0, len(contracts.RequiredWitnessRecipeContractsV2))
-	for _, requirement := range contracts.RequiredWitnessRecipeContractsV2 {
-		planDigest := digest.RawBytes([]byte("recipe:" + requirement.RecipeID))
-		reportDigest := digest.RawBytes([]byte("compile:" + requirement.RecipeID))
-		recipePlans = append(recipePlans, contracts.RecipePlanDigest{
-			RecipeID:   requirement.RecipeID,
-			ContractID: requirement.ContractID,
-			Digest:     planDigest,
-		})
-		compileReports = append(compileReports, contracts.CompileReportRef{
-			RecipeID: requirement.RecipeID,
-			Status:   "retained",
-			Ref:      artifactRef("compile-report", requirement.RecipeID, reportDigest),
-			Digest:   reportDigest,
-		})
-	}
-	return contracts.RelayCompatibility{
-		SchemaVersion:           contracts.RelayCompatibilityV3,
-		ConvoRelayVersion:       "v1.4.0",
-		DigestProfile:           digest.Profile,
-		Capabilities:            capabilities,
-		CapabilitiesDigest:      cliWrittenCanonicalDigest(t, map[string]any{"name": capabilitiesName}),
-		IntegrationBundleDigest: cliSemanticDigest(t, validCLIIntegrationBundle()),
-		SelectedContracts:       selectedContracts,
-		RecipePlans:             recipePlans,
-		CompileReports:          compileReports,
-		BackendStatus: []contracts.BackendStatus{
-			{Backend: "codex", Status: "available"},
-			{Backend: "claude", Status: "available"},
-		},
-		ConsumerIdentity: map[string]any{"kind": "test", "id": "consumer"},
-	}
 }
 
 func validCLIIntegrationBundle() map[string]any {
@@ -3428,22 +2496,6 @@ func validCLIIntegrationContract() map[string]any {
 	}
 }
 
-func cliSemanticDigest(t *testing.T, value any) string {
-	t.Helper()
-	digestValue, err := digest.SemanticJSON(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return digestValue
-}
-
-func cliWrittenCanonicalDigest(t *testing.T, value any) string {
-	t.Helper()
-	data := append([]byte(nil), mustCanonicalBytes(t, value)...)
-	data = append(data, '\n')
-	return digest.RawBytes(data)
-}
-
 func writeCLISelectedContractArtifact(t *testing.T, dir string, name string) string {
 	t.Helper()
 	contractEntries := map[string]any{}
@@ -3490,7 +2542,7 @@ func TestStateDirRetainedArtifactPathRejectsEscapingPaths(t *testing.T) {
 	if !stateDirContainedRelativePath("source-snapshot/manifest.json") {
 		t.Fatal("legitimate nested relative path rejected")
 	}
-	if !stateDirContainedRelativePath("compatibility-manifest.json") {
+	if !stateDirContainedRelativePath("integration-bundle.json") {
 		t.Fatal("legitimate flat relative path rejected")
 	}
 }

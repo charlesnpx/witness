@@ -87,25 +87,24 @@ func (err *ValidationError) Error() string {
 }
 
 type PlanDocument struct {
-	SchemaVersion                    string                      `json:"schema_version"`
-	DigestProfile                    string                      `json:"digest_profile"`
-	PlanDigest                       string                      `json:"plan_digest"`
-	CharterHash                      string                      `json:"charter_hash"`
-	CharterDigest                    string                      `json:"charter_digest,omitempty"`
-	ArtifactDigest                   string                      `json:"artifact_digest"`
-	ScopePolicy                      string                      `json:"scope_policy,omitempty"`
-	ChangeSurface                    *changesurface.Document     `json:"change_surface,omitempty"`
-	ChangeSurfaceDigest              string                      `json:"change_surface_digest,omitempty"`
-	BaselinePass                     *changesurface.BaselinePass `json:"baseline_pass,omitempty"`
-	PreflightSnapshotDigest          string                      `json:"preflight_snapshot_digest,omitempty"`
-	PreflightCompatibilityDigest     string                      `json:"preflight_compatibility_digest,omitempty"`
-	PreflightRelayCapabilitiesDigest string                      `json:"preflight_relay_capabilities_digest,omitempty"`
-	IntegrationBundleDigest          string                      `json:"integration_bundle_digest,omitempty"`
-	BatchSizeMaximum                 strictjson.Int              `json:"batch_size_maximum"`
-	Batches                          []BatchPlan                 `json:"batches"`
-	ExcludedFindings                 []ExcludedFinding           `json:"excluded_findings,omitempty"`
-	Diagnostics                      []diag.Diagnostic           `json:"diagnostics,omitempty"`
-	ConsumerIdentity                 map[string]any              `json:"consumer_identity"`
+	SchemaVersion           string                      `json:"schema_version"`
+	DigestProfile           string                      `json:"digest_profile"`
+	PlanDigest              string                      `json:"plan_digest"`
+	CharterHash             string                      `json:"charter_hash"`
+	CharterDigest           string                      `json:"charter_digest,omitempty"`
+	ArtifactDigest          string                      `json:"artifact_digest"`
+	ScopePolicy             string                      `json:"scope_policy,omitempty"`
+	ChangeSurface           *changesurface.Document     `json:"change_surface,omitempty"`
+	ChangeSurfaceDigest     string                      `json:"change_surface_digest,omitempty"`
+	BaselinePass            *changesurface.BaselinePass `json:"baseline_pass,omitempty"`
+	PreflightSnapshotDigest string                      `json:"preflight_snapshot_digest,omitempty"`
+	PreflightRelayPresent   bool                        `json:"preflight_relay_present"`
+	IntegrationBundleDigest string                      `json:"integration_bundle_digest,omitempty"`
+	BatchSizeMaximum        strictjson.Int              `json:"batch_size_maximum"`
+	Batches                 []BatchPlan                 `json:"batches"`
+	ExcludedFindings        []ExcludedFinding           `json:"excluded_findings,omitempty"`
+	Diagnostics             []diag.Diagnostic           `json:"diagnostics,omitempty"`
+	ConsumerIdentity        map[string]any              `json:"consumer_identity"`
 }
 
 type BatchPlan struct {
@@ -128,8 +127,7 @@ type BatchPlan struct {
 
 type PreflightBinding struct {
 	SnapshotDigest          string
-	CompatibilityDigest     string
-	RelayCapabilitiesDigest string
+	RelayPresent            bool
 	IntegrationBundleDigest string
 }
 
@@ -209,22 +207,21 @@ func Run(options Options) (*Result, error) {
 	}
 
 	plan := PlanDocument{
-		SchemaVersion:                    SchemaVersion,
-		DigestProfile:                    digest.Profile,
-		CharterHash:                      options.FrozenCharter.CharterHash,
-		CharterDigest:                    strings.TrimSpace(options.CharterDigest),
-		ArtifactDigest:                   preflightSnapshotDigest,
-		ScopePolicy:                      scopePolicy,
-		ChangeSurface:                    changeSurface,
-		ChangeSurfaceDigest:              changeSurfaceDigest,
-		BaselinePass:                     baselinePass,
-		PreflightSnapshotDigest:          preflightSnapshotDigest,
-		PreflightCompatibilityDigest:     strings.TrimSpace(options.Preflight.CompatibilityDigest),
-		PreflightRelayCapabilitiesDigest: strings.TrimSpace(options.Preflight.RelayCapabilitiesDigest),
-		IntegrationBundleDigest:          strings.TrimSpace(options.Preflight.IntegrationBundleDigest),
-		BatchSizeMaximum:                 MaxBatchFindings,
-		Batches:                          make([]BatchPlan, 0),
-		ConsumerIdentity:                 consumer,
+		SchemaVersion:           SchemaVersion,
+		DigestProfile:           digest.Profile,
+		CharterHash:             options.FrozenCharter.CharterHash,
+		CharterDigest:           strings.TrimSpace(options.CharterDigest),
+		ArtifactDigest:          preflightSnapshotDigest,
+		ScopePolicy:             scopePolicy,
+		ChangeSurface:           changeSurface,
+		ChangeSurfaceDigest:     changeSurfaceDigest,
+		BaselinePass:            baselinePass,
+		PreflightSnapshotDigest: preflightSnapshotDigest,
+		PreflightRelayPresent:   options.Preflight.RelayPresent,
+		IntegrationBundleDigest: strings.TrimSpace(options.Preflight.IntegrationBundleDigest),
+		BatchSizeMaximum:        MaxBatchFindings,
+		Batches:                 make([]BatchPlan, 0),
+		ConsumerIdentity:        consumer,
 	}
 
 	roleDigests := make([]string, len(options.RoleOutputs))

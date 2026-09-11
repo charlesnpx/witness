@@ -1230,16 +1230,14 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 		t.Fatal(err)
 	}
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
-	exportRef := testArtifactRef("relay-root-portable-export", "batch-1", "export")
+	exportRef := testArtifactRef("relay-bundle", "batch-1", "export")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV6,
-		PlanDigest:            testDigest("plan"),
-		CharterHash:           frozen.CharterHash,
-		ArtifactDigest:        artifactDigest,
-		CompatibilityManifest: testArtifactRef("compatibility-manifest", "compatibility", "compatibility"),
-		RelayCapabilities:     testArtifactRef("relay-capabilities", "capabilities", "capabilities"),
-		IntegrationBundle:     testArtifactRef("integration-bundle", "bundle", "bundle"),
-		SelectedContracts:     []contracts.ArtifactRef{testArtifactRef("selected-contract", "contract", "contract")},
+		SchemaVersion:     contracts.VerificationManifestV6,
+		PlanDigest:        testDigest("plan"),
+		CharterHash:       frozen.CharterHash,
+		ArtifactDigest:    artifactDigest,
+		IntegrationBundle: testArtifactRef("integration-bundle", "bundle", "bundle"),
+		SelectedContracts: []contracts.ArtifactRef{testArtifactRef("selected-contract", "contract", "contract")},
 		Batches: []contracts.VerificationManifestBatch{{
 			BatchID:               "batch-1",
 			Status:                contracts.RecordStatusValid,
@@ -1258,14 +1256,12 @@ func manifestWithVerdicts(t *testing.T, frozen charter.FrozenCharter, artifactDi
 func manifestWithDuplicateRelayBatches(t *testing.T, frozen charter.FrozenCharter, artifactDigest string, finding contracts.Finding) contracts.VerificationManifest {
 	t.Helper()
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV6,
-		PlanDigest:            testDigest("plan"),
-		CharterHash:           frozen.CharterHash,
-		ArtifactDigest:        artifactDigest,
-		CompatibilityManifest: testArtifactRef("compatibility-manifest", "compatibility", "compatibility"),
-		RelayCapabilities:     testArtifactRef("relay-capabilities", "capabilities", "capabilities"),
-		IntegrationBundle:     testArtifactRef("integration-bundle", "bundle", "bundle"),
-		SelectedContracts:     []contracts.ArtifactRef{testArtifactRef("selected-contract", "contract", "contract")},
+		SchemaVersion:     contracts.VerificationManifestV6,
+		PlanDigest:        testDigest("plan"),
+		CharterHash:       frozen.CharterHash,
+		ArtifactDigest:    artifactDigest,
+		IntegrationBundle: testArtifactRef("integration-bundle", "bundle", "bundle"),
+		SelectedContracts: []contracts.ArtifactRef{testArtifactRef("selected-contract", "contract", "contract")},
 		Batches: []contracts.VerificationManifestBatch{
 			manifestBatchWithVerdicts(t, "batch-b", []contracts.WitnessVerdict{survivedVerdict(t, finding)}),
 			manifestBatchWithVerdicts(t, "batch-a", []contracts.WitnessVerdict{counterVerdict(t, finding, contracts.VerdictBroken)}),
@@ -1304,7 +1300,7 @@ func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contract
 		t.Fatal(err)
 	}
 	batchRef := testArtifactRef("verification-batch", batchID, "batch-"+batchID)
-	exportRef := testArtifactRef("relay-root-portable-export", batchID, "export-"+batchID)
+	exportRef := testArtifactRef("relay-bundle", batchID, "export-"+batchID)
 	return contracts.VerificationManifestBatch{
 		BatchID:               batchID,
 		Status:                contracts.RecordStatusValid,
@@ -1320,14 +1316,12 @@ func manifestBatchWithVerdicts(t *testing.T, batchID string, verdicts []contract
 func manifestWithRelayStatus(frozen charter.FrozenCharter, artifactDigest string, status string, failureReason string) contracts.VerificationManifest {
 	batchRef := testArtifactRef("verification-batch", "batch-1", "batch")
 	return contracts.VerificationManifest{
-		SchemaVersion:         contracts.VerificationManifestV6,
-		PlanDigest:            testDigest("plan"),
-		CharterHash:           frozen.CharterHash,
-		ArtifactDigest:        artifactDigest,
-		CompatibilityManifest: testArtifactRef("compatibility-manifest", "compatibility", "compatibility"),
-		RelayCapabilities:     testArtifactRef("relay-capabilities", "capabilities", "capabilities"),
-		IntegrationBundle:     testArtifactRef("integration-bundle", "bundle", "bundle"),
-		SelectedContracts:     []contracts.ArtifactRef{testArtifactRef("selected-contract", "contract", "contract")},
+		SchemaVersion:     contracts.VerificationManifestV6,
+		PlanDigest:        testDigest("plan"),
+		CharterHash:       frozen.CharterHash,
+		ArtifactDigest:    artifactDigest,
+		IntegrationBundle: testArtifactRef("integration-bundle", "bundle", "bundle"),
+		SelectedContracts: []contracts.ArtifactRef{testArtifactRef("selected-contract", "contract", "contract")},
 		Batches: []contracts.VerificationManifestBatch{{
 			BatchID:       "batch-1",
 			Status:        status,

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,39 +9,29 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
+	"github.com/charlesnpx/convo-relay/v2/plan"
+	"github.com/charlesnpx/convo-relay/v2/result"
 	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/digest"
+	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/charlesnpx/witness/internal/contracts"
 )
 
 const (
-	convoRelayVersion = "v1.4.0"
-
-	contractFalsification = "witnessed-review/witness-falsification-v2"
-	contractEconomy       = "witnessed-review/economy-equivalence-v2"
+	convoRelayVersion = "v2.0.1-fake"
+	completedStatus   = "completed"
+	validatedStatus   = "validated"
 )
 
-var recipeContracts = map[string]string{
-	"witness-falsify-v2":            contractFalsification,
-	"witness-falsify-v2-codex":      contractFalsification,
-	"witness-falsify-v2-claude":     contractFalsification,
-	"economy-equivalence-v2":        contractEconomy,
-	"economy-equivalence-v2-codex":  contractEconomy,
-	"economy-equivalence-v2-claude": contractEconomy,
-}
-
 type sessionState struct {
-	RecipeID              string            `json:"recipe_id"`
-	IntegrationBundlePath string            `json:"integration_bundle_path"`
-	Inputs                map[string]string `json:"inputs"`
+	Plan   plan.Plan     `json:"plan"`
+	Result result.Result `json:"result"`
 }
 
 type portablePayload struct {
-	Kind         string
-	PortableID   string
-	Value        any
-	SourceID     string
-	SourceDigest string
+	Entry bundle.InventoryEntry
+	Body  []byte
 }
 
 func main() {
@@ -63,641 +52,375 @@ func run(args []string) error {
 		return errors.New("missing fake relay command")
 	}
 	switch args[0] {
-	case "capabilities":
-		return writeJSON(os.Stdout, capabilitiesDocument())
-	case "recipes":
-		if len(args) >= 2 && args[1] == "list" {
-			return writeJSON(os.Stdout, recipesListDocument())
-		}
-	case "backends":
-		if len(args) >= 2 && args[1] == "status" {
-			return writeJSON(os.Stdout, backendStatusDocument())
-		}
-	case "compile-recipe":
-		return compileRecipe(args[1:])
 	case "run":
-		return runRecipe(args[1:])
+		return runPlan(args[1:])
 	case "export":
-		return exportPortable(args[1:])
-	case "verify-export":
-		return verifyExport(args[1:])
-	}
-	return fmt.Errorf("unsupported fake relay command %q", args[0])
-}
-
-func capabilitiesDocument() map[string]any {
-	return map[string]any{
-		"schema_version":      "relay-capabilities-v1",
-		"convo_relay_version": convoRelayVersion,
-		"build_platform": map[string]any{
-			"goarch": "test",
-			"goos":   "test",
-		},
-		"contracts": map[string]any{
-			"execution_workspace":           []any{1, 2},
-			"integration_bundle":            []any{"relay-integration-bundle-v2"},
-			"recipe":                        []any{2},
-			"root_artifact":                 []any{2},
-			"root_recipe_plan":              []any{2},
-			"root_session_result":           []any{2},
-			"selected_integration_contract": []any{2},
-		},
-		"digest_profile":            []any{digest.Profile},
-		"isolation_report":          []any{"relay-workspace-isolation-v1"},
-		"portable_export":           []any{"relay-root-portable-export-v2"},
-		"prompt_context_projection": []any{"relay-prompt-context-v1"},
-		"prompt_policy":             []any{"prompt-policy/v2"},
-		"provider_invocation":       []any{"relay-provider-invocation-v2"},
-		"provider_retry_policy":     []any{"relay-provider-retry-policy-v1"},
-		"rendered_prompt":           []any{"relay-rendered-prompt-v1"},
-		"workspace_mechanisms":      []any{"inherited", "detached_writable_git_worktree"},
+		if len(args) < 2 || args[1] != "create" {
+			return fmt.Errorf("unsupported fake relay export command %q", strings.Join(args[1:], " "))
+		}
+		return exportCreate(args[2:])
+	default:
+		return fmt.Errorf("unsupported fake relay command %q", args[0])
 	}
 }
 
-func recipesListDocument() map[string]any {
-	ids := sortedRecipeIDs()
-	recipes := make([]any, 0, len(ids))
-	for _, id := range ids {
-		recipes = append(recipes, map[string]any{
-			"id":     id,
-			"status": "usable",
-			"source": "fake-relay-e2e",
-			"declared": map[string]any{
-				"integration_contract": recipeContracts[id],
-			},
-			"resolved": map[string]any{},
-		})
-	}
-	return map[string]any{
-		"scope":         "recipes",
-		"status":        "usable",
-		"settings_path": "",
-		"recipes":       recipes,
-	}
-}
-
-func backendStatusDocument() map[string]any {
-	return map[string]any{
-		"scope":      "backends",
-		"probe_auth": false,
-		"backends": []any{
-			map[string]any{
-				"backend":               "claude",
-				"executable_path":       "fake-claude",
-				"version":               "fake",
-				"authentication_status": "unknown",
-				"status":                "installed_auth_unknown",
-				"probe_detail":          map[string]any{},
-			},
-			map[string]any{
-				"backend":               "codex",
-				"executable_path":       "fake-codex",
-				"version":               "fake",
-				"authentication_status": "unknown",
-				"status":                "installed_auth_unknown",
-				"probe_detail":          map[string]any{},
-			},
-		},
-	}
-}
-
-func compileRecipe(args []string) error {
-	recipeID := flagValue(args, "--recipe")
-	contractID := recipeContracts[recipeID]
-	if contractID == "" {
-		return fmt.Errorf("unknown recipe %q", recipeID)
-	}
-	bundlePath := flagValue(args, "--integration-bundle")
-	bundle, contractBody, contractDigest, err := contractFromBundle(bundlePath, contractID)
-	if err != nil {
-		return err
-	}
-	bundleDigest, err := digest.SemanticJSON(bundle)
-	if err != nil {
-		return err
-	}
-	plan := rootRecipePlan(recipeID, contractID, contractDigest, bundleDigest, artifactRef("integration_contract:selected", contractDigest))
-	return writeJSON(os.Stdout, map[string]any{
-		"recipe_id":            recipeID,
-		"status":               "usable",
-		"integration_contract": contractID,
-		"diagnostics":          []any{},
-		"compiled_plan":        plan,
-		"contract_digests": map[string]any{
-			contractID: contractDigest,
-		},
-		"contract": contractBody,
-		"target":   "root",
-	})
-}
-
-func runRecipe(args []string) error {
+func runPlan(args []string) error {
 	if os.Getenv("WITNESS_FAKE_RELAY_FAIL_RUN") == "1" {
 		return errors.New("simulated relay launch failure")
 	}
-	recipeID := flagValue(args, "--recipe")
-	if recipeContracts[recipeID] == "" {
-		return fmt.Errorf("unknown recipe %q", recipeID)
+	planPath := flagValue(args, "--plan")
+	blobsPath := flagValue(args, "--blobs")
+	if planPath == "" || blobsPath == "" {
+		return errors.New("run requires --plan and --blobs")
 	}
-	home := flagValue(args, "--home")
-	if home == "" {
-		home = os.TempDir()
-	}
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		return err
-	}
-	sessionDir, err := os.MkdirTemp(home, "fake-relay-session-*")
+	planValue, planBytes, err := readPlan(planPath)
 	if err != nil {
 		return err
 	}
-	state := sessionState{
-		RecipeID:              recipeID,
-		IntegrationBundlePath: flagValue(args, "--integration-bundle"),
-		Inputs:                inputBindings(args),
-	}
-	if state.Inputs["findings"] == "" {
-		return errors.New("missing findings input")
-	}
-	if state.Inputs["charter"] == "" {
-		return errors.New("missing charter input")
-	}
-	if err := writeJSONFile(filepath.Join(sessionDir, "session-state.json"), state); err != nil {
+	findings, err := findingsBatch(planValue, blobsPath)
+	if err != nil {
 		return err
 	}
-	return writeJSON(os.Stdout, map[string]any{
-		"schema_version": "fake-relay-run-v1",
-		"status":         "completed",
-		"session_dir":    sessionDir,
-	})
+	verdicts := verdictDocument(findings)
+	verdictBytes, err := contracts.RelayWitnessVerdictsCanonicalBytes(verdicts)
+	if err != nil {
+		return fmt.Errorf("encode fake relay verdicts: %w", err)
+	}
+	if err := contracts.RequireValidRelayWitnessVerdicts(verdicts, &findings); err != nil {
+		return fmt.Errorf("validate fake relay verdicts: %w", err)
+	}
+
+	sessionDir, err := os.MkdirTemp("", "fake-relay-session-")
+	if err != nil {
+		return err
+	}
+	if err := persistSessionInputs(sessionDir, planValue, planBytes, blobsPath); err != nil {
+		return err
+	}
+	runResult := resultForPlan(planValue, sessionDir, string(verdictBytes), verdictBytes)
+	if os.Getenv("WITNESS_FAKE_RELAY_EMPTY_ROOT_RESULT") == "1" {
+		runResult.Result = ""
+		runResult.Root.Result.Value = ""
+	}
+	if err := writeJSONFile(filepath.Join(sessionDir, "result.json"), runResult); err != nil {
+		return err
+	}
+	if err := writeJSONFile(filepath.Join(sessionDir, "session-state.json"), sessionState{Plan: planValue, Result: runResult}); err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, runResult)
 }
 
-func exportPortable(args []string) error {
+func exportCreate(args []string) error {
 	sessionDir := flagValue(args, "--session-dir")
 	outputDir := flagValue(args, "--output")
 	if sessionDir == "" || outputDir == "" {
-		return errors.New("export requires --session-dir and --output")
+		return errors.New("export create requires --session-dir and --output")
 	}
-	var state sessionState
-	if err := readJSONFile(filepath.Join(sessionDir, "session-state.json"), &state); err != nil {
+	state, err := readJSONFile[sessionState](filepath.Join(sessionDir, "session-state.json"))
+	if err != nil {
 		return err
 	}
-	manifestDigest, err := writePortableExport(outputDir, state)
+	if err := plan.Validate(state.Plan); err != nil {
+		return fmt.Errorf("validate stored plan: %w", err)
+	}
+	if state.Result.Root == nil {
+		return errors.New("stored relay result is missing root")
+	}
+	manifestDigest, err := writePortableBundle(outputDir, sessionDir, state)
 	if err != nil {
 		return err
 	}
 	return writeJSON(os.Stdout, map[string]any{
-		"schema_version":   "relay-root-portable-export-v2",
-		"status":           "valid",
-		"manifest_digest":  manifestDigest,
-		"portable_export":  outputDir,
-		"terminal_status":  "completed",
-		"convo_relay_fake": true,
+		"output":          outputDir,
+		"format":          bundle.Kind,
+		"manifest_digest": manifestDigest,
+		"terminal_status": state.Result.Status,
 	})
 }
 
-func verifyExport(args []string) error {
-	exportDir := ""
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
+func readPlan(path string) (plan.Plan, []byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return plan.Plan{}, nil, err
+	}
+	value, err := strictjson.DecodeBytes[plan.Plan](data, strictjson.DefaultMaxBytes*8)
+	if err != nil {
+		return plan.Plan{}, nil, fmt.Errorf("decode relay plan: %w", err)
+	}
+	if err := plan.Validate(value); err != nil {
+		return plan.Plan{}, nil, fmt.Errorf("validate relay plan: %w", err)
+	}
+	canonical, err := plan.CanonicalBytes(value)
+	if err != nil {
+		return plan.Plan{}, nil, err
+	}
+	return value, canonical, nil
+}
+
+func findingsBatch(value plan.Plan, blobsPath string) (contracts.VerificationBatchDocument, error) {
+	for _, input := range value.Inputs {
+		if input.Name != "findings" {
 			continue
 		}
-		exportDir = arg
-		break
+		if len(input.Contents) != 1 {
+			return contracts.VerificationBatchDocument{}, errors.New("fake relay findings input must contain one blob")
+		}
+		ref := input.Contents[0]
+		path := filepath.Join(blobsPath, "sha256", ref.SHA256)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return contracts.VerificationBatchDocument{}, fmt.Errorf("read findings blob: %w", err)
+		}
+		if int64(len(data)) != ref.Size || digest.RawBytes(data) != "sha256:"+ref.SHA256 {
+			return contracts.VerificationBatchDocument{}, errors.New("findings blob does not match the plan")
+		}
+		batch, err := contracts.ReadVerificationBatchBytes(data)
+		if err != nil {
+			return contracts.VerificationBatchDocument{}, fmt.Errorf("decode findings blob: %w", err)
+		}
+		if err := contracts.RequireValidVerificationBatch(batch, nil); err != nil {
+			return contracts.VerificationBatchDocument{}, fmt.Errorf("validate findings blob: %w", err)
+		}
+		return batch, nil
 	}
-	if exportDir == "" {
-		return errors.New("verify-export requires export directory")
-	}
-	var manifest map[string]any
-	if err := readJSONFile(filepath.Join(exportDir, "manifest.json"), &manifest); err != nil {
-		return err
-	}
-	return writeJSON(os.Stdout, map[string]any{
-		"schema_version":  manifest["schema_version"],
-		"status":          "valid",
-		"manifest_digest": manifest["manifest_digest"],
-	})
+	return contracts.VerificationBatchDocument{}, errors.New("relay plan has no findings input")
 }
 
-func writePortableExport(outputDir string, state sessionState) (string, error) {
-	contractID := recipeContracts[state.RecipeID]
-	bundle, contractBody, contractDigest, err := contractFromBundle(state.IntegrationBundlePath, contractID)
-	if err != nil {
-		return "", err
+func persistSessionInputs(sessionDir string, value plan.Plan, planBytes []byte, blobsPath string) error {
+	if err := writeBytes(filepath.Join(sessionDir, "plan.json"), planBytes); err != nil {
+		return err
 	}
-	bundleDigest, err := digest.SemanticJSON(bundle)
-	if err != nil {
-		return "", err
+	seen := map[string]bool{}
+	for _, ref := range plan.BlobRefs(value) {
+		if seen[ref.SHA256] {
+			continue
+		}
+		seen[ref.SHA256] = true
+		body, err := os.ReadFile(filepath.Join(blobsPath, "sha256", ref.SHA256))
+		if err != nil {
+			return fmt.Errorf("read plan blob %s: %w", ref.SHA256, err)
+		}
+		if int64(len(body)) != ref.Size || digest.RawBytes(body) != "sha256:"+ref.SHA256 {
+			return fmt.Errorf("plan blob %s does not match its reference", ref.SHA256)
+		}
+		if err := writeBytes(filepath.Join(sessionDir, "blobs", "sha256", ref.SHA256), body); err != nil {
+			return err
+		}
 	}
-	batch, batchBytes, err := readBatch(state.Inputs["findings"])
-	if err != nil {
-		return "", err
+	return nil
+}
+
+func resultForPlan(value plan.Plan, sessionDir string, verdicts string, verdictBytes []byte) result.Result {
+	transcript := make([]result.TranscriptEntry, 0, value.Schedule.Turns)
+	for turn := 1; turn <= value.Schedule.Turns; turn++ {
+		actor, err := plan.ParticipantActorForTurn(value, turn)
+		if err != nil {
+			actor = fmt.Sprintf("participant-%d", turn)
+		}
+		transcript = append(transcript, result.TranscriptEntry{
+			Round:   turn,
+			From:    actor,
+			Content: fmt.Sprintf("fake relay participant turn %d", turn),
+			Mode:    value.Mode,
+			Ledger:  result.Ledger{Settled: []string{}, Contested: []string{}, Withdrawn: []string{}},
+		})
 	}
-	charterBytes, err := os.ReadFile(state.Inputs["charter"])
-	if err != nil {
-		return "", err
+	root := &result.Root{
+		ExecutionKind: value.Provenance,
+		Status:        completedStatus,
+		Recipe:        result.Recipe{ID: value.RecipeID},
+		Turns:         result.Turns{Configured: value.Schedule.Turns, Completed: value.Schedule.Turns},
+		Result:        result.RootResult{Source: value.Result.Source, ValidationStatus: validatedStatus, Value: verdicts},
+		Workspace: result.Workspace{
+			Mode:                       value.Workspace.Mode,
+			WorkspaceContentSource:     workspaceContentSource(value),
+			WorkingTreeChangesIncluded: value.Workspace.Mode == plan.WorkspaceModeCurrent,
+		},
+		Providers:       map[string]string{},
+		ProviderRetry:   value.ProviderRetry.Mode,
+		Invocations:     &result.Count{Count: value.Schedule.Turns + 1},
+		ReducerAttempts: result.Count{Count: 1},
 	}
-	var artifactBytes []byte
-	if artifactPath := state.Inputs["artifact"]; artifactPath != "" {
-		artifactBytes, err = os.ReadFile(artifactPath)
+	slots := make([]result.Slot, 0, len(value.Actors))
+	agents := make([]string, 0, len(value.Actors))
+	for _, actor := range value.Actors {
+		if actor.Backend == plan.ActorBackendChild {
+			continue
+		}
+		slots = append(slots, result.Slot{SlotID: actor.ID, ProfileID: actor.ProfileID, Backend: actor.Backend, Model: actor.Model, Effort: actor.Effort, State: result.SlotState{}})
+		if actor.ID != "reducer" {
+			agents = append(agents, actor.Backend)
+		}
+	}
+	return result.Result{
+		SessionID:                  value.SessionID,
+		SessionDir:                 sessionDir,
+		ExecutionKind:              value.Provenance,
+		RecipeID:                   value.RecipeID,
+		Task:                       value.Task,
+		Title:                      value.Task,
+		Mode:                       value.Mode,
+		InvestigationMode:          value.Investigation,
+		TimeoutSeconds:             value.Timeouts.TurnSeconds,
+		StallTimeoutSeconds:        value.Timeouts.StallSeconds,
+		Status:                     completedStatus,
+		StopReason:                 completedStatus,
+		Summary:                    result.Summary{Status: completedStatus, Mode: value.Mode, Agents: agents, ConfiguredRounds: value.Schedule.Turns, MaxRounds: value.Schedule.Turns, ActualRounds: value.Schedule.Turns, FilteredRounds: value.Schedule.Turns, LedgerCounts: result.LedgerCounts{}},
+		Transcript:                 transcript,
+		TranscriptPayload:          append([]result.TranscriptEntry(nil), transcript...),
+		Result:                     string(verdictBytes),
+		ResultSource:               value.Result.Source,
+		ValidationStatus:           validatedStatus,
+		ReducerAttempts:            result.Count{Count: 1},
+		Recipe:                     result.Recipe{ID: value.RecipeID},
+		Source:                     "fake-relay",
+		Slots:                      slots,
+		ActualRounds:               value.Schedule.Turns,
+		ActualParticipantTurns:     value.Schedule.Turns,
+		ParticipantTurns:           value.Schedule.Turns,
+		MaxRounds:                  value.Schedule.Turns,
+		RoundLimitMode:             "fixed",
+		ProviderFailures:           []result.ProviderFailure{},
+		ProviderRetry:              value.ProviderRetry.Mode,
+		WorkspaceContentSource:     workspaceContentSource(value),
+		WorkingTreeChangesIncluded: value.Workspace.Mode == plan.WorkspaceModeCurrent,
+		Diagnostics:                result.Diagnostics{AbandonedAttempts: []result.AbandonedAttempt{}, UnreferencedBlobs: []result.BlobDiagnostic{}},
+		Root:                       root,
+	}
+}
+
+func writePortableBundle(outputDir, sessionDir string, state sessionState) (string, error) {
+	root := state.Result.Root
+	sessionPayload := bundle.SessionPayload{
+		Plan:                       state.Plan,
+		TerminalStatus:             state.Result.Status,
+		StopReason:                 state.Result.StopReason,
+		ResultSource:               state.Result.ResultSource,
+		ValidationStatus:           state.Result.ValidationStatus,
+		WorkspaceContentSource:     state.Result.WorkspaceContentSource,
+		WorkingTreeChangesIncluded: state.Result.WorkingTreeChangesIncluded,
+		Root:                       *root,
+	}
+	payloadValues := []struct {
+		kind  string
+		id    string
+		value any
+	}{
+		{kind: "diagnostics", id: "diagnostics", value: state.Result.Diagnostics},
+		{kind: "participant_transcript", id: "transcript", value: state.Result.TranscriptPayload},
+		{kind: "root_session", id: "session", value: sessionPayload},
+	}
+	payloads := make([]portablePayload, 0, len(payloadValues)+len(plan.BlobRefs(state.Plan)))
+	for _, item := range payloadValues {
+		body, err := canonjson.Marshal(item.value)
 		if err != nil {
 			return "", err
 		}
-	}
-	verdicts := verdictDocument(batch)
-	verdictBytes, err := canonjson.Marshal(verdicts)
-	if err != nil {
-		return "", err
-	}
-	integrationContractPayload := map[string]any{
-		"kind":            "integration_contract",
-		"schema_version":  2,
-		"digest_profile":  digest.Profile,
-		"contract_id":     contractID,
-		"contract_digest": contractDigest,
-		"contract":        contractBody,
-	}
-	integrationContractDigest, err := digest.StorageEnvelope("integration_contract", integrationContractPayload)
-	if err != nil {
-		return "", err
-	}
-	integrationContractRef := portableRef("integration-contract", "integration_contract:selected", integrationContractDigest)
-	rootPlanPayload := rootRecipePlan(state.RecipeID, contractID, contractDigest, bundleDigest, integrationContractRef)
-	namedInputs, inputPayloads, err := namedInputPayloads(contractID, charterBytes, batchBytes, artifactBytes)
-	if err != nil {
-		return "", err
-	}
-	providerPayloads, transcript, err := providerPayloadsForRecipe(state.RecipeID)
-	if err != nil {
-		return "", err
-	}
-	canonicalResultPayload := map[string]any{
-		"kind":           "canonical_result",
-		"schema_version": 2,
-		"digest_profile": digest.Profile,
-		"value":          verdicts,
-		"canonical_json": string(verdictBytes),
-	}
-	canonicalResultDigest, err := digest.StorageEnvelope("canonical_result", canonicalResultPayload)
-	if err != nil {
-		return "", err
-	}
-	resultValidationPayload := map[string]any{
-		"kind":                 "result_validation",
-		"schema_version":       2,
-		"digest_profile":       digest.Profile,
-		"status":               "validated",
-		"canonical_result_ref": portableRef("canonical-result", "canonical_result:canonical-result", canonicalResultDigest),
-	}
-	payloads := []portablePayload{
-		{
-			Kind:       "diagnostics",
-			PortableID: "diagnostics",
-			Value: map[string]any{
-				"execution_kind": "recipe",
-				"diagnostics":    []any{},
-			},
-		},
-		{
-			Kind:         "integration_contract",
-			PortableID:   "integration-contract",
-			Value:        integrationContractPayload,
-			SourceID:     "integration_contract:selected",
-			SourceDigest: integrationContractDigest,
-		},
-		{
-			Kind:         "root_recipe_plan",
-			PortableID:   "root-plan",
-			Value:        rootPlanPayload,
-			SourceID:     "root_recipe_plan:" + safeID(state.RecipeID),
-			SourceDigest: storageDigest("root_recipe_plan", rootPlanPayload),
-		},
-	}
-	payloads = append(payloads, inputPayloads...)
-	payloads = append(payloads, providerPayloads...)
-	payloads = append(payloads,
-		portablePayload{
-			Kind:         "canonical_result",
-			PortableID:   "canonical-result",
-			Value:        canonicalResultPayload,
-			SourceID:     "canonical_result:canonical-result",
-			SourceDigest: canonicalResultDigest,
-		},
-		portablePayload{
-			Kind:       "participant_transcript",
-			PortableID: "transcript",
-			Value:      transcript,
-		},
-		portablePayload{
-			Kind:         "result_validation",
-			PortableID:   "result-validation",
-			Value:        resultValidationPayload,
-			SourceID:     "result_validation:result-validation",
-			SourceDigest: storageDigest("result_validation", resultValidationPayload),
-		},
-		portablePayload{
-			Kind:       "root_session",
-			PortableID: "session",
-			Value: map[string]any{
-				"execution_kind":  "recipe",
-				"status":          "completed",
-				"terminal_status": "completed",
-				"result_source":   "reducer",
-				"recipe_id":       state.RecipeID,
-			},
-		},
-	)
-	payloads = append(payloads, namedInputs)
-	return writePortablePayloads(outputDir, payloads)
-}
-
-func rootRecipePlan(recipeID string, contractID string, contractDigest string, bundleDigest string, contractRef map[string]any) map[string]any {
-	plan := map[string]any{
-		"kind":                        "root_recipe_plan",
-		"schema_version":              2,
-		"digest_profile":              digest.Profile,
-		"recipe_id":                   recipeID,
-		"integration_contract_id":     contractID,
-		"integration_contract_digest": contractDigest,
-		"integration_contract_ref":    contractRef,
-		"provider_retry":              "forbid",
-		"participant_turns":           4,
-		"prompt_context": map[string]any{
-			"participant_transcript": "complete",
-			"facilitator_ledger":     "trace_only",
-		},
-		"result_source": "reducer",
-		"participants":  recipeParticipants(recipeID),
-		"facilitator":   map[string]any{"backend": backendForRecipe(recipeID, 0), "slot_id": "facilitator"},
-		"reducer":       map[string]any{"backend": backendForRecipe(recipeID, 1), "slot_id": "reducer"},
-	}
-	if bundleDigest != "" {
-		plan["integration_bundle_digest"] = bundleDigest
-	}
-	return plan
-}
-
-func namedInputPayloads(contractID string, charterBytes []byte, batchBytes []byte, artifactBytes []byte) (portablePayload, []portablePayload, error) {
-	type input struct {
-		name      string
-		ordinal   int
-		data      []byte
-		mediaType string
-	}
-	inputs := []input{
-		{name: "charter", ordinal: 1, data: charterBytes, mediaType: "application/json"},
-		{name: "findings", ordinal: 2, data: batchBytes, mediaType: "application/json"},
-	}
-	if len(artifactBytes) > 0 {
-		inputs = append(inputs, input{name: "artifact", ordinal: 3, data: artifactBytes, mediaType: "application/json"})
-	}
-	manifestEntries := make([]any, 0, len(inputs))
-	payloads := make([]portablePayload, 0, len(inputs))
-	for _, input := range inputs {
-		rawDigest := digest.RawBytes(input.data)
-		portableID := "named-input-" + input.name
-		content := map[string]any{
-			"kind":           "named_input_content",
-			"schema_version": 2,
-			"digest_profile": digest.Profile,
-			"ordinal":        input.ordinal,
-			"name":           input.name,
-			"name_ordinal":   1,
-			"encoding":       "base64",
-			"bytes_base64":   base64.StdEncoding.EncodeToString(input.data),
-			"size_bytes":     len(input.data),
-			"raw_digest":     rawDigest,
-			"media_type":     input.mediaType,
-			"schema_status":  "not_validated",
-		}
-		sourceID := "named_input_content:" + portableID
-		sourceDigest := storageDigest("named_input_content", content)
 		payloads = append(payloads, portablePayload{
-			Kind:         "named_input_content",
-			PortableID:   portableID,
-			Value:        content,
-			SourceID:     sourceID,
-			SourceDigest: sourceDigest,
-		})
-		manifestEntries = append(manifestEntries, map[string]any{
-			"ordinal":       input.ordinal,
-			"name":          input.name,
-			"name_ordinal":  1,
-			"size_bytes":    len(input.data),
-			"raw_digest":    rawDigest,
-			"media_type":    input.mediaType,
-			"schema_status": "not_validated",
-			"content_ref":   portableRef(portableID, sourceID, sourceDigest),
+			Entry: bundle.InventoryEntry{Kind: item.kind, PortableID: item.id, Path: filepath.ToSlash(filepath.Join("payloads", item.kind, item.id+".json")), Blob: blobRef(body, "application/json")},
+			Body:  body,
 		})
 	}
-	manifest := map[string]any{
-		"kind":           "named_input_manifest",
-		"schema_version": 2,
-		"digest_profile": digest.Profile,
-		"contract_id":    contractID,
-		"input_count":    len(manifestEntries),
-		"inputs":         manifestEntries,
-	}
-	return portablePayload{
-		Kind:         "named_input_manifest",
-		PortableID:   "named-input-manifest",
-		Value:        manifest,
-		SourceID:     "named_input_manifest:named-input-manifest",
-		SourceDigest: storageDigest("named_input_manifest", manifest),
-	}, payloads, nil
-}
-
-func providerPayloadsForRecipe(recipeID string) ([]portablePayload, []any, error) {
-	var payloads []portablePayload
-	var transcript []any
-	addInvocation := func(phase string, ordinal int) error {
-		id := phase
-		if ordinal > 0 {
-			id = fmt.Sprintf("%s-%d", phase, ordinal)
+	seen := map[string]bool{}
+	for _, ref := range plan.BlobRefs(state.Plan) {
+		if seen[ref.SHA256] {
+			continue
 		}
-		backend := backendForRecipe(recipeID, ordinal)
-		promptText := fmt.Sprintf("Witness fake %s prompt %d for %s.", phase, ordinal, recipeID)
-		promptPayload, promptDigest, promptRawDigest, err := renderedPromptPayload(id, promptText)
+		seen[ref.SHA256] = true
+		body, err := os.ReadFile(filepath.Join(sessionDir, "blobs", "sha256", ref.SHA256))
 		if err != nil {
-			return err
+			return "", fmt.Errorf("read session input blob %s: %w", ref.SHA256, err)
 		}
-		resultPortableID := "provider-result-" + id
-		invocationSourceID := "provider_invocation:" + id
-		resultSourceID := "provider_result:" + id
-		promptSourceID := "rendered_prompt:" + id
-		invocationBase := map[string]any{
-			"schema_version":            "relay-provider-invocation-v2",
-			"invocation_id":             id,
-			"phase":                     phase,
-			"actor":                     actorForPhase(phase, ordinal),
-			"runner_attempt":            1,
-			"provider_launch_attempted": true,
-			"provider_retry":            "forbid",
-			"backend":                   backend,
-			"started_at":                "2026-01-01T00:00:00Z",
-			"completed_at":              "2026-01-01T00:00:01Z",
-			"outcome":                   "completed",
-			"failure_stage":             "",
-			"classification":            "success",
-			"mapped_working_directory":  "workspace",
-			"rendered_prompt_ref":       portableRef("rendered-prompt-"+id, promptSourceID, promptDigest),
-			"rendered_prompt_digest":    promptRawDigest,
-		}
-		if ordinal > 0 {
-			invocationBase["participant_ordinal"] = ordinal
-		}
-		if phase == "reducer" {
-			invocationBase["reducer_fresh"] = true
-		}
-		resultInvocation := cloneMap(invocationBase)
-		resultInvocation["provider_result_ref"] = nil
-		resultPayload := map[string]any{
-			"kind":            "provider_result",
-			"schema_version":  2,
-			"digest_profile":  digest.Profile,
-			"invocation":      resultInvocation,
-			"provider_result": map[string]any{"backend": backend, "content": "ok"},
-		}
-		for _, key := range []string{"invocation_id", "phase", "actor", "runner_attempt", "provider_retry", "backend", "started_at", "completed_at", "outcome", "failure_stage", "classification"} {
-			resultPayload[key] = invocationBase[key]
-		}
-		resultDigest := storageDigest("provider_result", resultPayload)
-		invocationPayload := map[string]any{
-			"kind":           "provider_invocation",
-			"schema_version": 2,
-			"digest_profile": digest.Profile,
-			"invocation":     cloneMap(invocationBase),
-		}
-		invocationPayload["invocation"].(map[string]any)["provider_result_ref"] = portableRef(resultPortableID, resultSourceID, resultDigest)
-		invocationDigest := storageDigest("provider_invocation", invocationPayload)
-		payloads = append(payloads,
-			portablePayload{
-				Kind:         "provider_invocation",
-				PortableID:   "provider-invocation-" + id,
-				Value:        invocationPayload,
-				SourceID:     invocationSourceID,
-				SourceDigest: invocationDigest,
-			},
-			portablePayload{
-				Kind:         "provider_result",
-				PortableID:   resultPortableID,
-				Value:        resultPayload,
-				SourceID:     resultSourceID,
-				SourceDigest: resultDigest,
-			},
-			portablePayload{
-				Kind:         "rendered_prompt",
-				PortableID:   "rendered-prompt-" + id,
-				Value:        promptPayload,
-				SourceID:     promptSourceID,
-				SourceDigest: promptDigest,
-			},
-		)
-		if phase == "participant" {
-			transcript = append(transcript, map[string]any{
-				"participant_turn":        ordinal,
-				"content":                 fmt.Sprintf("participant %d content", ordinal),
-				"ledger":                  map[string]any{"settled": []any{}, "contested": []any{}, "withdrawn": []any{}},
-				"provider_invocation_ref": portableRef("provider-invocation-"+id, invocationSourceID, invocationDigest),
-			})
-		}
-		return nil
+		payloads = append(payloads, portablePayload{
+			Entry: bundle.InventoryEntry{Kind: "input", PortableID: ref.SHA256, Path: filepath.ToSlash(filepath.Join("payloads", "input", ref.SHA256+".json")), Blob: ref},
+			Body:  body,
+		})
 	}
-	for ordinal := 1; ordinal <= 4; ordinal++ {
-		if err := addInvocation("participant", ordinal); err != nil {
-			return nil, nil, err
-		}
-		if err := addInvocation("facilitator", ordinal); err != nil {
-			return nil, nil, err
-		}
+	sort.Slice(payloads, func(i, j int) bool { return payloads[i].Entry.Path < payloads[j].Entry.Path })
+	inventory := make([]bundle.InventoryEntry, 0, len(payloads))
+	for _, payload := range payloads {
+		inventory = append(inventory, payload.Entry)
 	}
-	if err := addInvocation("reducer", 0); err != nil {
-		return nil, nil, err
+	stopReason := state.Result.StopReason
+	manifest := bundle.Manifest{
+		Kind:               bundle.Kind,
+		ConvoRelayVersion:  convoRelayVersion,
+		TerminalStatus:     state.Result.Status,
+		StopReason:         &stopReason,
+		SessionPayload:     "payloads/root_session/session.json",
+		TranscriptPayload:  "payloads/participant_transcript/transcript.json",
+		DiagnosticsPayload: "payloads/diagnostics/diagnostics.json",
+		PayloadInventory:   inventory,
 	}
-	return payloads, transcript, nil
-}
-
-func renderedPromptPayload(id string, text string) (map[string]any, string, string, error) {
-	raw := []byte(text)
-	rawDigest := digest.RawBytes(raw)
-	payload := map[string]any{
-		"kind":           "rendered_prompt",
-		"schema_version": 2,
-		"digest_profile": digest.Profile,
-		"rendered_prompt": map[string]any{
-			"schema_version": "relay-rendered-prompt-v1",
-			"media_type":     "text/plain; charset=utf-8",
-			"encoding":       "base64",
-			"bytes_base64":   base64.StdEncoding.EncodeToString(raw),
-			"size_bytes":     len(raw),
-			"raw_digest":     rawDigest,
-		},
-	}
-	return payload, storageDigest("rendered_prompt", payload), rawDigest, nil
-}
-
-func writePortablePayloads(outputDir string, payloads []portablePayload) (string, error) {
-	if err := os.RemoveAll(outputDir); err != nil {
+	var err error
+	manifest.InventoryDigest, err = relaySemanticDigest(state.Plan, inventory)
+	if err != nil {
 		return "", err
+	}
+	manifest.ManifestDigest, err = relaySemanticDigest(state.Plan, map[string]any{
+		"kind":                manifest.Kind,
+		"convo_relay_version": manifest.ConvoRelayVersion,
+		"terminal_status":     manifest.TerminalStatus,
+		"stop_reason":         manifest.StopReason,
+		"session_payload":     manifest.SessionPayload,
+		"transcript_payload":  manifest.TranscriptPayload,
+		"diagnostics_payload": manifest.DiagnosticsPayload,
+		"payload_inventory":   manifest.PayloadInventory,
+		"inventory_digest":    manifest.InventoryDigest,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := bundle.Validate(manifest); err != nil {
+		return "", fmt.Errorf("validate fake relay bundle: %w", err)
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return "", err
 	}
-	sort.Slice(payloads, func(i, j int) bool {
-		return payloadPath(payloads[i]) < payloadPath(payloads[j])
-	})
-	inventory := make([]any, 0, len(payloads))
 	for _, payload := range payloads {
-		body, err := canonjson.Marshal(payload.Value)
-		if err != nil {
+		if err := writeBytes(filepath.Join(outputDir, filepath.FromSlash(payload.Entry.Path)), payload.Body); err != nil {
 			return "", err
 		}
-		relative := payloadPath(payload)
-		if err := os.MkdirAll(filepath.Join(outputDir, filepath.Dir(relative)), 0o755); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(filepath.Join(outputDir, filepath.FromSlash(relative)), append(body, '\n'), 0o644); err != nil {
-			return "", err
-		}
-		entry := map[string]any{
-			"kind":         payload.Kind,
-			"portable_id":  payload.PortableID,
-			"path":         relative,
-			"media_type":   "application/json",
-			"size_bytes":   len(body) + 1,
-			"digest_class": digest.ClassRawBytes,
-			"digest":       digest.RawBytes(append(body, '\n')),
-		}
-		if payload.SourceID != "" {
-			entry["source_artifact_id"] = payload.SourceID
-			entry["source_artifact_digest"] = payload.SourceDigest
-		}
-		inventory = append(inventory, entry)
 	}
-	manifest := map[string]any{
-		"schema_version":      "relay-root-portable-export-v2",
-		"convo_relay_version": convoRelayVersion,
-		"digest_profile":      digest.Profile,
-		"terminal_status":     "completed",
-		"stop_reason":         "completed",
-		"session_payload":     "payloads/root_session/session.json",
-		"transcript_payload":  "payloads/participant_transcript/transcript.json",
-		"diagnostics_payload": "payloads/diagnostics/diagnostics.json",
-		"payload_inventory":   inventory,
-	}
-	inventoryDigest, err := digest.SemanticJSON(inventory)
+	manifestBytes, err := canonjson.Marshal(manifest)
 	if err != nil {
 		return "", err
 	}
-	manifest["inventory_digest"] = inventoryDigest
-	manifestDigest, err := digest.SemanticJSON(manifest)
+	if err := writeBytes(filepath.Join(outputDir, "manifest.json"), manifestBytes); err != nil {
+		return "", err
+	}
+	if _, err := bundle.VerifyPortableDirectory(outputDir); err != nil {
+		return "", fmt.Errorf("verify fake relay bundle: %w", err)
+	}
+	return manifest.ManifestDigest, nil
+}
+
+// relaySemanticDigest reuses Relay's public plan canonicalizer to obtain the
+// v2 semantic-JSON spelling for an otherwise arbitrary JSON value. The v2
+// bundle package intentionally exposes validation, not a second manifest
+// builder; keeping this test process on the public plan boundary avoids
+// duplicating Relay's canonicalization implementation here.
+func relaySemanticDigest(base plan.Plan, value any) (string, error) {
+	body, err := json.Marshal(value)
 	if err != nil {
 		return "", err
 	}
-	manifest["manifest_digest"] = manifestDigest
-	if err := writeJSONFile(filepath.Join(outputDir, "manifest.json"), manifest); err != nil {
+	probe := base
+	probe.TaskPlan = body
+	canonical, err := plan.CanonicalBytes(probe)
+	if err != nil {
 		return "", err
 	}
-	return manifestDigest, nil
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(canonical, &fields); err != nil {
+		return "", err
+	}
+	taskPlan, ok := fields["task_plan"]
+	if !ok {
+		return "", errors.New("relay canonical plan omitted task_plan")
+	}
+	return digest.RawBytes(taskPlan), nil
 }
 
 func verdictDocument(batch contracts.VerificationBatchDocument) contracts.RelayWitnessVerdictsDocument {
@@ -709,202 +432,61 @@ func verdictDocument(batch contracts.VerificationBatchDocument) contracts.RelayW
 			Verdict:        contracts.VerdictSurvived,
 			VerdictClass:   nil,
 			CounterWitness: nil,
-			Rationale:      "fake provider preserves the filed witness for E2E coverage",
+			Rationale:      "fake Relay preserves the filed witness for E2E coverage",
 		})
 	}
-	return contracts.RelayWitnessVerdictsDocument{
-		SchemaVersion: contracts.RelayWitnessVerdictsV2,
-		BatchID:       batch.BatchID,
-		Verdicts:      verdicts,
-	}
+	return contracts.RelayWitnessVerdictsDocument{SchemaVersion: contracts.RelayWitnessVerdictsV2, BatchID: batch.BatchID, Verdicts: verdicts}
 }
 
-func readBatch(path string) (contracts.VerificationBatchDocument, []byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.VerificationBatchDocument{}, nil, err
-	}
-	batch, err := contracts.ReadVerificationBatchBytes(data)
-	if err != nil {
-		return contracts.VerificationBatchDocument{}, nil, err
-	}
-	return batch, data, nil
+func blobRef(body []byte, mediaType string) plan.BlobRef {
+	return plan.BlobRef{SHA256: strings.TrimPrefix(digest.RawBytes(body), "sha256:"), Size: int64(len(body)), MediaType: mediaType}
 }
 
-func contractFromBundle(path string, contractID string) (map[string]any, map[string]any, string, error) {
-	if path == "" {
-		return nil, nil, "", errors.New("missing integration bundle")
+func workspaceContentSource(value plan.Plan) string {
+	if value.Workspace.Mode == plan.WorkspaceModeHeadCopy {
+		return "committed_head"
 	}
-	var bundle map[string]any
-	if err := readJSONFile(path, &bundle); err != nil {
-		return nil, nil, "", err
-	}
-	contractsRaw, ok := bundle["contracts"].(map[string]any)
-	if !ok {
-		return nil, nil, "", errors.New("integration bundle missing contracts")
-	}
-	body, ok := contractsRaw[contractID].(map[string]any)
-	if !ok {
-		return nil, nil, "", fmt.Errorf("integration bundle missing %s", contractID)
-	}
-	contractDigest, err := digest.SemanticJSON(body)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return bundle, body, contractDigest, nil
-}
-
-func portableRef(portableID string, sourceID string, sourceDigest string) map[string]any {
-	return map[string]any{
-		"kind":                   "portable_payload_ref",
-		"portable_id":            portableID,
-		"source_artifact_id":     sourceID,
-		"source_artifact_digest": sourceDigest,
-	}
-}
-
-func artifactRef(id string, refDigest string) map[string]any {
-	return map[string]any{
-		"kind":           "artifact_ref",
-		"schema_version": 1,
-		"id":             id,
-		"digest":         refDigest,
-	}
-}
-
-func storageDigest(kind string, value any) string {
-	sum, err := digest.StorageEnvelope(kind, value)
-	if err != nil {
-		panic(err)
-	}
-	return sum
-}
-
-func payloadPath(payload portablePayload) string {
-	return filepath.ToSlash(filepath.Join("payloads", payload.Kind, payload.PortableID+".json"))
-}
-
-func backendForRecipe(recipeID string, ordinal int) string {
-	if strings.HasSuffix(recipeID, "-codex") {
-		return "codex"
-	}
-	if strings.HasSuffix(recipeID, "-claude") {
-		return "claude"
-	}
-	if ordinal%2 == 0 {
-		return "codex"
-	}
-	return "claude"
-}
-
-func recipeParticipants(recipeID string) []any {
-	return []any{
-		map[string]any{"backend": backendForRecipe(recipeID, 1), "slot_id": "slot_0"},
-		map[string]any{"backend": backendForRecipe(recipeID, 2), "slot_id": "slot_1"},
-	}
-}
-
-func actorForPhase(phase string, ordinal int) string {
-	switch phase {
-	case "participant":
-		if ordinal%2 == 1 {
-			return "slot_0"
-		}
-		return "slot_1"
-	case "facilitator":
-		return "facilitator"
-	default:
-		return "reducer"
-	}
-}
-
-func sortedRecipeIDs() []string {
-	ids := make([]string, 0, len(recipeContracts))
-	for id := range recipeContracts {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func safeID(value string) string {
-	value = strings.TrimSpace(value)
-	var builder strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
-			builder.WriteRune(r)
-		default:
-			builder.WriteByte('-')
-		}
-	}
-	if builder.Len() == 0 {
-		return "id"
-	}
-	return builder.String()
+	return "working_tree"
 }
 
 func flagValue(args []string, name string) string {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == name {
-			return args[i+1]
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == name {
+			return args[index+1]
 		}
 	}
 	return ""
 }
 
-func inputBindings(args []string) map[string]string {
-	bindings := map[string]string{}
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] != "--input" {
-			continue
-		}
-		name, value, ok := strings.Cut(args[i+1], "=")
-		if ok {
-			bindings[name] = value
-		}
-	}
-	return bindings
-}
-
-func cloneMap(input map[string]any) map[string]any {
-	cloned := make(map[string]any, len(input))
-	for key, value := range input {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func readJSONFile(path string, value any) error {
+func readJSONFile[T any](path string) (T, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		var zero T
+		return zero, err
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.UseNumber()
-	return decoder.Decode(value)
+	return strictjson.DecodeBytes[T](data, strictjson.DefaultMaxBytes*32)
 }
 
-func writeJSONFile(path string, value any) error {
+func writeBytes(path string, body []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := canonjson.Marshal(value)
+	return os.WriteFile(path, body, 0o644)
+}
+
+func writeJSONFile(path string, value any) error {
+	body, err := canonjson.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return writeBytes(path, append(body, '\n'))
 }
 
 func writeJSON(file *os.File, value any) error {
-	data, err := canonjson.Marshal(value)
+	body, err := canonjson.Marshal(value)
 	if err != nil {
 		return err
 	}
-	_, err = file.Write(append(data, '\n'))
+	_, err = file.Write(append(body, '\n'))
 	return err
-}
-
-func init() {
-	json.Valid(nil)
 }

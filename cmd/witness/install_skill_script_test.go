@@ -104,6 +104,7 @@ func TestInstallSkillScriptInstallRootAndUninstall(t *testing.T) {
 		"HOME=" + t.TempDir(),
 		"WITNESS_VERSION=test",
 		"GOCACHE=" + filepath.Join(t.TempDir(), "gocache"),
+		"GOMODCACHE=" + goModCache(t),
 	}
 
 	stdout, stderr, err := runInstallSkillScript(t, bashPath, repoRoot, []string{"--install", "--json", "--install-root", installRoot}, env...)
@@ -189,6 +190,19 @@ func requireBash(t *testing.T) string {
 		t.Skip("bash is unavailable")
 	}
 	return bashPath
+}
+
+func goModCache(t *testing.T) string {
+	t.Helper()
+	output, err := exec.Command("go", "env", "GOMODCACHE").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go env GOMODCACHE failed: %v\noutput:\n%s", err, output)
+	}
+	path := strings.TrimSpace(string(output))
+	if path == "" {
+		t.Fatal("go env GOMODCACHE returned an empty path")
+	}
+	return path
 }
 
 func repoRootFromCmdWitness(t *testing.T) string {

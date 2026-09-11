@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
 	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/diag"
@@ -143,7 +144,6 @@ type Outputs struct {
 	PreflightPath               string `json:"preflight_path"`
 	PlanPath                    string `json:"plan_path"`
 	ManifestPath                string `json:"manifest_path"`
-	AssembleResultPath          string `json:"assemble_result_path,omitempty"`
 	RoleOutputChangeSurfacePath string `json:"role_output_change_surface_path,omitempty"`
 	RunResultPath               string `json:"run_result_path"`
 }
@@ -202,7 +202,6 @@ type NextAction struct {
 	CharterFreezePath    string              `json:"charter_freeze_path,omitempty"`
 	RelayBatch           *RelayBatchAction   `json:"relay_batch,omitempty"`
 	Degraded             bool                `json:"degraded,omitempty"`
-	BackendStrata        map[string]string   `json:"backend_strata,omitempty"`
 	Summary              string              `json:"summary"`
 }
 
@@ -233,7 +232,6 @@ type Invocation struct {
 	StageRun          string            `json:"stage_run,omitempty"`
 	Complete          bool              `json:"complete"`
 	Degraded          bool              `json:"degraded,omitempty"`
-	BackendStrata     map[string]string `json:"backend_strata,omitempty"`
 	RetainedArtifacts map[string]string `json:"retained_artifacts"`
 	SourceDirty       bool              `json:"source_dirty,omitempty"`
 	SourceDirtyStatus string            `json:"source_dirty_status,omitempty"`
@@ -429,7 +427,6 @@ func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 	if relativePath, ok := stateDirRelativeExistingFile(state.Config.StateDir, state.Config.Outputs.StatePath); ok {
 		retainedArtifacts["pass_state"] = relativePath
 	}
-	backendStrata := cloneStringMap(preflightResult.BackendStrata)
 	degraded := preflight.RelayAbsent(preflightResult)
 	sourceDirty, sourceDirtyStatus := state.SourceDirty, state.SourceDirtyStatus
 	if frozenDirty, frozenStatus := frozenSourceContext(state.Config); frozenDirty || frozenStatus != "" {
@@ -447,7 +444,6 @@ func saveAndReport(state *State, stageRun string) (*Invocation, error) {
 		StageRun:          stageRun,
 		Complete:          state.Complete,
 		Degraded:          degraded,
-		BackendStrata:     backendStrata,
 		RetainedArtifacts: retainedArtifacts,
 		SourceDirty:       sourceDirty,
 		SourceDirtyStatus: sourceDirtyStatus,
@@ -562,7 +558,6 @@ func runPreflight(ctx context.Context, state *State) error {
 		Outputs: outputs,
 		Details: map[string]any{
 			"relay_absent":        preflight.RelayAbsent(*result),
-			"backend_strata":      cloneStringMap(result.BackendStrata),
 			"source_dirty":        result.SourceDirty,
 			"source_dirty_status": result.SourceDirtyStatus,
 		},
@@ -648,10 +643,9 @@ func runPlan(state *State) error {
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"plan_digest":    result.Plan.PlanDigest,
-			"batch_count":    len(result.Plan.Batches),
-			"relay_absent":   preflight.RelayAbsent(preflightResult),
-			"backend_strata": cloneStringMap(preflightResult.BackendStrata),
+			"plan_digest":  result.Plan.PlanDigest,
+			"batch_count":  len(result.Plan.Batches),
+			"relay_absent": preflight.RelayAbsent(preflightResult),
 		},
 	})
 	return nil
@@ -713,8 +707,6 @@ func runAssemble(state *State) error {
 	}
 	inputSpecs := []artifactInput{
 		{role: "verification-plan", path: config.Outputs.PlanPath, digestClass: digest.ClassRawBytes},
-		{role: "compatibility-manifest", path: filepath.Join(config.StateDir, "compatibility-manifest.json"), digestClass: digest.ClassRawBytes},
-		{role: "relay-capabilities", path: filepath.Join(config.StateDir, "relay-capabilities.json"), digestClass: digest.ClassRawBytes},
 		{role: "integration-bundle-retained", path: retainedIntegrationBundleEnvelopePath(config), digestClass: digest.ClassRawBytes},
 		{role: "base-manifest", path: config.BaseManifestPath, digestClass: digestClassFreezeManifest},
 		{role: "head-manifest", path: headManifestPath, digestClass: digestClassFreezeManifest},
@@ -747,7 +739,7 @@ func runAssemble(state *State) error {
 	if err != nil {
 		return err
 	}
-	outputs, err := artifactRecordsForExistingFiles(assembleOutputSpecs(config, result))
+	outputs, err := artifactRecordsForExistingFiles(assembleOutputSpecs(config))
 	if err != nil {
 		return err
 	}
@@ -761,9 +753,8 @@ func runAssemble(state *State) error {
 		Inputs:  inputs,
 		Outputs: outputs,
 		Details: map[string]any{
-			"manifest_digest":               manifestDigest,
-			"pending_count":                 len(result.PendingVerification),
-			"unverified_relationship_count": len(result.UnverifiedRelationships),
+			"manifest_digest": manifestDigest,
+			"pending_count":   len(result.PendingVerification),
 		},
 	})
 	return nil
@@ -911,13 +902,12 @@ func normalizeBeginOptions(options BeginOptions) (Config, error) {
 		Backend:              strings.TrimSpace(options.Backend),
 		BaselinePass:         options.BaselinePass,
 		Outputs: Outputs{
-			StatePath:          filepath.Join(stateDir, StateFileName),
-			CharterFreezePath:  filepath.Join(stateDir, "charter.freeze.json"),
-			PreflightPath:      filepath.Join(stateDir, "preflight.json"),
-			PlanPath:           filepath.Join(stateDir, "verification-plan.json"),
-			ManifestPath:       filepath.Join(stateDir, "verification", "index.json"),
-			AssembleResultPath: filepath.Join(stateDir, "verification", "assemble-result.json"),
-			RunResultPath:      filepath.Join(stateDir, "verdict.json"),
+			StatePath:         filepath.Join(stateDir, StateFileName),
+			CharterFreezePath: filepath.Join(stateDir, "charter.freeze.json"),
+			PreflightPath:     filepath.Join(stateDir, "preflight.json"),
+			PlanPath:          filepath.Join(stateDir, "verification-plan.json"),
+			ManifestPath:      filepath.Join(stateDir, "verification", "index.json"),
+			RunResultPath:     filepath.Join(stateDir, "verdict.json"),
 		},
 	}
 	for _, assign := range []struct {
@@ -1154,7 +1144,6 @@ func addDegradedActionContext(state *State) {
 	if err != nil {
 		return
 	}
-	state.NextAction.BackendStrata = cloneStringMap(preflightResult.BackendStrata)
 	if preflight.RelayAbsent(preflightResult) {
 		state.NextAction.Degraded = true
 	}
@@ -1326,11 +1315,19 @@ func recipeID(taskShape string, backend string) string {
 }
 
 func portableExportReady(path string) bool {
+	_, ok := verifiedPortableExport(path)
+	return ok
+}
+
+func verifiedPortableExport(path string) (*bundle.Verification, bool) {
 	if strings.TrimSpace(path) == "" {
-		return false
+		return nil, false
 	}
-	info, err := os.Stat(filepath.Join(path, "manifest.json"))
-	return err == nil && !info.IsDir()
+	verified, err := bundle.VerifyPortableDirectory(path)
+	if err != nil {
+		return nil, false
+	}
+	return &verified, true
 }
 
 func relayEvidenceFromReadyBatches(state *State, records []RelayBatchRecord) []planning.RelayEvidence {
@@ -1340,7 +1337,8 @@ func relayEvidenceFromReadyBatches(state *State, records []RelayBatchRecord) []p
 	}
 	var evidence []planning.RelayEvidence
 	for _, batch := range records {
-		if !portableExportReady(batch.PortableExportDir) {
+		verified, ok := verifiedPortableExport(batch.PortableExportDir)
+		if !ok {
 			continue
 		}
 		evidence = append(evidence, planning.RelayEvidence{
@@ -1348,6 +1346,7 @@ func relayEvidenceFromReadyBatches(state *State, records []RelayBatchRecord) []p
 			RecipeFamily:      batch.RecipeFamily,
 			Backend:           state.Config.Backend,
 			PortableExportDir: batch.PortableExportDir,
+			VerifiedBundle:    verified,
 		})
 	}
 	return evidence
@@ -1640,8 +1639,6 @@ func validatePlanningPreflight(result preflight.Result) error {
 		value string
 	}{
 		{label: "snapshot_digest", value: binding.SnapshotDigest},
-		{label: "compatibility_manifest", value: binding.CompatibilityDigest},
-		{label: "relay_capabilities", value: binding.RelayCapabilitiesDigest},
 		{label: "integration_bundle", value: binding.IntegrationBundleDigest},
 	} {
 		if strings.TrimSpace(item.value) == "" {
@@ -1657,30 +1654,14 @@ func validatePlanningPreflight(result preflight.Result) error {
 func preflightBinding(result preflight.Result) planning.PreflightBinding {
 	return planning.PreflightBinding{
 		SnapshotDigest:          result.SnapshotDigest,
-		CompatibilityDigest:     result.ArtifactDigests["compatibility-manifest.json"],
-		RelayCapabilitiesDigest: result.ArtifactDigests["relay-capabilities.json"],
+		RelayPresent:            result.RelayPresent,
 		IntegrationBundleDigest: result.ContractDigests["integration_bundle"],
 	}
 }
 
 func manifestEvidenceRefs(config Config, consumerIdentity map[string]any) (planning.ManifestEvidenceRefs, error) {
 	refs := planning.ManifestEvidenceRefs{ConsumerIdentity: cloneMap(consumerIdentity)}
-	compatibilityPath := filepath.Join(config.StateDir, "compatibility-manifest.json")
-	capabilitiesPath := filepath.Join(config.StateDir, "relay-capabilities.json")
 	integrationBundlePath, err := retainedIntegrationBundlePath(config)
-	if err != nil {
-		return refs, err
-	}
-	refs.CompatibilityManifest, err = artifactRefForFile("compatibility-manifest", compatibilityPath)
-	if err != nil {
-		return refs, err
-	}
-	compatibility, err := relayCompatibilityFromArtifactFile(compatibilityPath)
-	if err != nil {
-		return refs, err
-	}
-	refs.RelayCompatibility = &compatibility
-	refs.RelayCapabilities, err = artifactRefForFile("relay-capabilities", capabilitiesPath)
 	if err != nil {
 		return refs, err
 	}
@@ -1735,49 +1716,6 @@ func artifactRefForFile(kind string, path string) (contracts.ArtifactRef, error)
 		DigestProfile: digest.Profile,
 		MediaType:     "application/json",
 	}, nil
-}
-
-func relayCompatibilityFromArtifactFile(path string) (contracts.RelayCompatibility, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return contracts.RelayCompatibility{}, fileError(err, path, "open compatibility manifest")
-	}
-	payloadBytes, err := retainedPayloadCanonicalBytes(data)
-	if err != nil {
-		return contracts.RelayCompatibility{}, err
-	}
-	if len(payloadBytes) == 0 {
-		payloadBytes = data
-	}
-	return contracts.ReadRelayCompatibilityBytes(payloadBytes)
-}
-
-func retainedPayloadCanonicalBytes(data []byte) ([]byte, error) {
-	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*32)
-	if err != nil {
-		return nil, nil
-	}
-	object, ok := value.(map[string]any)
-	if !ok {
-		return nil, nil
-	}
-	payloadDigest, ok := object["payload_digest"].(string)
-	if !ok || strings.TrimSpace(payloadDigest) == "" {
-		return nil, nil
-	}
-	payload, hasPayload := object["payload"]
-	if !hasPayload {
-		return nil, diag.New(diag.CodeInvalidCommand, "retained artifact payload_digest requires a retained payload.")
-	}
-	payloadBytes, err := canonjson.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	actualDigest := digest.RawBytes(payloadBytes)
-	if actualDigest != strings.TrimSpace(payloadDigest) {
-		return nil, diag.New(diag.CodeInvalidCommand, "retained artifact payload_digest does not match the retained payload.", diag.WithDetail("actual_digest", actualDigest), diag.WithDetail("expected_digest", strings.TrimSpace(payloadDigest)))
-	}
-	return payloadBytes, nil
 }
 
 func selectedContractRefsAndEvidenceForFile(path string) ([]contracts.ArtifactRef, []planning.SelectedContractEvidence, error) {
