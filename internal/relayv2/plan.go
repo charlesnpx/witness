@@ -481,9 +481,7 @@ func Materialize(directory string, compiled CompiledPlan) error {
 		}
 		temporaryPath := temporary.Name()
 		remove := true
-		if _, err := temporary.Write(input.Bytes); err == nil {
-			err = temporary.Chmod(0o600)
-		}
+		_, err = temporary.Write(input.Bytes)
 		if closeErr := temporary.Close(); err == nil {
 			err = closeErr
 		}

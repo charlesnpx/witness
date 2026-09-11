@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -249,16 +250,25 @@ func requireContext(ctx context.Context, operation string) error {
 
 func invoke(ctx context.Context, operation string, invocation Invocation) ([]byte, error) {
 	commandArgs := append([]string(nil), invocation.Args...)
-	if _, err := exec.LookPath(invocation.Executable); err != nil {
-		return nil, &CommandError{
+	startFailure := func(kind string, cause error, stdout string, stderr string) *CommandError {
+		return &CommandError{
 			Operation:   operation,
 			Executable:  invocation.Executable,
 			Args:        commandArgs,
 			ExitCode:    -1,
-			Kind:        ErrorRelayNotInstalled,
+			Stdout:      stdout,
+			Stderr:      stderr,
+			Kind:        kind,
 			StartFailed: true,
-			Cause:       err,
+			Cause:       cause,
 		}
+	}
+	if _, err := exec.LookPath(invocation.Executable); err != nil {
+		kind := ErrorRelayCommandFailed
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			kind = ErrorRelayNotInstalled
+		}
+		return nil, startFailure(kind, err, "", "")
 	}
 	command := exec.CommandContext(ctx, invocation.Executable, commandArgs...)
 	command.Dir = invocation.WorkingDirectory
@@ -267,17 +277,7 @@ func invoke(ctx context.Context, operation string, invocation Invocation) ([]byt
 	command.Stderr = &stderr
 
 	if err := command.Start(); err != nil {
-		return nil, &CommandError{
-			Operation:   operation,
-			Executable:  invocation.Executable,
-			Args:        commandArgs,
-			ExitCode:    -1,
-			Stdout:      stdout.String(),
-			Stderr:      stderr.String(),
-			Kind:        ErrorRelayCommandFailed,
-			StartFailed: true,
-			Cause:       err,
-		}
+		return nil, startFailure(ErrorRelayCommandFailed, err, stdout.String(), stderr.String())
 	}
 
 	err := command.Wait()

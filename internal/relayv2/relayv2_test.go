@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/charlesnpx/convo-relay/v2/plan"
@@ -147,6 +148,61 @@ func TestAbsentRelayBinaryIsDistinguishable(t *testing.T) {
 	var commandErr *CommandError
 	if !errors.As(err, &commandErr) || commandErr.Kind != ErrorRelayNotInstalled {
 		t.Fatalf("absent Relay error type = %T/%#v, want CommandError kind %q", err, commandErr, ErrorRelayNotInstalled)
+	}
+}
+
+func TestPresentNonExecutableRelayIsCommandFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "convo-relay")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatalf("write non-executable Relay: %v", err)
+	}
+	_, err := Run(context.Background(), path, "plan.json", "blobs", "")
+	if err == nil {
+		t.Fatal("run with a present non-executable Relay succeeded")
+	}
+	if IsRelayNotInstalled(err) {
+		t.Fatalf("present non-executable Relay was classified as absent: %v", err)
+	}
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) || commandErr.Kind != ErrorRelayCommandFailed || !commandErr.StartFailed {
+		t.Fatalf("non-executable Relay error = %T/%#v, want start-failed command error", err, commandErr)
+	}
+}
+
+func TestMaterializeSurfacesWriteFailureWithoutPublishingBlob(t *testing.T) {
+	const limitEnv = "WITNESS_RELAYV2_MATERIALIZE_WRITE_FAILURE"
+	if os.Getenv(limitEnv) == "1" {
+		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{Cur: 1, Max: 1}); err != nil {
+			t.Fatalf("set RLIMIT_FSIZE: %v", err)
+		}
+		compiled, err := Compile(CompileOptions{
+			SessionID: "materialize-write-failure-test",
+			Charter:   []byte("charter bytes"),
+			Findings:  []byte("findings bytes"),
+			Artifacts: []Input{{Name: "artifact", Bytes: []byte("artifact bytes"), MediaType: "text/plain"}},
+		})
+		if err != nil {
+			t.Fatalf("compile test plan: %v", err)
+		}
+		blobDirectory := filepath.Join(t.TempDir(), "blobs")
+		if err := Materialize(blobDirectory, compiled); err == nil {
+			t.Fatal("Materialize succeeded despite RLIMIT_FSIZE")
+		}
+		entries, readErr := os.ReadDir(filepath.Join(blobDirectory, "sha256"))
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			t.Fatalf("read materialized blob directory: %v", readErr)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("published blobs = %#v, want none", entries)
+		}
+		return
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestMaterializeSurfacesWriteFailureWithoutPublishingBlob$")
+	command.Env = append(os.Environ(), limitEnv+"=1")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("write-failure subprocess: %v\n%s", err, output)
 	}
 }
 

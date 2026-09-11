@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -393,6 +394,47 @@ func TestRunBatchesRejectsInvalidInputsBeforeRelayV2Launch(t *testing.T) {
 				t.Fatalf("diagnostics = %#v, want %s", record.Diagnostics, CodeInvalidBatchInput)
 			}
 		})
+	}
+}
+
+func TestRunBatchesRejectsNamedInputOverBudgetBeforeRelayV2Launch(t *testing.T) {
+	batch, options := writeRelayRunInputs(t, "sha256:"+strings.Repeat("b", 64))
+	marker := filepath.Join(t.TempDir(), "relay-invoked")
+	relay := filepath.Join(t.TempDir(), "relay-stub")
+	script := fmt.Sprintf("#!/bin/sh\nprintf invoked > %q\nexit 23\n", marker)
+	if err := os.WriteFile(relay, []byte(script), 0o700); err != nil {
+		t.Fatalf("write Relay stub: %v", err)
+	}
+	options.RelayPath = relay
+	options.NamedInputBudgetBytes = 1
+	options.OutputDir = t.TempDir()
+
+	result, err := RunBatches(context.Background(), []BatchInput{batch}, options)
+	if err != nil {
+		t.Fatalf("RunBatches: %v", err)
+	}
+	if len(result.Runs) != 1 {
+		t.Fatalf("runs = %#v, want one", result.Runs)
+	}
+	record := result.Runs[0]
+	if record.Status != RunStatusLaunchFailed || record.ProviderInvoked != ProviderInvokedFalse || record.ConsumesBatch {
+		t.Fatalf("record = %#v, want non-consuming pre-launch rejection", record)
+	}
+	if record.RelayLaunch == nil || !record.RelayLaunch.StartFailed || len(record.RelayLaunch.Argv) != 0 {
+		t.Fatalf("launch = %#v, want empty pre-launch launch marker", record.RelayLaunch)
+	}
+	if len(record.Diagnostics) == 0 || record.Diagnostics[0].Code != CodeNamedInputBudgetExceeded {
+		t.Fatalf("diagnostics = %#v, want %s", record.Diagnostics, CodeNamedInputBudgetExceeded)
+	}
+	diagnostic := record.Diagnostics[0]
+	if !strings.Contains(diagnostic.Message, "charter") || !strings.Contains(diagnostic.Message, "1-byte") {
+		t.Fatalf("budget diagnostic = %#v, want input name and budget", diagnostic)
+	}
+	if diagnostic.Details["input"] != "charter" || diagnostic.Details["actual_bytes"] == nil || diagnostic.Details["budget_bytes"] != int64(1) {
+		t.Fatalf("budget diagnostic details = %#v, want input and both sizes", diagnostic.Details)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Relay invocation marker exists or could not be checked: %v", err)
 	}
 }
 

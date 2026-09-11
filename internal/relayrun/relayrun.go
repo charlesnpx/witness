@@ -182,6 +182,11 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			result.Runs = append(result.Runs, record)
 			continue
 		}
+		if diagnostics := validateNamedInputBudget(compiled, options.NamedInputBudgetBytes, batch.Plan.BatchID); len(diagnostics) > 0 {
+			rejectBeforeLaunch(&record, launchCWD, diagnostics...)
+			result.Runs = append(result.Runs, record)
+			continue
+		}
 		record.PlanDigest = compiled.Digest
 		cleanup, planPath, blobsPath, err := materializeRelayPlan(options.OutputDir, batch.Plan.BatchID, compiled)
 		if err != nil {
@@ -707,6 +712,28 @@ func compileRelayPlan(batch BatchInput, options Options) (relayv2.CompiledPlan, 
 		Findings:  findingsBytes,
 		Artifacts: artifacts,
 	})
+}
+
+func validateNamedInputBudget(compiled relayv2.CompiledPlan, budgetBytes int64, batchID string) []diag.Diagnostic {
+	if budgetBytes <= 0 {
+		return nil
+	}
+	var diagnostics []diag.Diagnostic
+	for _, input := range compiled.Inputs {
+		actualBytes := int64(len(input.Bytes))
+		if actualBytes <= budgetBytes {
+			continue
+		}
+		diagnostics = append(diagnostics, diag.FromError(diag.New(
+			CodeNamedInputBudgetExceeded,
+			fmt.Sprintf("relay named input %q is %d bytes, exceeding the configured %d-byte budget.", input.Name, actualBytes, budgetBytes),
+			diag.WithDetail("batch_id", batchID),
+			diag.WithDetail("input", input.Name),
+			diag.WithDetail("actual_bytes", actualBytes),
+			diag.WithDetail("budget_bytes", budgetBytes),
+		)))
+	}
+	return diagnostics
 }
 
 func readRelayInput(path string, label string) ([]byte, error) {
