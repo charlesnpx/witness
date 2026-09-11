@@ -2397,7 +2397,7 @@ func writePassRelayV2ExportForTest(t *testing.T, state *State, batch RelayBatchR
 	if err := relayv2.Materialize(blobsPath, compiled); err != nil {
 		t.Fatalf("materialize relay v2 test plan: %v", err)
 	}
-	runValue, err := relayv2.Run(context.Background(), relayPath, planPath, blobsPath)
+	runValue, err := relayv2.Run(context.Background(), relayPath, planPath, blobsPath, "")
 	if err != nil {
 		t.Fatalf("run fake Relay: %v", err)
 	}

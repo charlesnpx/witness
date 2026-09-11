@@ -20,8 +20,6 @@ import (
 	"github.com/charlesnpx/witness/internal/freeze"
 	"github.com/charlesnpx/witness/internal/planning"
 	"github.com/charlesnpx/witness/internal/relayv2"
-
-	"github.com/charlesnpx/convo-relay/v2/plan"
 )
 
 const (
@@ -366,7 +364,7 @@ func validateRequiredRecipe(requirement RecipeRequirement) error {
 		return err
 	}
 
-	compiled, err := relayv2.Compile(relayv2.CompileOptions{
+	_, err = relayv2.Compile(relayv2.CompileOptions{
 		SessionID: "preflight-" + requirement.ID,
 		Task:      "Validate Witness recipe " + requirement.ID + ".",
 		RecipeID:  recipeID,
@@ -379,13 +377,6 @@ func validateRequiredRecipe(requirement RecipeRequirement) error {
 		return diag.New(
 			CodeRecipePlanInvalid,
 			fmt.Sprintf("recipe %q did not compile to a valid Relay v2 plan: %v", requirement.ID, err),
-			diag.WithDetail("recipe_id", requirement.ID),
-		)
-	}
-	if err := plan.Validate(compiled.Plan); err != nil {
-		return diag.New(
-			CodeRecipePlanInvalid,
-			fmt.Sprintf("recipe %q compiled to a plan that failed validation: %v", requirement.ID, err),
 			diag.WithDetail("recipe_id", requirement.ID),
 		)
 	}

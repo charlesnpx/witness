@@ -12,7 +12,6 @@ import (
 
 	"github.com/charlesnpx/convo-relay/v2/bundle"
 	relayplan "github.com/charlesnpx/convo-relay/v2/plan"
-	relayresult "github.com/charlesnpx/convo-relay/v2/result"
 	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/contract/strictjson"
@@ -23,16 +22,15 @@ import (
 )
 
 const (
-	AssembleResultSchemaVersion         = "witness-verification-assemble-result-v2"
-	CodeMissingEvidenceRef              = "assemble_missing_evidence_ref"
-	CodeMissingBatch                    = "assemble_missing_batch"
-	CodeInvalidAssembleBatch            = "assemble_invalid_batch"
-	CodeInvalidRelay                    = "assemble_invalid_relay_verification"
-	CodeInvalidReceipt                  = "assemble_invalid_execution_receipt"
-	CodeInvalidManifest                 = "assemble_invalid_manifest"
-	CodeInvalidPlanDigest               = "assemble_invalid_plan_digest"
-	CodeInvalidRelayRunRecord           = "assemble_invalid_relay_run_record"
-	CodeUnsupportedAssembleResultSchema = "assemble_unsupported_result_schema"
+	AssembleResultSchemaVersion = "witness-verification-assemble-result-v2"
+	CodeMissingEvidenceRef      = "assemble_missing_evidence_ref"
+	CodeMissingBatch            = "assemble_missing_batch"
+	CodeInvalidAssembleBatch    = "assemble_invalid_batch"
+	CodeInvalidRelay            = "assemble_invalid_relay_verification"
+	CodeInvalidReceipt          = "assemble_invalid_execution_receipt"
+	CodeInvalidManifest         = "assemble_invalid_manifest"
+	CodeInvalidPlanDigest       = "assemble_invalid_plan_digest"
+	CodeInvalidRelayRunRecord   = "assemble_invalid_relay_run_record"
 )
 
 type AssembleOptions struct {
@@ -80,28 +78,6 @@ type AssembleResult struct {
 	PendingVerification   []string                       `json:"pending_verification,omitempty"`
 	ReceiptContradictions []string                       `json:"receipt_contradictions,omitempty"`
 	Diagnostics           []diag.Diagnostic              `json:"diagnostics,omitempty"`
-}
-
-func ReadAssembleResultBytes(data []byte) (AssembleResult, error) {
-	value, err := strictjson.DecodeAnyBytes(data, strictjson.DefaultMaxBytes*8)
-	if err != nil {
-		return AssembleResult{}, err
-	}
-	document, ok := value.(map[string]any)
-	if !ok {
-		return AssembleResult{}, diag.New(CodeUnsupportedAssembleResultSchema, "verification assemble result must be a JSON object.", diag.WithPath("/schema_version"))
-	}
-	actual, _ := document["schema_version"].(string)
-	if actual != AssembleResultSchemaVersion {
-		return AssembleResult{}, diag.New(
-			CodeUnsupportedAssembleResultSchema,
-			unsupportedSchemaVersionMessage("verification assemble result", actual, AssembleResultSchemaVersion, "witness-verification-assemble-result-v1", "after the embedded verification manifest expanded its exclusion reasons."),
-			diag.WithPath("/schema_version"),
-			diag.WithDetail("expected", AssembleResultSchemaVersion),
-			diag.WithDetail("actual", actual),
-		)
-	}
-	return strictjson.DecodeBytes[AssembleResult](data, strictjson.DefaultMaxBytes*8)
 }
 
 func Assemble(options AssembleOptions) (*AssembleResult, error) {
@@ -279,29 +255,12 @@ func assembleRelayV2Evidence(relay RelayEvidence, planned BatchPlan, verificatio
 	if relay.VerifiedBundle == nil {
 		return relayV2Assembly{}, fmt.Errorf("relay v2 verified bundle is required")
 	}
-	verified := *relay.VerifiedBundle
-	if strings.TrimSpace(relay.PortableExportDir) != "" {
-		fresh, err := bundle.VerifyPortableDirectory(relay.PortableExportDir)
-		if err != nil {
-			return relayV2Assembly{}, fmt.Errorf("verify portable bundle: %w", err)
-		}
-		verified = fresh
-	} else {
-		if err := bundle.Validate(verified.Manifest); err != nil {
-			return relayV2Assembly{}, fmt.Errorf("validate portable bundle manifest: %w", err)
-		}
-		if err := relayplan.Validate(verified.Session.Plan); err != nil {
-			return relayV2Assembly{}, fmt.Errorf("validate portable bundle plan: %w", err)
-		}
-		if err := relayresult.ValidateRoot(verified.Session.Root); err != nil {
-			return relayV2Assembly{}, fmt.Errorf("validate portable bundle root: %w", err)
-		}
-		if err := relayresult.ValidateTranscript(verified.Transcript); err != nil {
-			return relayV2Assembly{}, fmt.Errorf("validate portable bundle transcript: %w", err)
-		}
-		if err := relayresult.ValidateDiagnostics(verified.Diagnostics); err != nil {
-			return relayV2Assembly{}, fmt.Errorf("validate portable bundle diagnostics: %w", err)
-		}
+	if strings.TrimSpace(relay.PortableExportDir) == "" {
+		return relayV2Assembly{}, fmt.Errorf("relay v2 portable bundle directory is required")
+	}
+	verified, err := bundle.VerifyPortableDirectory(relay.PortableExportDir)
+	if err != nil {
+		return relayV2Assembly{}, fmt.Errorf("verify portable bundle: %w", err)
 	}
 
 	value := verified.Session.Plan

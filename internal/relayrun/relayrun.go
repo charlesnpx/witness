@@ -193,7 +193,7 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		runValue, err := relayv2.Run(ctx, options.RelayPath, planPath, blobsPath)
+		runValue, err := relayv2.Run(ctx, options.RelayPath, planPath, blobsPath, launchCWD)
 		record.RelayLaunch = launchRecordForRelayV2(options.RelayPath, planPath, blobsPath, err, launchCWD)
 		if err != nil {
 			cleanup()
@@ -257,19 +257,10 @@ func RunBatches(ctx context.Context, batches []BatchInput, options Options) (*Re
 			result.Runs = append(result.Runs, record)
 			continue
 		}
-		verifiedDigest, err := plan.Digest(verified.Session.Plan)
-		if err != nil {
-			record.Status = contracts.RecordStatusFailed
-			record.Diagnostics = append(record.Diagnostics, commandDiagnostic(CodeRelayVerifyFailed, "verified Relay bundle plan digest could not be computed.", err))
-		} else if verifiedDigest != record.PlanDigest {
-			record.Status = contracts.RecordStatusFailed
-			record.Diagnostics = append(record.Diagnostics, diag.FromError(diag.New(CodeRelayVerifyFailed, "verified Relay bundle plan digest does not match the digest recorded before launch.", diag.WithDetail("batch_id", batch.Plan.BatchID), diag.WithDetail("recorded_digest", record.PlanDigest), diag.WithDetail("verified_digest", verifiedDigest))))
-		} else {
-			record.VerifiedBundle = &verified
-			record.PortableExportDigest = verified.Manifest.ManifestDigest
-			if record.Status != contracts.RecordStatusFailed {
-				record.Status = contracts.RecordStatusValid
-			}
+		record.VerifiedBundle = &verified
+		record.PortableExportDigest = verified.Manifest.ManifestDigest
+		if record.Status != contracts.RecordStatusFailed {
+			record.Status = contracts.RecordStatusValid
 		}
 		result.Runs = append(result.Runs, record)
 	}
@@ -510,9 +501,6 @@ func requireValidRunRecord(record RunRecord, source ...map[string]any) error {
 	}
 	if !record.ConsumesBatch {
 		return diag.New(CodeInvalidRunRecord, "provider_invoked=true or unknown run records must consume the batch.")
-	}
-	if len(providerEvidence) > 0 && record.ProviderInvoked != ProviderInvokedTrue {
-		return diag.New(CodeInvalidRunRecord, "session or provider artifacts require provider_invoked=true.")
 	}
 	if len(providerEvidence) == 0 && record.ProviderInvoked == ProviderInvokedTrue {
 		return diag.New(CodeInvalidRunRecord, "provider_invoked=true requires a session or provider artifact.")

@@ -58,7 +58,7 @@ func TestBundledRecipesCompileToValidPlans(t *testing.T) {
 func TestRunExportAndVerifyFullLoop(t *testing.T) {
 	relay := requireRelayBinary(t)
 	compiled, planPath, blobsPath := writeMinimalPlan(t)
-	value, err := Run(context.Background(), relay, planPath, blobsPath)
+	value, err := Run(context.Background(), relay, planPath, blobsPath, "")
 	if err != nil {
 		var commandErr *CommandError
 		if errors.As(err, &commandErr) {
@@ -85,7 +85,7 @@ func TestRunExportAndVerifyFullLoop(t *testing.T) {
 func TestVerifyDifferentExpectedDigestNamesBothDigests(t *testing.T) {
 	relay := requireRelayBinary(t)
 	compiled, planPath, blobsPath := writeMinimalPlan(t)
-	value, err := Run(context.Background(), relay, planPath, blobsPath)
+	value, err := Run(context.Background(), relay, planPath, blobsPath, "")
 	if err != nil {
 		var commandErr *CommandError
 		if errors.As(err, &commandErr) {
@@ -137,7 +137,7 @@ func TestAbsentRelayBinaryIsDistinguishable(t *testing.T) {
 		t.Fatalf("write placeholder plan: %v", err)
 	}
 	missing := filepath.Join(root, "missing", "convo-relay")
-	_, err := Run(context.Background(), missing, planPath, filepath.Join(root, "blobs"))
+	_, err := Run(context.Background(), missing, planPath, filepath.Join(root, "blobs"), "")
 	if err == nil {
 		t.Fatal("run with an absent Relay executable succeeded")
 	}

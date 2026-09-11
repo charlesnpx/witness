@@ -4,15 +4,14 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/charlesnpx/convo-relay/v2/bundle"
 	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/charter"
-	"github.com/charlesnpx/witness/contract/diag"
 	"github.com/charlesnpx/witness/contract/digest"
 	"github.com/charlesnpx/witness/internal/adjudicate"
 	"github.com/charlesnpx/witness/internal/changesurface"
@@ -624,6 +623,71 @@ func TestAssembleBindsVerdictsToPortableCanonicalResult(t *testing.T) {
 	}
 }
 
+func TestAssembleRejectsSerializedVerifiedBundleWithoutPortableDirectory(t *testing.T) {
+	frozen := planningTestFrozenCharter(t)
+	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
+	roleOutput := planningTestRoleOutput(frozen, contracts.RoleDefect, []contracts.Finding{finding})
+	planResult, err := Run(Options{
+		FrozenCharter: frozen,
+		RoleOutputs:   []RoleOutputInput{{Path: "defect.json", Document: roleOutput}},
+		Preflight:     planningTestPreflightBinding(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	batch := planResult.Batches[0]
+	verified, portableDir := writePlanningRelayV2Bundle(t, batch, canonjson.MustMarshal(frozen))
+	exportedVerdicts, err := contracts.ReadRelayWitnessVerdictsBytes([]byte(verified.Session.Root.Result.Value))
+	if err != nil {
+		t.Fatalf("decode fake Relay result: %v", err)
+	}
+	exportedVerdicts.Verdicts[0].Rationale = "edited after export"
+	tampered := *verified
+	tampered.Session.Root.Result.Value = string(canonjson.MustMarshal(exportedVerdicts))
+	serialized, err := json.Marshal(struct {
+		VerifiedBundle *bundle.Verification `json:"verified_bundle"`
+	}{VerifiedBundle: &tampered})
+	if err != nil {
+		t.Fatalf("serialize run-record evidence: %v", err)
+	}
+	var decoded struct {
+		VerifiedBundle *bundle.Verification `json:"verified_bundle"`
+	}
+	if err := json.Unmarshal(serialized, &decoded); err != nil {
+		t.Fatalf("decode run-record evidence: %v", err)
+	}
+	if err := os.RemoveAll(portableDir); err != nil {
+		t.Fatalf("delete portable bundle directory: %v", err)
+	}
+
+	result, err := Assemble(AssembleOptions{
+		Plan: planResult.Plan,
+		Batches: []BatchEvidence{{
+			BatchID:  batch.Plan.BatchID,
+			Document: batch.Document,
+		}},
+		RelayResults: []RelayEvidence{{
+			BatchID:        batch.Plan.BatchID,
+			RecipeFamily:   batch.Plan.RecipeFamily,
+			Backend:        "codex",
+			VerifiedBundle: decoded.VerifiedBundle,
+		}},
+		EvidenceRefs: validManifestEvidenceRefs(),
+	})
+	if err == nil {
+		t.Fatal("Assemble accepted serialized bundle evidence without a portable directory")
+	}
+	if result == nil || len(result.Manifest.Batches) != 1 {
+		t.Fatalf("result = %#v, want manifest batch record", result)
+	}
+	if record := result.Manifest.Batches[0]; record.Status == contracts.RecordStatusValid {
+		t.Fatalf("manifest batch = %#v, want unavailable or failed", record)
+	}
+	if len(result.PendingVerification) != 1 || result.PendingVerification[0] != "finding-1" {
+		t.Fatalf("pending verification = %#v, want finding-1", result.PendingVerification)
+	}
+}
+
 func TestAssembleRejectsPortableCharterDigestMismatchPending(t *testing.T) {
 	frozen := planningTestFrozenCharter(t)
 	finding := planningTestFinding("finding-1", contracts.SeverityHigh, contracts.WitnessStrengthConstructed)
@@ -915,38 +979,6 @@ func TestAssembleRejectsV1PlanBeforeDigestAcceptance(t *testing.T) {
 	}
 	if planningErrorCode(err) != CodeInvalidPlanDigest {
 		t.Fatalf("err = %v, want %s", err, CodeInvalidPlanDigest)
-	}
-}
-
-func TestReadAssembleResultBytesRefusesActualSchemaVersion(t *testing.T) {
-	for _, actual := range []string{"witness-verification-assemble-result-v1", "", "future-version"} {
-		t.Run(schemaVersionTestName(actual), func(t *testing.T) {
-			data := []byte(`{"manifest":{},"legacy_shape_field":true}`)
-			if actual != "" {
-				data = []byte(fmt.Sprintf(`{"schema_version":%q,"manifest":{},"legacy_shape_field":true}`, actual))
-			}
-			_, err := ReadAssembleResultBytes(data)
-			if err == nil {
-				t.Fatalf("ReadAssembleResultBytes accepted %q", actual)
-			}
-			diagnostic := diag.FromError(err)
-			if diagnostic.Code != CodeUnsupportedAssembleResultSchema || diagnostic.Path != "/schema_version" {
-				t.Fatalf("diagnostic = %#v", diagnostic)
-			}
-			if strings.Contains(diagnostic.Message, "unknown_json_field") || !strings.Contains(diagnostic.Message, AssembleResultSchemaVersion) {
-				t.Fatalf("diagnostic = %#v, want version refusal before strict decode", diagnostic)
-			}
-			if actual == "" {
-				if !strings.Contains(diagnostic.Message, "missing or unversioned") {
-					t.Fatalf("diagnostic = %#v, want missing-version wording", diagnostic)
-				}
-			} else if !strings.Contains(diagnostic.Message, actual) {
-				t.Fatalf("diagnostic = %#v, want message to name %q", diagnostic, actual)
-			}
-			if diagnostic.Details["actual"] != actual || diagnostic.Details["expected"] != AssembleResultSchemaVersion {
-				t.Fatalf("schema diagnostic details = %#v", diagnostic.Details)
-			}
-		})
 	}
 }
 

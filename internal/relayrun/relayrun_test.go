@@ -29,6 +29,19 @@ func TestRunBatchesExecutesAndVerifiesRelayV2Plan(t *testing.T) {
 	batch, options := writeRelayRunInputs(t, witnessDigest)
 	options.RelayPath = relay
 	options.OutputDir = t.TempDir()
+	launchTarget := t.TempDir()
+	launchLink := filepath.Join(t.TempDir(), "launch-cwd")
+	if err := os.Symlink(launchTarget, launchLink); err != nil {
+		t.Fatalf("symlink launch CWD: %v", err)
+	}
+	launchMarker := filepath.Join(t.TempDir(), "relay-cwd")
+	launcher := filepath.Join(t.TempDir(), "relay-wrapper")
+	launcherScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = run ]; then pwd -P > %q; fi\nexec %q \"$@\"\n", launchMarker, relay)
+	if err := os.WriteFile(launcher, []byte(launcherScript), 0o700); err != nil {
+		t.Fatalf("write Relay wrapper: %v", err)
+	}
+	options.RelayPath = launcher
+	options.LaunchCWD = launchLink
 
 	run, err := RunBatches(context.Background(), []BatchInput{batch}, options)
 	if err != nil {
@@ -38,6 +51,20 @@ func TestRunBatchesExecutesAndVerifiesRelayV2Plan(t *testing.T) {
 		t.Fatalf("run records = %#v, want one record", run.Runs)
 	}
 	record := run.Runs[0]
+	wantLaunchCWD := evalRelayPath(t, launchLink)
+	launchedCWD, err := os.ReadFile(launchMarker)
+	if err != nil {
+		t.Fatalf("read Relay working-directory marker: %v", err)
+	}
+	if got := strings.TrimSpace(string(launchedCWD)); got != wantLaunchCWD {
+		t.Fatalf("Relay working directory = %q, want %q", got, wantLaunchCWD)
+	}
+	if record.RelayLaunch == nil {
+		t.Fatal("run record omitted Relay launch evidence")
+	}
+	if got := evalRelayPath(t, record.RelayLaunch.WorkingDirectory); got != wantLaunchCWD {
+		t.Fatalf("retained Relay working directory = %q, want %q", got, wantLaunchCWD)
+	}
 	if record.Status != contracts.RecordStatusValid {
 		t.Fatalf("record status = %q, diagnostics = %#v", record.Status, record.Diagnostics)
 	}
@@ -118,6 +145,7 @@ func TestRunBatchesPreservesInvocationEvidencePresence(t *testing.T) {
 			wantInvoked:  ProviderInvokedUnknown,
 			wantConsumes: true,
 			wantStatus:   contracts.RecordStatusUnavailable,
+			wantSession:  "session-dir",
 		},
 		{
 			name:         "explicit zero",
@@ -163,8 +191,8 @@ func TestRunBatchesPreservesInvocationEvidencePresence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode record: %v", err)
 			}
-			if len(decoded) != 1 || decoded[0].ProviderInvocationCount != count || decoded[0].ProviderInvocationCountPresent != present {
-				t.Fatalf("decoded evidence = %#v, want count:%d present:%t", decoded, count, present)
+			if len(decoded) != 1 || decoded[0].ProviderInvocationCount != count || decoded[0].ProviderInvocationCountPresent != present || decoded[0].SessionDir != test.wantSession || decoded[0].ConsumesBatch != test.wantConsumes {
+				t.Fatalf("decoded evidence = %#v, want count:%d present:%t session:%q consumes:%t", decoded, count, present, test.wantSession, test.wantConsumes)
 			}
 		})
 	}

@@ -87,8 +87,9 @@ func IsRelayNotInstalled(err error) bool {
 // Run invokes the operator-facing supplied-plan command, decodes its JSON into
 // Relay's public result.Result, and validates that result before returning it.
 // The plan file and blob directory are passed unchanged to Relay as --plan and
-// --blobs, respectively.
-func Run(ctx context.Context, executable string, planPath string, blobsDirectory string) (result.Result, error) {
+// --blobs, respectively. workingDirectory is the directory in which Relay is
+// actually launched.
+func Run(ctx context.Context, executable string, planPath string, blobsDirectory string, workingDirectory string) (result.Result, error) {
 	var zero result.Result
 	if err := requireContext(ctx, "run"); err != nil {
 		return zero, err
@@ -101,7 +102,7 @@ func Run(ctx context.Context, executable string, planPath string, blobsDirectory
 	}
 
 	args := []string{"run", "--plan", planPath, "--blobs", blobsDirectory, "--json"}
-	body, err := invoke(ctx, "run", executable, args...)
+	body, err := invoke(ctx, "run", executable, workingDirectory, args...)
 	if err != nil {
 		return zero, err
 	}
@@ -144,7 +145,7 @@ func Export(ctx context.Context, executable string, sessionDirectory string, out
 		"--output", outputDirectory,
 		"--json",
 	}
-	body, err := invoke(ctx, "export", executable, args...)
+	body, err := invoke(ctx, "export", executable, "", args...)
 	if err != nil {
 		return err
 	}
@@ -214,10 +215,11 @@ func requireContext(ctx context.Context, operation string) error {
 	return nil
 }
 
-func invoke(ctx context.Context, operation string, executable string, args ...string) ([]byte, error) {
+func invoke(ctx context.Context, operation string, executable string, workingDirectory string, args ...string) ([]byte, error) {
 	executable = relayExecutable(executable)
 	commandArgs := append([]string(nil), args...)
 	command := exec.CommandContext(ctx, executable, commandArgs...)
+	command.Dir = workingDirectory
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
