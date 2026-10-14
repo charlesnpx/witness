@@ -5,6 +5,7 @@ import (
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/digest"
 	contractreview "github.com/charlesnpx/witness/contract/review"
+	"math"
 )
 
 // reviewerSchema describes the strict review-report-v2 boundary. Validation of
@@ -15,12 +16,15 @@ func reviewerSchema(request contractreview.ReviewRequestV2Document, frozen chart
 	for index, goal := range frozen.Charter.Goals {
 		goalIDs[index] = goal.ID
 	}
-	goalID := map[string]any{"type": "string"}
-	evaluatedGoals := map[string]any{"type": "array", "items": goalID}
+	// Without declared goals, Witness rejects every goal reference, so the item
+	// schema rejects every item while still allowing empty arrays.
+	var goalID any = false
+	evaluatedGoals := map[string]any{"type": "array"}
 	if len(goalIDs) > 0 {
-		goalID["enum"] = goalIDs
+		goalID = map[string]any{"type": "string", "enum": goalIDs}
 		evaluatedGoals["minItems"] = 1
 	}
+	evaluatedGoals["items"] = goalID
 	stableID := map[string]any{"type": "string", "minLength": 1, "pattern": `^[A-Za-z0-9][A-Za-z0-9._:-]*$`}
 	nonBlank := reviewerNonBlankStringSchema()
 	title := reviewerNonBlankStringSchema()
@@ -149,7 +153,7 @@ func reviewerSchema(request contractreview.ReviewRequestV2Document, frozen chart
 				charter.DimensionEnvironments, charter.DimensionScaleBounds, charter.DimensionCompatibilityPromises, charter.DimensionThreatModel,
 			),
 			// The decoder accepts omitted or null anchor_index as zero.
-			"anchor_index":      map[string]any{"type": []string{"integer", "null"}, "minimum": 0},
+			"anchor_index":      map[string]any{"type": []string{"integer", "null"}, "minimum": 0, "maximum": int64(math.MaxInt)},
 			"property":          nonBlank,
 			"value":             map[string]any{"type": []string{"string", "null"}},
 			"affected_decision": nonBlank,

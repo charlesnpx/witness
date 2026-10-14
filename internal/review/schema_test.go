@@ -3,6 +3,7 @@ package review
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -176,6 +177,7 @@ func TestReviewerSchemaRejectsContractViolations(t *testing.T) {
 		{"annotation line overflow", []reviewerReportChange{{path: "/findings/0/annotation/line", value: uint64(1 << 32)}}},
 		{"invalid question dimension", []reviewerReportChange{{path: "/missing_goal_questions/0/dimension", value: "other-dimension"}}},
 		{"negative question anchor", []reviewerReportChange{{path: "/missing_goal_questions/0/anchor_index", value: -1}}},
+		{"question anchor overflow", []reviewerReportChange{{path: "/missing_goal_questions/0/anchor_index", value: uint64(math.MaxInt) + 1}}},
 		{"empty evaluated paths", []reviewerReportChange{{path: "/evaluation/evaluated_paths", value: []string{}}}},
 		{"invalid evaluated path", []reviewerReportChange{{path: "/evaluation/evaluated_paths", value: []string{" "}}}},
 		{"empty evaluated goals", []reviewerReportChange{{path: "/evaluation/evaluated_goal_ids", value: []string{}}}},
@@ -236,6 +238,14 @@ func TestReviewerSchemaWithoutCharterGoals(t *testing.T) {
 		t.Fatalf("schema rejected a report for a Charter without goals: %v", err)
 	}
 	assertReviewerAdapterValidation(t, request, frozen, report.Reviewer, instance, true)
+	for _, path := range []string{"/findings/0/charter_goal_ids", "/evaluation/evaluated_goal_ids"} {
+		invented := reviewerTestJSONObject(t, marshalReviewerTestJSON(t, report))
+		changeReviewerTestReport(t, invented, []reviewerReportChange{{path: path, value: []string{"invented"}}})
+		if err := schema.Validate(invented); err == nil {
+			t.Errorf("schema accepted an undeclared goal at %s for a Charter without goals", path)
+		}
+		assertReviewerAdapterValidation(t, request, frozen, report.Reviewer, invented, false)
+	}
 }
 
 type reviewerReportChange struct {
