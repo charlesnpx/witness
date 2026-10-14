@@ -1,0 +1,75 @@
+{
+  "schema_version": "review-report-v2",
+  "request_digest": "sha256:513e89179d5f7feb3cf91de5e497186945f9006e6384e0a2eed7b0e1801f7b9a",
+  "recipe_digest": "sha256:dcfbaa0336f70d730f3566b647318614733d67f6709cb8ddb9538c29e6c0e16b",
+  "reviewer": "economy",
+  "charter_hash": "sha256:c7c5e43d4b267606b6d5662332693d571d0d3f3bdb33aec446062ccfc6807d6e",
+  "review_input_digest": "sha256:2c57c76ded83d4bde735fc8f63048e0ebb6af8a17bf043bc18b1818e3c0c2951",
+  "source_identity": {
+    "kind": "git",
+    "id": "3fb31dab5ed406dfed8b84d169dc26418629fe34"
+  },
+  "consumer_identity": {
+    "kind": "witness",
+    "id": "review"
+  },
+  "findings": [
+    {
+      "id": "economy-001",
+      "kind": "defect",
+      "severity": "medium",
+      "title": "The new /view route gate lacks a flag-off regression test",
+      "goal_ids": [
+        "tests-cover-both-flag-states"
+      ],
+      "location": {
+        "path": "apps/echo-client/src/pages/health-monitoring/pages/health-reports-v2/HealthReportsPage.tsx",
+        "start_line": 40,
+        "end_line": 45
+      },
+      "description": "The existing HealthReportsPage.test.tsx visits /view/123 only with readOnlyHealthReports enabled (lines 45\u201348). Its disabled-flag case visits /review/123 (lines 60\u201364). Removing just the new guard around the /view route would leave those assertions unchanged. The getReportMismatchRedirect tests exercise URL construction, not route registration. Consequently, this gate does not meet the Charter's explicit requirement for tests that detect gate removal.",
+      "recommendation": "Extend the existing router suite with a disabled-flag visit to /view/123 and assert that ArchivedReportPage is not rendered. Retain the enabled-flag case. This requires no additional production abstraction.",
+      "verification": "Established by static inspection of the route and test callers; tests and mutation checks were not executed."
+    }
+  ],
+  "evaluation": {
+    "evaluated_paths": [
+      "apps/echo-client/src/components/ActionsV2/MaximoActionTable/TcdPill.tsx",
+      "apps/echo-client/src/components/ActionsV2/MaximoActionTable/__tests__/TcdPill.test.tsx",
+      "apps/echo-client/src/components/DesignSystem/MoreActionsButton.tsx",
+      "apps/echo-client/src/components/DesignSystem/__tests__/MoreActionsButton.test.tsx",
+      "apps/echo-client/src/components/Risks/RevisionHistoryPanel/RevisionHistoryItem.tsx",
+      "apps/echo-client/src/components/Risks/RevisionHistoryPanel/__tests__/RevisionHistoryItem.test.tsx",
+      "apps/echo-client/src/components/Risks/RevisionHistoryPanel/__tests__/RevisionHistoryList.test.tsx",
+      "apps/echo-client/src/components/Risks/RevisionHistoryPanel/__tests__/RevisionHistoryPanel.test.tsx",
+      "apps/echo-client/src/hooks/report-form-config/__tests__/getReportMismatchRedirect.test.ts",
+      "apps/echo-client/src/hooks/report-form-config/getReportMismatchRedirect.ts",
+      "apps/echo-client/src/pages/actions/components/__tests__/ActiveActionsTable.test.tsx",
+      "apps/echo-client/src/pages/actions/hooks/__tests__/useActiveActions.test.ts",
+      "apps/echo-client/src/pages/actions/hooks/useActiveActions.ts",
+      "apps/echo-client/src/pages/health-monitoring/pages/health-reports-v2/HealthReportsPage.tsx",
+      "apps/echo-client/src/pages/health-monitoring/pages/health-reports-v2/pages/review-and-submit/ReviewAndSubmitPage.tsx",
+      "apps/echo-client/src/pages/health-monitoring/pages/health-reports-v2/pages/review-and-submit/__tests__/ReviewAndSubmitPage.test.tsx",
+      "apps/echo-server/src/db/actions-v2/__tests__/action-group.test.ts",
+      "apps/echo-server/src/db/actions-v2/action-groups.ts"
+    ],
+    "evaluated_goal_ids": [
+      "flag-off-matches-pre-release",
+      "flag-on-unchanged",
+      "ungated-action-group-order-restored",
+      "tests-cover-both-flag-states"
+    ],
+    "method": "Static review of all 18 changed files against the supplied diff and Charter. Other files were inspected only for caller, routing, component, and test context.",
+    "goal_assessments": {
+      "flag-off-matches-pre-release": "Inspected saved-approver initialization, legacy Chip rendering, button background and hover specificity, report routes and redirect targets, and undecided Monitor icons. No implementation mismatch with the Charter's stated behaviors was identified.",
+      "flag-on-unchanged": "Compared enabled branches with the supplied pre-PR diff; no behavioral change was identified.",
+      "ungated-action-group-order-restored": "Confirmed removal of server ordering and placement of descending updatedAt sorting on a copied array in useActiveActions. Traced the risk-edit search consuming the unsorted API result and inspected both ordering tests.",
+      "tests-cover-both-flag-states": "Inspected paired flag tests and existing caller tests. Identified the uncovered disabled state of the newly gated /view route."
+    },
+    "economy_assessment": "No material avoidable implementation complexity identified. The changes use localized conditions, reuse existing components, share hover declarations, and keep Actions-page ordering local to its consumer.",
+    "limitations": [
+      "Tests, lint, and builds were not run: the frozen snapshot has no installed dependencies, and Jest, React, and TypeScript could not be resolved.",
+      "The snapshot has no Git metadata; historical comparison used the supplied diff and the Charter's description of pre-release behavior."
+    ]
+  }
+}

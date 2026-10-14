@@ -16,6 +16,12 @@ witness review run \
   -out-dir /path/to/review-run
 ```
 
+- `-model <model>` selects the Delegate backend model; blank after trimming uses the backend default.
+- `-effort <effort>` selects the Delegate backend effort; blank after trimming uses the backend default.
+- `-diff-file <path>` supplies the unified diff of the change under review; reviewers evaluate the diff and use the source tree as context.
+
+Reviewers run read-only without network and may not be able to run tests.
+
 The command prepares the frozen request, reviewer prompts, output schemas, and
 completion record. It submits independent defect and economy jobs through
 Delegate and observes them through Agentbus. The absent configuration file is
@@ -29,6 +35,11 @@ negative), and `21` means `failed_to_run` (the review did not produce a usable
 run). Other command or setup failures use `2`. The JSON result remains on
 stdout for every completed verdict, and its `ok` field is false unless the
 verdict is `satisfied`.
+
+For the simple adapter, a run is `not_satisfied` when any valid required report
+contains an `introduced` or `worsened` finding, unless a run failure requires
+`failed_to_run`. Pre-existing and unattributed findings are reported but do not
+block satisfaction, and a valid empty report can be `satisfied`.
 
 Treat the completion verdict as an observation of this process. Execution
 evidence is constructed by the host from observed job outcomes; a report that

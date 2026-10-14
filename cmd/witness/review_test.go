@@ -36,8 +36,14 @@ func TestReviewRunFailedToRunExitAndRejectsSymlinkedRequest(t *testing.T) {
 	if err := route([]string{"charter", "init", "-out", charterPath}); err != nil {
 		t.Fatalf("charter init: %v", err)
 	}
+	diffPath := filepath.Join(directory, "input.diff")
+	diffBytes := []byte("--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-before\n+after\n")
+	if err := os.WriteFile(diffPath, diffBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	delegatePath := filepath.Join(directory, "delegate")
 	writeExecutableTestFile(t, delegatePath, `#!/bin/sh
+printf '%s\000' "$@" > "$0.args"
 case "$*" in
   *defect*) printf '{"jobId":"job-defect"}\n' ;;
   *economy*) printf '{"jobId":"job-economy"}\n' ;;
@@ -67,8 +73,13 @@ exit 4
 		"-charter", charterPath,
 		"-source-dir", sourceDirectory,
 		"-out-dir", filepath.Join(directory, "run"),
+		"-diff-file", diffPath,
+		"-config", filepath.Join(directory, "review-config.json"),
+		"-subject-head", "test-head",
 		"-delegate", delegatePath,
 		"-agentbus", agentbusPath,
+		"-model", "gpt-6-astra",
+		"-effort", "high",
 		"-poll-interval", "1ms",
 		"-transcript-page-size", "2",
 	}
@@ -95,6 +106,17 @@ exit 4
 	}
 	if result["ok"] != false || result["verdict"] != "failed_to_run" {
 		t.Fatalf("review run result = %#v, want ok false and failed_to_run", result)
+	}
+	delegateArgs, err := os.ReadFile(delegatePath + ".args")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(delegateArgs), "\x00--model\x00gpt-6-astra\x00--effort\x00high\x00") {
+		t.Fatalf("delegate argv = %q, want model gpt-6-astra and effort high", delegateArgs)
+	}
+	copiedDiff, err := os.ReadFile(filepath.Join(directory, "run", "packets", "change.diff"))
+	if err != nil || string(copiedDiff) != string(diffBytes) {
+		t.Fatalf("packet diff = %q (read error: %v), want %q", copiedDiff, err, diffBytes)
 	}
 
 	symlinkOutputDirectory := t.TempDir()
