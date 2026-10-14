@@ -36,6 +36,11 @@ run). Other command or setup failures use `2`. The JSON result remains on
 stdout for every completed verdict, and its `ok` field is false unless the
 verdict is `satisfied`.
 
+For the simple adapter, a run is `not_satisfied` when any valid required report
+contains an `introduced` or `worsened` finding, unless a run failure requires
+`failed_to_run`. Pre-existing and unattributed findings are reported but do not
+block satisfaction, and a valid empty report can be `satisfied`.
+
 Treat the completion verdict as an observation of this process. Execution
 evidence is constructed by the host from observed job outcomes; a report that
 claims it ran is not execution evidence. A missing, unreadable, digest-mismatched,

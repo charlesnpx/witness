@@ -702,6 +702,11 @@ func testFrozenCharter(t *testing.T) *charter.FrozenCharter {
 
 func testReports(t *testing.T, request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter) map[string]string {
 	t.Helper()
+	return testReportsWithFindings(t, request, frozen, nil)
+}
+
+func testReportsWithFindings(t *testing.T, request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, findings map[string][]contractreview.ReviewReportV2Finding) map[string]string {
+	t.Helper()
 	directory := t.TempDir()
 	paths := make(map[string]string, len(request.RequiredOutputs))
 	requestDigest, err := contractreview.ReviewRequestV2Digest(request)
@@ -718,7 +723,7 @@ func testReports(t *testing.T, request contractreview.ReviewRequestV2Document, f
 			ReviewInputDigest: request.ReviewInputDigest,
 			SourceIdentity:    contractreview.Identity{Kind: "test", ID: "source"},
 			ConsumerIdentity:  request.ConsumerIdentity,
-			Findings:          []contractreview.ReviewReportV2Finding{},
+			Findings:          append([]contractreview.ReviewReportV2Finding{}, findings[reviewer]...),
 			Evaluation:        &contractreview.ReportEvaluation{EvaluatedPaths: []string{"."}, EvaluatedGoalIDs: []string{}},
 		}
 		if err := contractreview.RequireValidReviewReportV2(report, request, frozen); err != nil {
