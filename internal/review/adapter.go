@@ -273,6 +273,11 @@ func (adapter SimpleAdapter) Run(ctx context.Context, options SimpleRunOptions) 
 	if !observed.Complete || !allJobsCompleted || !observed.ResultArtifactAvailable || !allReportsValid(observed, options.Request.RequiredOutputs) || (requireTranscript && !result.TranscriptComplete) || !sourceStable {
 		verdict = contractreview.CompletionVerdictFailedToRun
 	}
+	blocking := blockingFindings(result.Jobs)
+	result.Diagnostics = append(result.Diagnostics, blocking...)
+	if verdict == contractreview.CompletionVerdictSatisfied && len(blocking) > 0 {
+		verdict = contractreview.CompletionVerdictNotSatisfied
+	}
 	result.Completion, err = contractreview.NewReviewCompletionDocument(options.Request, result.Evidence, result.ReportDigests, verdict)
 	if err != nil {
 		return SimpleRunResult{}, fmt.Errorf("construct review completion: %w", err)
@@ -316,6 +321,25 @@ func allReportsValid(observed contractreview.ObservedReviewExecution, required [
 		}
 	}
 	return true
+}
+
+// blockingFindings returns diagnostics for introduced or worsened findings in
+// valid reports from required reviewer jobs, regardless of severity or kind.
+// Pre-existing and unattributed findings do not block satisfaction.
+func blockingFindings(jobs []JobObservation) []string {
+	var diagnostics []string
+	for _, job := range jobs {
+		if job.ReportStatus != contractreview.ExecutionReportValid || job.Report == nil {
+			continue
+		}
+		for _, finding := range job.Report.Findings {
+			switch finding.Attribution {
+			case contractreview.FindingAttributionIntroduced, contractreview.FindingAttributionWorsened:
+				diagnostics = append(diagnostics, fmt.Sprintf("reviewer %q: blocking finding %q (%s)", job.Reviewer, finding.ID, finding.Attribution))
+			}
+		}
+	}
+	return diagnostics
 }
 
 func packetsForRequest(request contractreview.ReviewRequestV2Document, packets []ReviewerPacket) ([]ReviewerPacket, error) {
