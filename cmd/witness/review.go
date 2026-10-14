@@ -102,6 +102,7 @@ func runReviewRun(args []string) error {
 	charterFreezePath := flags.String("charter-freeze", "", "alias for a frozen Charter JSON path")
 	amendmentsPath := flags.String("amendments", "", "optional owner amendments JSONL path")
 	sourceDir := flags.String("source-dir", ".", "reviewed source directory")
+	diffPath := flags.String("diff-file", "", "unified diff of the change under review; reviewers evaluate the diff and use the source tree as context; cannot be combined with -input-digest")
 	outDir := flags.String("out-dir", "", "directory for prepared packets and completion record")
 	inputDigest := flags.String("input-digest", "", "precomputed review input digest")
 	subjectHead := flags.String("subject-head", "", "source revision label; defaults to git HEAD")
@@ -145,6 +146,7 @@ func runReviewRun(args []string) error {
 		CharterPath:       selectedCharter,
 		AmendmentsPath:    *amendmentsPath,
 		SourceDir:         *sourceDir,
+		DiffPath:          *diffPath,
 		PacketDirectory:   filepath.Join(absoluteOutDir, "packets"),
 		Subject:           review.RequestSubject{Head: *subjectHead, Tree: *subjectTree, Branch: *subjectBranch},
 		ReviewInputDigest: *inputDigest,

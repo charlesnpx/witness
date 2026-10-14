@@ -18,6 +18,9 @@ witness review run \
 
 - `-model <model>` selects the Delegate backend model; blank after trimming uses the backend default.
 - `-effort <effort>` selects the Delegate backend effort; blank after trimming uses the backend default.
+- `-diff-file <path>` supplies the unified diff of the change under review; reviewers evaluate the diff and use the source tree as context.
+
+Reviewers run read-only without network and may not be able to run tests.
 
 The command prepares the frozen request, reviewer prompts, output schemas, and
 completion record. It submits independent defect and economy jobs through
