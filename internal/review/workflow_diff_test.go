@@ -18,7 +18,7 @@ func TestPrepareWithDiff(t *testing.T) {
 		inputDigest string
 	}{
 		{name: "derived digest"},
-		{name: "caller-owned digest", inputDigest: digest.RawBytes([]byte("caller-owned input"))},
+		{name: "whitespace digest", inputDigest: " \t\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			sourceDirectory := t.TempDir()
@@ -83,12 +83,9 @@ func TestPrepareWithDiff(t *testing.T) {
 			if prepared.DiffDigest != wantDiffDigest {
 				t.Fatalf("DiffDigest = %q, want %q", prepared.DiffDigest, wantDiffDigest)
 			}
-			wantInputDigest := test.inputDigest
-			if wantInputDigest == "" {
-				wantInputDigest, err = digest.SemanticJSON(map[string]any{"source_digest": sourceDigest, "diff_digest": wantDiffDigest})
-				if err != nil {
-					t.Fatal(err)
-				}
+			wantInputDigest, err := digest.SemanticJSON(map[string]any{"source_digest": sourceDigest, "diff_digest": wantDiffDigest})
+			if err != nil {
+				t.Fatal(err)
 			}
 			if prepared.Request.ReviewInputDigest != wantInputDigest || prepared.Request.ReviewInputDigest == sourceDigest {
 				t.Fatalf("ReviewInputDigest = %q, want %q distinct from source digest %q", prepared.Request.ReviewInputDigest, wantInputDigest, sourceDigest)
@@ -107,13 +104,46 @@ func TestPrepareWithDiff(t *testing.T) {
 					"evaluate the changes in that diff and use the rest of the source tree as context",
 					`attribution "introduced" or "worsened" applies to problems caused by the diff, "pre-existing" to problems in unchanged code`,
 					"evaluated_paths should list the files you inspected, starting with files the diff touches",
-					"tests and builds may not be runnable in this environment",
-					"if you cannot execute a witness, use constructed or argued strength and say what you did not run",
+					"Reviewers run read-only without network; tests and builds may not be runnable in this environment; if you cannot execute a witness, use constructed or argued strength and say what you did not run.",
 				} {
 					if !strings.Contains(string(prompt), instruction) {
 						t.Errorf("%s prompt is missing %q", packet.Reviewer, instruction)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestPrepareRejectsInputDigestWithDiff(t *testing.T) {
+	directory := t.TempDir()
+	diffPath := filepath.Join(directory, "input.diff")
+	if err := os.WriteFile(diffPath, []byte("--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-before\n+after\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputDigest := digest.RawBytes([]byte("caller-owned input"))
+	for _, test := range []struct {
+		name        string
+		diffPath    string
+		inputDigest string
+	}{
+		{name: "existing diff", diffPath: diffPath, inputDigest: inputDigest},
+		{name: "missing diff", diffPath: filepath.Join(directory, "missing.diff"), inputDigest: inputDigest},
+		{name: "padded digest", diffPath: diffPath, inputDigest: " \t" + inputDigest + "\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Prepare(PrepareOptions{
+				Config:            DefaultConfig(),
+				FrozenCharter:     testFrozenCharter(t),
+				SourceDir:         t.TempDir(),
+				DiffPath:          test.diffPath,
+				PacketDirectory:   filepath.Join(t.TempDir(), "packets"),
+				Subject:           contractreview.RequestSubject{Head: "test-head"},
+				ReviewInputDigest: test.inputDigest,
+			})
+			const wantError = "review input digest and diff file are mutually exclusive; the derived digest binds the diff"
+			if err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("Prepare error = %v, want %q before reading the diff", err, wantError)
 			}
 		})
 	}
@@ -144,9 +174,8 @@ func TestPrepareWithoutDiff(t *testing.T) {
 		if strings.Contains(string(prompt), "diff") {
 			t.Errorf("%s prompt mentions a diff when none was supplied", packet.Reviewer)
 		}
-		if !strings.Contains(string(prompt), "tests and builds may not be runnable in this environment") ||
-			!strings.Contains(string(prompt), "if you cannot execute a witness, use constructed or argued strength and say what you did not run") {
-			t.Errorf("%s prompt is missing witness execution guidance", packet.Reviewer)
+		if !strings.Contains(string(prompt), "Reviewers run read-only without network; tests and builds may not be runnable in this environment; if you cannot execute a witness, use constructed or argued strength and say what you did not run.") {
+			t.Errorf("%s prompt is missing read-only/no-network and witness execution guidance", packet.Reviewer)
 		}
 		if _, err := os.Stat(filepath.Join(filepath.Dir(packet.PromptPath), "change.diff")); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("change.diff stat error = %v, want no diff packet", err)

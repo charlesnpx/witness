@@ -33,9 +33,10 @@ type PrepareOptions struct {
 	DiffPath        string
 	PacketDirectory string
 	Subject         contractreview.RequestSubject
-	// ReviewInputDigest is caller-owned when supplied. Otherwise it is SourceDigest
-	// without a diff, or SemanticJSON({"source_digest": SourceDigest,
-	// "diff_digest": RawBytes(diff)}) when DiffPath is set.
+	// ReviewInputDigest is caller-owned when supplied and cannot be combined with
+	// DiffPath. Otherwise it is SourceDigest without a diff, or
+	// SemanticJSON({"source_digest": SourceDigest, "diff_digest": RawBytes(diff)})
+	// when DiffPath is set.
 	ReviewInputDigest string
 	ConsumerIdentity  contractreview.Identity
 }
@@ -62,6 +63,9 @@ type PreparedReview struct {
 // review input digest from the source and optional diff when the caller did
 // not provide one, and writes one prompt/schema packet per required reviewer.
 func Prepare(options PrepareOptions) (PreparedReview, error) {
+	if options.DiffPath != "" && strings.TrimSpace(options.ReviewInputDigest) != "" {
+		return PreparedReview{}, errors.New("review input digest and diff file are mutually exclusive; the derived digest binds the diff")
+	}
 	if err := ValidateConfig(options.Config); err != nil {
 		return PreparedReview{}, fmt.Errorf("validate review configuration: %w", err)
 	}
