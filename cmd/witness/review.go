@@ -112,6 +112,8 @@ func runReviewRun(args []string) error {
 	delegateExecutable := flags.String("delegate", "", "Delegate executable")
 	agentbusExecutable := flags.String("agentbus", "", "Agentbus executable")
 	backend := flags.String("backend", "", "Delegate backend; defaults to codex")
+	model := flags.String("model", "", "Delegate backend model; blank uses the backend default")
+	effort := flags.String("effort", "", "Delegate backend effort; blank uses the backend default")
 	pollInterval := flags.Duration("poll-interval", internalreview.DefaultPollInterval, "interval between Agentbus status observations")
 	transcriptPageSize := flags.Int("transcript-page-size", internalreview.DefaultTranscriptPageSize, "forward transcript page size")
 	if helpRequested, err := parseFlags(flags, args); helpRequested || err != nil {
@@ -151,6 +153,8 @@ func runReviewRun(args []string) error {
 		DelegateExecutable: *delegateExecutable,
 		AgentbusExecutable: *agentbusExecutable,
 		Backend:            *backend,
+		Model:              *model,
+		Effort:             *effort,
 		PollInterval:       *pollInterval,
 		TranscriptPageSize: *transcriptPageSize,
 	})

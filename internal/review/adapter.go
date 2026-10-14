@@ -49,6 +49,10 @@ type SimpleAdapterOptions struct {
 	DelegateExecutable string
 	AgentbusExecutable string
 	Backend            string
+	// Model selects the Delegate backend model; blank after trimming uses its default.
+	Model string
+	// Effort selects the Delegate backend effort; blank after trimming uses its default.
+	Effort             string
 	PollInterval       time.Duration
 	TranscriptPageSize int
 }
@@ -363,6 +367,12 @@ func (adapter SimpleAdapter) submit(ctx context.Context, workingDirectory string
 	}
 	if packet.SchemaPath != "" {
 		args = append(args, "--schema-file", packet.SchemaPath)
+	}
+	if model := strings.TrimSpace(adapter.options.Model); model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort := strings.TrimSpace(adapter.options.Effort); effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	output, exitCode, err := runProcess(ctx, adapter.options.DelegateExecutable, args...)
 	if err != nil {

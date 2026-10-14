@@ -38,6 +38,7 @@ func TestReviewRunFailedToRunExitAndRejectsSymlinkedRequest(t *testing.T) {
 	}
 	delegatePath := filepath.Join(directory, "delegate")
 	writeExecutableTestFile(t, delegatePath, `#!/bin/sh
+printf '%s\000' "$@" > "$0.args"
 case "$*" in
   *defect*) printf '{"jobId":"job-defect"}\n' ;;
   *economy*) printf '{"jobId":"job-economy"}\n' ;;
@@ -67,8 +68,12 @@ exit 4
 		"-charter", charterPath,
 		"-source-dir", sourceDirectory,
 		"-out-dir", filepath.Join(directory, "run"),
+		"-config", filepath.Join(directory, "review-config.json"),
+		"-subject-head", "test-head",
 		"-delegate", delegatePath,
 		"-agentbus", agentbusPath,
+		"-model", "gpt-6-astra",
+		"-effort", "high",
 		"-poll-interval", "1ms",
 		"-transcript-page-size", "2",
 	}
@@ -95,6 +100,13 @@ exit 4
 	}
 	if result["ok"] != false || result["verdict"] != "failed_to_run" {
 		t.Fatalf("review run result = %#v, want ok false and failed_to_run", result)
+	}
+	delegateArgs, err := os.ReadFile(delegatePath + ".args")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(delegateArgs), "\x00--model\x00gpt-6-astra\x00--effort\x00high\x00") {
+		t.Fatalf("delegate argv = %q, want model gpt-6-astra and effort high", delegateArgs)
 	}
 
 	symlinkOutputDirectory := t.TempDir()
