@@ -240,7 +240,7 @@ func TestReviewerSchemaWithoutCharterGoals(t *testing.T) {
 	assertReviewerAdapterValidation(t, request, frozen, report.Reviewer, instance, true)
 	for _, path := range []string{"/findings/0/charter_goal_ids", "/evaluation/evaluated_goal_ids"} {
 		invented := reviewerTestJSONObject(t, marshalReviewerTestJSON(t, report))
-		changeReviewerTestReport(t, invented, []reviewerReportChange{{path: path, value: []string{"invented"}}})
+		changeReviewerTestReport(t, invented, []reviewerReportChange{{path: path, value: []any{"invented"}}})
 		if err := schema.Validate(invented); err == nil {
 			t.Errorf("schema accepted an undeclared goal at %s for a Charter without goals", path)
 		}
