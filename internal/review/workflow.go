@@ -445,6 +445,7 @@ func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen chart
 	fmt.Fprintf(&builder, "You are the independent %s reviewer in a Witness review.\n", reviewer)
 	fmt.Fprintf(&builder, "Read the frozen source at %s. Do not modify it.\n", sourceDirectory)
 	fmt.Fprintf(&builder, "Follow the recipe instructions and emit exactly one review-report-v2 JSON object, with no prose outside JSON. The reviewer field must be %q, source_identity must be %s, and consumer_identity must be %s. A valid empty findings array is allowed, but evaluation must truthfully cover the paths and goals you inspected.\n\n", reviewer, sourceIdentityBytes, consumerIdentityBytes)
+	builder.WriteString("Each finding requires id, kind, title, claimed_severity, attribution, charter_goal_ids, and witness; optional fields are annotation, remedy, and economy_equivalence. Witness requires kind, strength, and content; executable is required exactly when strength is executable. Severity caps: argued permits medium|low; constructed permits high|medium|low; executable permits critical|high|medium|low. Defect findings require a defect witness. Economy findings require an equivalence witness and economy_equivalence; a remove remedy also requires economy_equivalence. The schema file is authoritative: use no fields outside the schema.\n\n")
 	builder.WriteString("REQUEST:\n")
 	builder.Write(requestBytes)
 	builder.WriteString("\n\nFROZEN CHARTER:\n")
@@ -453,50 +454,6 @@ func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen chart
 	builder.Write(recipeBytes)
 	builder.WriteString("\n")
 	return builder.String(), nil
-}
-
-func reviewerSchema(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, reviewer string) ([]byte, error) {
-	sourceIdentity := sourceIdentityForRequest(request)
-	goalIDs := make([]string, len(frozen.Charter.Goals))
-	for index, goal := range frozen.Charter.Goals {
-		goalIDs[index] = goal.ID
-	}
-	properties := map[string]any{
-		"schema_version":      map[string]any{"const": contractreview.ReviewReportV2},
-		"request_digest":      map[string]any{"const": mustRequestDigest(request)},
-		"recipe_digest":       map[string]any{"const": request.RecipeDigest},
-		"reviewer":            map[string]any{"const": reviewer},
-		"charter_hash":        map[string]any{"const": frozen.CharterHash},
-		"review_input_digest": map[string]any{"const": request.ReviewInputDigest},
-		"source_identity":     map[string]any{"const": sourceIdentity},
-		"consumer_identity":   map[string]any{"const": request.ConsumerIdentity},
-		"findings":            map[string]any{"type": "array"},
-		"evaluation":          map[string]any{"type": "object"},
-	}
-	if len(goalIDs) > 0 {
-		properties["evaluation"] = map[string]any{
-			"type":     "object",
-			"required": []string{"evaluated_paths", "evaluated_goal_ids"},
-			"properties": map[string]any{
-				"evaluated_paths":    map[string]any{"type": "array", "minItems": 1},
-				"evaluated_goal_ids": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"enum": goalIDs}},
-			},
-		}
-	} else {
-		properties["evaluation"] = map[string]any{
-			"type":     "object",
-			"required": []string{"evaluated_paths", "evaluated_goal_ids"},
-			"properties": map[string]any{
-				"evaluated_paths":    map[string]any{"type": "array", "minItems": 1},
-				"evaluated_goal_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			},
-		}
-	}
-	return canonjson.Marshal(map[string]any{
-		"type":       "object",
-		"required":   []string{"schema_version", "request_digest", "recipe_digest", "reviewer", "charter_hash", "review_input_digest", "source_identity", "consumer_identity", "findings", "evaluation"},
-		"properties": properties,
-	})
 }
 
 func mustRequestDigest(request contractreview.ReviewRequestV2Document) string {
