@@ -16,6 +16,9 @@ witness review run \
   -out-dir /path/to/review-run
 ```
 
+- `-model <model>` selects the Delegate backend model; blank after trimming uses the backend default.
+- `-effort <effort>` selects the Delegate backend effort; blank after trimming uses the backend default.
+
 The command prepares the frozen request, reviewer prompts, output schemas, and
 completion record. It submits independent defect and economy jobs through
 Delegate and observes them through Agentbus. The absent configuration file is

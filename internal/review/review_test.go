@@ -52,6 +52,59 @@ func TestInvalidConfigNamesFieldInsteadOfFallingBack(t *testing.T) {
 	}
 }
 
+func TestSimpleAdapterSubmitModelAndEffort(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		model       string
+		effort      string
+		withSchema  bool
+		wantOptions []string
+	}{
+		{name: "defaults"},
+		{name: "defaults with schema", withSchema: true},
+		{name: "whitespace only", model: " \t\n", effort: "\r "},
+		{name: "model only", model: "gpt-6-astra", wantOptions: []string{"--model", "gpt-6-astra"}},
+		{name: "effort only", effort: "high", wantOptions: []string{"--effort", "high"}},
+		{name: "model and effort with schema", model: "gpt-6-astra", effort: "high", withSchema: true, wantOptions: []string{"--model", "gpt-6-astra", "--effort", "high"}},
+		{name: "trimmed model and effort", model: " \tgpt-6-astra\n", effort: "\r high ", wantOptions: []string{"--model", "gpt-6-astra", "--effort", "high"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			delegate, _ := fakeReviewCommands(t, nil, JobExitCompleted)
+			workingDirectory := t.TempDir()
+			packet := ReviewerPacket{
+				Reviewer:   contractreview.RoleDefect,
+				PromptPath: filepath.Join(workingDirectory, "defect prompt.txt"),
+			}
+			want := []string{"task", "--backend", "codex", "--cwd", workingDirectory, "--prompt-file", packet.PromptPath}
+			if test.withSchema {
+				packet.SchemaPath = filepath.Join(workingDirectory, "defect schema.json")
+				want = append(want, "--schema-file", packet.SchemaPath)
+			}
+			want = append(want, test.wantOptions...)
+			adapter := NewSimpleAdapter(SimpleAdapterOptions{
+				DelegateExecutable: delegate,
+				Model:              test.model,
+				Effort:             test.effort,
+			})
+			jobID, err := adapter.submit(context.Background(), workingDirectory, packet)
+			if err != nil {
+				t.Fatalf("adapter submit: %v", err)
+			}
+			if jobID != "job-defect" {
+				t.Fatalf("job ID = %q, want job-defect", jobID)
+			}
+			data, err := os.ReadFile(delegate + ".args")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("delegate argv = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestCompletedNoncompliantExitIsObservedAsCompleted(t *testing.T) {
 	request, frozen, packets := testRunInputs(t)
 	resultPaths := testReports(t, request, frozen)
@@ -699,6 +752,7 @@ func fakeReviewCommands(t *testing.T, resultPaths map[string]string, exitCode in
 	}
 	setExecutable(t, delegate, strings.Join([]string{
 		"#!/bin/sh",
+		"printf '%s\\000' \"$@\" > \"$0.args\"",
 		"case \"$*\" in",
 		"  *defect*) printf '{\"jobId\":\"job-defect\"}\\n' ;;",
 		"  *economy*) printf '{\"jobId\":\"job-economy\"}\\n' ;;",
