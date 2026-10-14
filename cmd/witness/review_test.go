@@ -36,6 +36,11 @@ func TestReviewRunFailedToRunExitAndRejectsSymlinkedRequest(t *testing.T) {
 	if err := route([]string{"charter", "init", "-out", charterPath}); err != nil {
 		t.Fatalf("charter init: %v", err)
 	}
+	diffPath := filepath.Join(directory, "input.diff")
+	diffBytes := []byte("--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-before\n+after\n")
+	if err := os.WriteFile(diffPath, diffBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	delegatePath := filepath.Join(directory, "delegate")
 	writeExecutableTestFile(t, delegatePath, `#!/bin/sh
 printf '%s\000' "$@" > "$0.args"
@@ -68,6 +73,7 @@ exit 4
 		"-charter", charterPath,
 		"-source-dir", sourceDirectory,
 		"-out-dir", filepath.Join(directory, "run"),
+		"-diff-file", diffPath,
 		"-config", filepath.Join(directory, "review-config.json"),
 		"-subject-head", "test-head",
 		"-delegate", delegatePath,
@@ -107,6 +113,10 @@ exit 4
 	}
 	if !strings.HasSuffix(string(delegateArgs), "\x00--model\x00gpt-6-astra\x00--effort\x00high\x00") {
 		t.Fatalf("delegate argv = %q, want model gpt-6-astra and effort high", delegateArgs)
+	}
+	copiedDiff, err := os.ReadFile(filepath.Join(directory, "run", "packets", "change.diff"))
+	if err != nil || string(copiedDiff) != string(diffBytes) {
+		t.Fatalf("packet diff = %q (read error: %v), want %q", copiedDiff, err, diffBytes)
 	}
 
 	symlinkOutputDirectory := t.TempDir()

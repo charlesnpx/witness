@@ -23,13 +23,19 @@ import (
 // ordinary review. The caller supplies a frozen Charter or CharterPath; it
 // does not assemble a request document by hand.
 type PrepareOptions struct {
-	Config            Config
-	FrozenCharter     *charter.FrozenCharter
-	CharterPath       string
-	AmendmentsPath    string
-	SourceDir         string
-	PacketDirectory   string
-	Subject           contractreview.RequestSubject
+	Config         Config
+	FrozenCharter  *charter.FrozenCharter
+	CharterPath    string
+	AmendmentsPath string
+	SourceDir      string
+	// DiffPath optionally names a unified diff of the change under review. Prepare
+	// copies it into PacketDirectory as change.diff for reviewers to inspect.
+	DiffPath        string
+	PacketDirectory string
+	Subject         contractreview.RequestSubject
+	// ReviewInputDigest is caller-owned when supplied. Otherwise it is SourceDigest
+	// without a diff, or SemanticJSON({"source_digest": SourceDigest,
+	// "diff_digest": RawBytes(diff)}) when DiffPath is set.
 	ReviewInputDigest string
 	ConsumerIdentity  contractreview.Identity
 }
@@ -46,11 +52,15 @@ type PreparedReview struct {
 	// and refuses a satisfied completion if the digest moved.
 	SourceDirectory string
 	SourceDigest    string
+	// DiffPath names the private packet copy, and DiffDigest hashes its raw bytes.
+	// Both are empty when no diff was supplied.
+	DiffPath   string
+	DiffDigest string
 }
 
 // Prepare freezes/loads the Charter, captures the source digest, derives a
-// source input digest when the caller did not provide one, and writes one
-// prompt/schema packet per required reviewer.
+// review input digest from the source and optional diff when the caller did
+// not provide one, and writes one prompt/schema packet per required reviewer.
 func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err := ValidateConfig(options.Config); err != nil {
 		return PreparedReview{}, fmt.Errorf("validate review configuration: %w", err)
@@ -92,9 +102,38 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err != nil {
 		return PreparedReview{}, fmt.Errorf("derive review source digest: %w", err)
 	}
+	var diffBytes []byte
+	var diffDigest string
+	if options.DiffPath != "" {
+		diffPath, err := resolveReviewPath(options.DiffPath)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("resolve review diff file %q: %w", options.DiffPath, err)
+		}
+		info, err := os.Stat(diffPath)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("review diff file %q: %w", diffPath, err)
+		}
+		if !info.Mode().IsRegular() {
+			return PreparedReview{}, fmt.Errorf("review diff file %q is not a regular file", diffPath)
+		}
+		diffBytes, err = os.ReadFile(diffPath)
+		if err != nil {
+			return PreparedReview{}, fmt.Errorf("read review diff file %q: %w", diffPath, err)
+		}
+		if len(diffBytes) == 0 {
+			return PreparedReview{}, fmt.Errorf("review diff file %q is empty", diffPath)
+		}
+		diffDigest = digest.RawBytes(diffBytes)
+	}
 	inputDigest := options.ReviewInputDigest
 	if strings.TrimSpace(inputDigest) == "" {
 		inputDigest = sourceDigest
+		if diffDigest != "" {
+			inputDigest, err = digest.SemanticJSON(map[string]any{"source_digest": sourceDigest, "diff_digest": diffDigest})
+			if err != nil {
+				return PreparedReview{}, fmt.Errorf("derive review input digest: %w", err)
+			}
+		}
 	}
 	if !digest.WellFormed(inputDigest) {
 		return PreparedReview{}, fmt.Errorf("review input digest %q is not a relay-root-digests-v1 sha256 digest", inputDigest)
@@ -138,11 +177,18 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 	if err := os.MkdirAll(packetDirectory, 0o700); err != nil {
 		return PreparedReview{}, fmt.Errorf("create review packet directory %q: %w", packetDirectory, err)
 	}
+	var diffPath string
+	if diffDigest != "" {
+		diffPath = filepath.Join(packetDirectory, "change.diff")
+		if err := writePrivateFile(diffPath, diffBytes); err != nil {
+			return PreparedReview{}, fmt.Errorf("write review diff file %q: %w", diffPath, err)
+		}
+	}
 	packets := make([]ReviewerPacket, 0, len(recipe.RequiredOutputs))
 	for _, reviewer := range recipe.RequiredOutputs {
 		promptPath := filepath.Join(packetDirectory, reviewer+".prompt.txt")
 		schemaPath := filepath.Join(packetDirectory, reviewer+".schema.json")
-		prompt, err := reviewerPrompt(request, frozen, recipe, reviewer, sourceDirectory)
+		prompt, err := reviewerPrompt(request, frozen, recipe, reviewer, sourceDirectory, diffPath)
 		if err != nil {
 			return PreparedReview{}, fmt.Errorf("prepare reviewer %q prompt: %w", reviewer, err)
 		}
@@ -165,6 +211,8 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 		Packets:         packets,
 		SourceDirectory: sourceDirectory,
 		SourceDigest:    sourceDigest,
+		DiffPath:        diffPath,
+		DiffDigest:      diffDigest,
 	}, nil
 }
 
@@ -420,7 +468,7 @@ func sourceIdentityForRequest(request contractreview.ReviewRequestV2Document) co
 	return contractreview.Identity{Kind: "git", ID: request.Subject.Head}
 }
 
-func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, recipe contractreview.ReviewRecipe, reviewer string, sourceDirectory string) (string, error) {
+func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, recipe contractreview.ReviewRecipe, reviewer string, sourceDirectory string, diffPath string) (string, error) {
 	requestBytes, err := canonjson.Marshal(request)
 	if err != nil {
 		return "", err
@@ -444,6 +492,10 @@ func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen chart
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "You are the independent %s reviewer in a Witness review.\n", reviewer)
 	fmt.Fprintf(&builder, "Read the frozen source at %s. Do not modify it.\n", sourceDirectory)
+	if diffPath != "" {
+		fmt.Fprintf(&builder, "The change under review is the unified diff at %s; evaluate the changes in that diff and use the rest of the source tree as context; attribution \"introduced\" or \"worsened\" applies to problems caused by the diff, \"pre-existing\" to problems in unchanged code; evaluated_paths should list the files you inspected, starting with files the diff touches.\n", diffPath)
+	}
+	builder.WriteString("Reviewers run read-only without network; tests and builds may not be runnable in this environment; if you cannot execute a witness, use constructed or argued strength and say what you did not run.\n")
 	fmt.Fprintf(&builder, "Follow the recipe instructions and emit exactly one review-report-v2 JSON object, with no prose outside JSON. The reviewer field must be %q, source_identity must be %s, and consumer_identity must be %s. A valid empty findings array is allowed, but evaluation must truthfully cover the paths and goals you inspected.\n\n", reviewer, sourceIdentityBytes, consumerIdentityBytes)
 	builder.WriteString("Each finding requires id, kind, title, claimed_severity, attribution, charter_goal_ids, and witness; optional fields are annotation, remedy, and economy_equivalence. Witness requires kind, strength, and content; executable is required exactly when strength is executable. Severity caps: argued permits medium|low; constructed permits high|medium|low; executable permits critical|high|medium|low. Defect findings require a defect witness. Economy findings require an equivalence witness and economy_equivalence; a remove remedy also requires economy_equivalence. The schema file is authoritative: use no fields outside the schema.\n\n")
 	builder.WriteString("REQUEST:\n")
