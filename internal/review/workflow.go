@@ -149,7 +149,7 @@ func Prepare(options PrepareOptions) (PreparedReview, error) {
 		if err := writePrivateFile(promptPath, []byte(prompt)); err != nil {
 			return PreparedReview{}, fmt.Errorf("write reviewer %q prompt: %w", reviewer, err)
 		}
-		schema, err := reviewerSchema(request, frozen, reviewer)
+		schema, err := contractreview.ReviewReportV2Schema(request, frozen, reviewer)
 		if err != nil {
 			return PreparedReview{}, fmt.Errorf("prepare reviewer %q schema: %w", reviewer, err)
 		}
@@ -417,7 +417,7 @@ func sourceHead(sourceDirectory string, inputDigest string) string {
 }
 
 func sourceIdentityForRequest(request contractreview.ReviewRequestV2Document) contractreview.Identity {
-	return contractreview.Identity{Kind: "git", ID: request.Subject.Head}
+	return contractreview.ReviewReportV2SourceIdentity(request)
 }
 
 func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, recipe contractreview.ReviewRecipe, reviewer string, sourceDirectory string) (string, error) {
@@ -430,6 +430,10 @@ func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen chart
 		return "", err
 	}
 	recipeBytes, err := canonjson.Marshal(recipe)
+	if err != nil {
+		return "", err
+	}
+	reportExample, err := contractreview.ReviewReportV2PromptExample(request, frozen, reviewer)
 	if err != nil {
 		return "", err
 	}
@@ -451,60 +455,10 @@ func reviewerPrompt(request contractreview.ReviewRequestV2Document, frozen chart
 	builder.Write(charterBytes)
 	builder.WriteString("\n\nFROZEN RECIPE:\n")
 	builder.Write(recipeBytes)
+	builder.WriteString("\n\nREPORT EXAMPLE (illustrative placeholders only; replace them with findings, evidence, paths, and goals you actually established or evaluated; this example makes no claim that a command was run):\n")
+	builder.Write(reportExample)
 	builder.WriteString("\n")
 	return builder.String(), nil
-}
-
-func reviewerSchema(request contractreview.ReviewRequestV2Document, frozen charter.FrozenCharter, reviewer string) ([]byte, error) {
-	sourceIdentity := sourceIdentityForRequest(request)
-	goalIDs := make([]string, len(frozen.Charter.Goals))
-	for index, goal := range frozen.Charter.Goals {
-		goalIDs[index] = goal.ID
-	}
-	properties := map[string]any{
-		"schema_version":      map[string]any{"const": contractreview.ReviewReportV2},
-		"request_digest":      map[string]any{"const": mustRequestDigest(request)},
-		"recipe_digest":       map[string]any{"const": request.RecipeDigest},
-		"reviewer":            map[string]any{"const": reviewer},
-		"charter_hash":        map[string]any{"const": frozen.CharterHash},
-		"review_input_digest": map[string]any{"const": request.ReviewInputDigest},
-		"source_identity":     map[string]any{"const": sourceIdentity},
-		"consumer_identity":   map[string]any{"const": request.ConsumerIdentity},
-		"findings":            map[string]any{"type": "array"},
-		"evaluation":          map[string]any{"type": "object"},
-	}
-	if len(goalIDs) > 0 {
-		properties["evaluation"] = map[string]any{
-			"type":     "object",
-			"required": []string{"evaluated_paths", "evaluated_goal_ids"},
-			"properties": map[string]any{
-				"evaluated_paths":    map[string]any{"type": "array", "minItems": 1},
-				"evaluated_goal_ids": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"enum": goalIDs}},
-			},
-		}
-	} else {
-		properties["evaluation"] = map[string]any{
-			"type":     "object",
-			"required": []string{"evaluated_paths", "evaluated_goal_ids"},
-			"properties": map[string]any{
-				"evaluated_paths":    map[string]any{"type": "array", "minItems": 1},
-				"evaluated_goal_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			},
-		}
-	}
-	return canonjson.Marshal(map[string]any{
-		"type":       "object",
-		"required":   []string{"schema_version", "request_digest", "recipe_digest", "reviewer", "charter_hash", "review_input_digest", "source_identity", "consumer_identity", "findings", "evaluation"},
-		"properties": properties,
-	})
-}
-
-func mustRequestDigest(request contractreview.ReviewRequestV2Document) string {
-	digestValue, err := contractreview.ReviewRequestV2Digest(request)
-	if err != nil {
-		return ""
-	}
-	return digestValue
 }
 
 func writeReviewOutput(path string, data []byte, description string) error {

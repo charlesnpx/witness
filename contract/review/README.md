@@ -32,6 +32,15 @@ and required reviewer identifier. It retains the v1 report surfaces and adds
 finding kind/attribution plus economy equivalence evidence: the behavior
 preserved by a removal and the declared Charter goals it serves.
 
+`ReviewReportV2Schema` is the shared generation-schema producer for this
+boundary. It pins the request digest, recipe digest, reviewer, Charter hash,
+input digest, and source and consumer identities. It extends the v1 schema's
+finding, witness, evaluation, remedy, and question shapes. Rules that depend
+on more than one field, such as severity caps and when economy equivalence is
+required, remain enforced by `ValidateReviewReportV2`.
+`ReviewReportV2PromptExample` provides a matching complete JSON example with
+clearly marked evidence and coverage placeholders.
+
 `review-completion-v1` is a host-facing completion record, not re-validatable
 proof. Its `HostExecutionEvidence` has private state and can only be initialized
 from `ObservedReviewExecution` through `NewHostExecutionEvidence`; JSON decoding
