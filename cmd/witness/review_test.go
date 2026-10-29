@@ -38,6 +38,14 @@ func TestReviewRunFailedToRunExitAndRejectsSymlinkedRequest(t *testing.T) {
 	}
 	delegatePath := filepath.Join(directory, "delegate")
 	writeExecutableTestFile(t, delegatePath, `#!/bin/sh
+fixed=0
+for arg in "$@"; do
+  if [ "$arg" = "--no-steer" ]; then fixed=1; fi
+done
+if [ "$fixed" -ne 1 ]; then
+  printf 'review submission omitted --no-steer\n' >&2
+  exit 9
+fi
 case "$*" in
   *defect*) printf '{"jobId":"job-defect"}\n' ;;
   *economy*) printf '{"jobId":"job-economy"}\n' ;;
