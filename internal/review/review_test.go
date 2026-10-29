@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charlesnpx/witness/contract/canonjson"
 	"github.com/charlesnpx/witness/contract/charter"
 	"github.com/charlesnpx/witness/contract/digest"
 	contractreview "github.com/charlesnpx/witness/contract/review"
@@ -345,6 +347,13 @@ func TestPreparePinsReviewerPacketIdentities(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s schema: %v", packet.Reviewer, err)
 		}
+		wantSchema, err := contractreview.ReviewReportV2Schema(prepared.Request, prepared.FrozenCharter, packet.Reviewer)
+		if err != nil {
+			t.Fatalf("produce %s shared schema: %v", packet.Reviewer, err)
+		}
+		if !bytes.Equal(schemaData, wantSchema) {
+			t.Fatalf("%s packet schema differs from shared v2 schema producer", packet.Reviewer)
+		}
 		var schemaObject map[string]any
 		if err := json.Unmarshal(schemaData, &schemaObject); err != nil {
 			t.Fatalf("decode %s schema: %v", packet.Reviewer, err)
@@ -382,10 +391,58 @@ func TestPreparePinsReviewerPacketIdentities(t *testing.T) {
 		if !strings.Contains(string(promptData), wantSentence) {
 			t.Fatalf("%s prompt does not state pinned identities: %q", packet.Reviewer, wantSentence)
 		}
+		promptText := string(promptData)
+		for _, section := range []struct {
+			name string
+			data []byte
+		}{
+			{name: "REQUEST", data: mustCanonicalJSON(t, prepared.Request)},
+			{name: "FROZEN CHARTER", data: mustCanonicalJSON(t, prepared.FrozenCharter)},
+			{name: "FROZEN RECIPE", data: mustCanonicalJSON(t, prepared.Recipe)},
+		} {
+			wantSection := append(append([]byte(section.name+":\n"), section.data...), '\n')
+			if !bytes.Contains(promptData, wantSection) {
+				t.Fatalf("%s prompt changed or omitted the %s bytes", packet.Reviewer, section.name)
+			}
+		}
+		marker := "REPORT EXAMPLE ("
+		markerIndex := strings.Index(promptText, marker)
+		if markerIndex < 0 {
+			t.Fatalf("%s prompt omits the v2 report example", packet.Reviewer)
+		}
+		lineEnd := strings.IndexByte(promptText[markerIndex:], '\n')
+		if lineEnd < 0 {
+			t.Fatalf("%s prompt report example has no body", packet.Reviewer)
+		}
+		promptExample := []byte(strings.TrimSpace(promptText[markerIndex+lineEnd+1:]))
+		wantExample, err := contractreview.ReviewReportV2PromptExample(prepared.Request, prepared.FrozenCharter, packet.Reviewer)
+		if err != nil {
+			t.Fatalf("produce %s shared prompt example: %v", packet.Reviewer, err)
+		}
+		if !bytes.Equal(promptExample, wantExample) {
+			t.Fatalf("%s prompt example differs from shared v2 example producer", packet.Reviewer)
+		}
+		if !strings.Contains(promptText, "makes no claim that a command was run") {
+			t.Fatalf("%s prompt example does not clarify that it is not executed evidence", packet.Reviewer)
+		}
+		var example contractreview.ReviewReportV2Document
+		if err := json.Unmarshal(promptExample, &example); err != nil {
+			t.Fatalf("decode %s prompt example as v2 report: %v", packet.Reviewer, err)
+		}
+		if example.SchemaVersion != contractreview.ReviewReportV2 || example.Reviewer != packet.Reviewer || example.Evaluation == nil || len(example.Findings) != 1 || example.Findings[0].Kind == "" || example.Findings[0].Attribution == "" {
+			t.Fatalf("%s prompt example omits required v2 report fields: %#v", packet.Reviewer, example)
+		}
+		if err := contractreview.RequireValidReviewReportV2(example, prepared.Request, prepared.FrozenCharter); err != nil {
+			t.Fatalf("%s prompt example is not a valid illustrative report: %v", packet.Reviewer, err)
+		}
 
+		requestDigest, err := contractreview.ReviewRequestV2Digest(prepared.Request)
+		if err != nil {
+			t.Fatal(err)
+		}
 		report := contractreview.ReviewReportV2Document{
 			SchemaVersion:     contractreview.ReviewReportV2,
-			RequestDigest:     mustRequestDigest(prepared.Request),
+			RequestDigest:     requestDigest,
 			RecipeDigest:      prepared.Request.RecipeDigest,
 			Reviewer:          packet.Reviewer,
 			CharterHash:       prepared.FrozenCharter.CharterHash,
@@ -752,4 +809,13 @@ func setExecutable(t *testing.T, path string, contents string) {
 	if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func mustCanonicalJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := canonjson.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
