@@ -29,6 +29,8 @@ versioned; compatibility changes are made explicitly rather than inferred.
 
 - Go 1.23 or newer, using a currently supported security patch release.
 - Git for freezing repository snapshots.
+- Delegate 0.14.0 or newer for `witness review run`; the simple adapter submits
+  fixed reviewer jobs with `--no-steer`.
 - [convo-relay](https://github.com/charlesnpx/convo-relay) for relay-backed
   verification. Witness can record an explicit degraded, relay-absent pass
   when convo-relay is unavailable.
