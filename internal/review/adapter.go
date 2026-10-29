@@ -357,6 +357,7 @@ func packetsForRequest(request contractreview.ReviewRequestV2Document, packets [
 func (adapter SimpleAdapter) submit(ctx context.Context, workingDirectory string, packet ReviewerPacket) (string, error) {
 	args := []string{
 		"task",
+		"--no-steer",
 		"--backend", adapter.options.Backend,
 		"--cwd", workingDirectory,
 		"--prompt-file", packet.PromptPath,
